@@ -1,0 +1,26 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  ipa:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: python3 build-userscripts.py
+      - run: xcodegen generate
+        working-directory: ios
+      - name: Build
+        working-directory: ios
+        run: |
+          xcodebuild -project Shell.xcodeproj -target Shell -configuration Release -sdk iphoneos \
+            SYMROOT="$PWD/build" CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 \
+            || { grep -E "error:" build.log | head -60; tail -30 build.log; exit 1; }
+          mkdir Payload && cp -R build/Release-iphoneos/Shell.app Payload/ && zip -qry app.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: ios/app.ipa
