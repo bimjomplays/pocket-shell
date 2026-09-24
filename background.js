@@ -1,13 +1,19 @@
 // Giphy access for the content scripts; everything comes back as data: URLs, because Snapchat's CSP only
 // allows its own image hosts and reports blocked loads to Snapchat (see gifs-show.js).
 // Only talks to Giphy; nothing goes to Snapchat.
-//   { giphy: id }              -> { dataUrl }  animated webp, for showing received GIFs
-//   { giphyVideo: id }         -> { dataUrl }  mp4 of the same GIF, preferred on iPhone
-//   { giphyPreview: id }       -> { dataUrl }  small animated webp, for the picker grid
-//   { giphyFile: id }          -> { dataUrl }  real .gif file, for sending
-//   { giphySearch: q, offset } -> { results: [{ id, w, h }], next } | { needKey: true } | { error }
-//   { giphyKey: "..." }        -> { ok }       saves the user's Giphy API key
+//   { giphy: id }                  -> { dataUrl }  animated webp, for showing received GIFs
+//   { giphyVideo: id }             -> { dataUrl }  mp4 of the same GIF, preferred on iPhone
+//   { giphyPreview: id }           -> { dataUrl }  small animated webp, for the picker grid
+//   { giphyFile: id }              -> { dataUrl }  real .gif file, for sending
+//   { giphyImage: url }            -> { dataUrl }  an exact rendition URL from a Giphy API response (category
+//                                                   tile stills: those come with their own fixed_width_still
+//                                                   URL, no filename to guess)
+//   { giphySearch: q, offset,
+//     rating }                     -> { results: [{ id, w, h }], next, total } | { needKey: true } | { error, retryable }
+//   { giphyCategories: true }      -> { results: [{ name, id, w, h, stillUrl }] } | { needKey: true } | { error, retryable }
+//   { giphyKey: "..." }            -> { ok }       saves the user's Giphy API key
 const ID = /^[A-Za-z0-9]{1,64}$/;
+const RATING = /^(g|pg|pg-13|r)$/;
 const cache = new Map(); // url -> Promise<dataUrl>, kept small
 
 function toDataUrl(bytes, type) {
@@ -31,21 +37,57 @@ function load(url) {
 
 const media = (id, file) => `https://media.giphy.com/media/${id}/${file}`;
 
-async function search(q, offset) {
+// Giphy calls (search/trending/categories) share the same failure shapes: no key, a bad key, a rate limit, a
+// dropped connection (airplane mode / weak signal), or anything else Giphy returns. One place decides how each
+// looks to the picker, so every caller gets the same friendly, retryable message.
+async function giphyGet(url) {
+  let r;
+  try {
+    r = await fetch(url, { credentials: "omit" });
+  } catch (e) {
+    return { error: "No connection to Giphy", retryable: true };
+  }
+  if (r.status === 401 || r.status === 403) return { needKey: true, error: "Giphy rejected that API key" };
+  if (r.status === 429) return { error: "Giphy is rate-limiting this key right now", retryable: true };
+  if (!r.ok) return { error: `Giphy error ${r.status}`, retryable: true };
+  try {
+    return { json: await r.json() };
+  } catch (e) {
+    return { error: "Giphy sent back something unreadable", retryable: true };
+  }
+}
+
+async function search(q, offset, rating) {
   const { giphyKey } = await chrome.storage.local.get("giphyKey");
   if (!giphyKey) return { needKey: true };
   const params = new URLSearchParams({ api_key: giphyKey, limit: "24", offset: String(offset || 0) });
   if (q) params.set("q", q);
-  const r = await fetch(`https://api.giphy.com/v1/gifs/${q ? "search" : "trending"}?${params}`, { credentials: "omit" });
-  if (r.status === 401 || r.status === 403) return { needKey: true, error: "Giphy rejected that API key" };
-  if (!r.ok) return { error: `Giphy error ${r.status}` };
-  const j = await r.json();
-  const results = (j.data || []).filter((g) => ID.test(g.id)).map((g) => {
+  if (RATING.test(rating || "")) params.set("rating", rating);
+  const r = await giphyGet(`https://api.giphy.com/v1/gifs/${q ? "search" : "trending"}?${params}`);
+  if (!r.json) return r;
+  const results = (r.json.data || []).filter((g) => ID.test(g.id)).map((g) => {
     const f = (g.images && g.images.fixed_width) || {};
     return { id: g.id, w: +f.width || 200, h: +f.height || 200 };
   });
-  const p = j.pagination || {};
-  return { results, next: (p.offset || 0) + (p.count || results.length) };
+  const p = r.json.pagination || {};
+  return { results, next: (p.offset || 0) + (p.count || results.length), total: p.total_count };
+}
+
+async function categories() {
+  const { giphyKey } = await chrome.storage.local.get("giphyKey");
+  if (!giphyKey) return { needKey: true };
+  const params = new URLSearchParams({ api_key: giphyKey });
+  const r = await giphyGet(`https://api.giphy.com/v1/gifs/categories?${params}`);
+  if (!r.json) return r;
+  const results = (r.json.data || [])
+    .filter((c) => c && c.gif && ID.test(c.gif.id) && c.name)
+    .map((c) => {
+      const imgs = c.gif.images || {};
+      const f = imgs.fixed_width || {};
+      const still = (imgs.fixed_width_still || imgs.fixed_width_small_still || f || {}).url;
+      return { name: c.name, id: c.gif.id, w: +f.width || 200, h: +f.height || 200, stillUrl: still || null };
+    });
+  return { results };
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
@@ -63,8 +105,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     job = load(media(msg.giphyFile, "giphy-downsized.gif"))
       .catch(() => load(media(msg.giphyFile, "giphy.gif")))
       .then((dataUrl) => ({ dataUrl }));
+  else if (typeof msg.giphyImage === "string" && msg.giphyImage.startsWith("https://media.giphy.com/"))
+    // exact rendition URL from a Giphy API response (category tile stills) - no filename to guess here
+    job = load(msg.giphyImage).then((dataUrl) => ({ dataUrl })).catch((e) => ({ error: String(e && e.message || e) }));
   else if (typeof msg.giphySearch === "string")
-    job = search(msg.giphySearch.trim().slice(0, 100), msg.offset);
+    job = search(msg.giphySearch.trim().slice(0, 100), msg.offset, msg.rating);
+  else if (msg.giphyCategories === true)
+    job = categories();
   else if (typeof msg.giphyKey === "string")
     job = chrome.storage.local.set({ giphyKey: msg.giphyKey.trim() }).then(() => ({ ok: true }));
   else return;

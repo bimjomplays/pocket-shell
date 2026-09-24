@@ -76,6 +76,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var loaded = false
     private var lastShowBar: Bool?
     private var keyboardOverlap: CGFloat = 0
+    // edge swipe = back; off in an open chat, where gestures.js drags the chat itself (interactive, like the app)
+    private weak var edgeBack: UIScreenEdgePanGestureRecognizer?
     // smoothness: 120Hz while touching, and a picture of the last chat list shown at launch
     private var displayLink: CADisplayLink?
     private var fastUntil: CFTimeInterval = 0
@@ -84,6 +86,15 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private static var launchPictureURL: URL? {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("launch-picture.png")
     }
+    /// The settings sheet's "Clear launch picture" action row.
+    static func clearLaunchPicture() {
+        guard let url = launchPictureURL else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+    // Tap the status bar / safe-area-top strip to scroll the visible chat or chat list to the top. Only
+    // covers that strip (see viewDidLayoutSubviews: it never reaches down to where the page's own header
+    // sits, so it can't block the page's own header taps).
+    private let topTapView = UIView()
 
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 
@@ -99,6 +110,11 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         let chromeMode = UserDefaults.standard.object(forKey: "chromeMode") as? Bool ?? true
         scripts.addUserScript(WKUserScript(source: "window.__dgChromeUA = \(chromeMode);\n" + Self.resource("compat"), injectionTime: .atDocumentStart,
                                            forMainFrameOnly: false, in: .page))
+        // Settings, page world: a small user script so any page-world script can read the merged settings
+        // dictionary via window.__dgSettingsInit. Read-only here - the darkmobile world (below) is the one
+        // that gets live updates through window.__dgApplySettings whenever the sheet changes something.
+        scripts.addUserScript(WKUserScript(source: "window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON);",
+                                           injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))
         scripts.addUserScript(WKUserScript(source: Self.resource("viewport"), injectionTime: .atDocumentStart,
                                            forMainFrameOnly: true, in: .page))
         scripts.addUserScript(WKUserScript(source: Self.resource("recorder"), injectionTime: .atDocumentStart,
@@ -107,7 +123,16 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                                            forMainFrameOnly: true, in: .page))
         scripts.addUserScript(WKUserScript(source: Self.resource("hooks"), injectionTime: .atDocumentStart,
                                            forMainFrameOnly: true, in: .page))
-        scripts.addUserScript(WKUserScript(source: Self.resource("gm-shim") + "\n" + Self.resource("ui") + "\n" + Self.resource("bridge") + "\n" + Self.resource("textscale") + "\n" + Self.resource("header") + "\n" + Self.resource("stories") + "\n" + Self.resource("camera") + "\n" + Self.resource("fit") + "\n" + Self.resource("touch") + "\n" + Self.resource("chat") + "\n" + Self.resource("gestures") + "\n" + Self.cssScript("newchat") + "\n" + Self.cssScript("camera") + "\n" + Self.cssScript("stories") + "\n" + Self.cssScript("header") + "\n" + Self.cssScript("snap") + "\n" + Self.cssScript("chat") + "\n" + Self.cssScript("gestures"),
+        // Settings, darkmobile world: window.__dgSettingsInit first, then settings.js right after gm-shim so
+        // every later script in this list can call dgSetting()/dgOnSettings()/dgSetSetting()/dgOpenSettings()
+        // from the moment it runs. appmenu.js (after header.js) wires header.js's decorative "..." button to
+        // dgOpenSettings().
+        // one script, in this order: settings first, then the page scripts, then the stylesheets (an array + joined, not a
+        // long `+` chain: Swift's type checker can give up on those)
+        let worldScripts: [String] = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON);"]
+            + ["gm-shim", "settings", "ui", "bridge", "theme", "textscale", "header", "appmenu", "stories", "camera", "fit", "touch", "chat", "gestures", "qol", "perf", "streaks"].map { Self.resource($0) }
+            + ["newchat", "camera", "stories", "header", "snap", "chat", "gestures", "gifs", "theme", "qol"].map { Self.cssScript($0) }
+        scripts.addUserScript(WKUserScript(source: worldScripts.joined(separator: "\n"),
                                            injectionTime: .atDocumentStart, forMainFrameOnly: true, in: world))
         scripts.addScriptMessageHandler(self, contentWorld: world, name: "dg")
 
@@ -132,9 +157,12 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
 
         webView.scrollView.delegate = self
         view.addSubview(webView)
+        topTapView.backgroundColor = .clear
+        topTapView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(scrollToTopTapped)))
+        view.addSubview(topTapView)
         // Launch picture: the chat list as it looked when the app was last left, shown until Snapchat has drawn
         // the real one (a cold start otherwise shows an empty dark screen for a few seconds).
-        if let url = Self.launchPictureURL, let picture = UIImage(contentsOfFile: url.path) {
+        if SettingsStore.shared.bool("launchPicture"), let url = Self.launchPictureURL, let picture = UIImage(contentsOfFile: url.path) {
             launchCover.image = picture
             launchCover.contentMode = .scaleToFill
             launchCover.isUserInteractionEnabled = true // just a picture: taps wait for the real page
@@ -155,13 +183,16 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         // (the page is loaded from viewDidLayoutSubviews, once the web view has its real size)
 
         let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(edgeSwipe(_:)))
+        edgeBack = back
         back.edges = .left
         view.addGestureRecognizer(back)
 
-        let diagnose = UITapGestureRecognizer(target: self, action: #selector(showDiagnostics))
-        diagnose.numberOfTouchesRequired = 3
-        diagnose.cancelsTouchesInView = false
-        view.addGestureRecognizer(diagnose)
+        // Settings must always be reachable, so this is never gated by a setting: three-finger tap opens the
+        // native settings sheet (diagnostics moved into the sheet's "Diagnostics" action row).
+        let openSettingsGesture = UITapGestureRecognizer(target: self, action: #selector(threeFingerTap))
+        openSettingsGesture.numberOfTouchesRequired = 3
+        openSettingsGesture.cancelsTouchesInView = false
+        view.addGestureRecognizer(openSettingsGesture)
     }
 
     /// Troubleshooting log that survives page loads: Documents/trail.txt (last 300 lines).
@@ -202,8 +233,36 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         }
     }
 
-    /// Three-finger tap: what the page sees (for troubleshooting without a Mac and Web Inspector).
-    @objc private func showDiagnostics() {
+    /// Three-finger tap: opens the native settings sheet.
+    @objc private func threeFingerTap() {
+        presentSettingsSheet()
+    }
+
+    /// Fires haptic feedback unless the "haptics" setting is off (checked live, not just at launch).
+    private func haptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+        guard SettingsStore.shared.bool("haptics") else { return }
+        UIImpactFeedbackGenerator(style: style).impactOccurred()
+    }
+
+    /// Tap the status bar / safe-area-top strip: scroll the visible chat or chat-list container to the top.
+    @objc private func scrollToTopTapped() {
+        guard SettingsStore.shared.bool("scrollToTopTap") else { return }
+        let js = """
+        (() => {
+          const isScrollable = (n) => n && /(auto|scroll)/.test(getComputedStyle(n).overflowY) && n.scrollHeight > n.clientHeight + 2;
+          let target = null;
+          const cv = document.querySelector('[data-dg-column] ul[id^="cv-"]');
+          if (cv) { for (let n = cv.parentElement; n; n = n.parentElement) { if (isScrollable(n)) { target = n; break; } } }
+          else { target = document.querySelector('[data-dg-sidebar] .ReactVirtualized__Grid'); }
+          if (target && target.scrollTo) target.scrollTo({ top: 0, behavior: 'smooth' });
+        })();
+        """
+        webView.evaluateJavaScript(js, in: nil, in: world)
+    }
+
+    /// What the page sees (for troubleshooting without a Mac and Web Inspector). The settings sheet's
+    /// "Diagnostics" action row; used to be the three-finger tap's own action.
+    private func presentDiagnostics() {
         let js = """
         JSON.stringify({ url: location.href, innerWidth, screenWidth: screen.width,
           viewport: document.querySelector('meta[name="viewport"]')?.content ?? null,
@@ -237,12 +296,17 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         super.viewDidLayoutSubviews()
         let insets = view.safeAreaInsets
         // in a chat the strip under the message box (home indicator) matches the box's keyboard grey
-        view.backgroundColor = chatOpen && inApp ? UIColor(red: 0x1c / 255, green: 0x1c / 255, blue: 0x1e / 255, alpha: 1) : Self.background
+        let colors = Self.themeColors()
+        view.backgroundColor = chatOpen && inApp ? colors.composer : colors.background
+        webView.backgroundColor = colors.background
+        webView.scrollView.backgroundColor = colors.background
+        tabBar.backgroundColor = colors.bar
         let showBar = inApp && !chatOpen && !storiesOpen && keyboardOverlap == 0
         if showBar != lastShowBar {
             lastShowBar = showBar
             trail("NATIVE bar \(showBar) inApp \(inApp) chat \(chatOpen) stories \(storiesOpen) camera \(cameraOpen) kb \(keyboardOverlap)")
         }
+        topTapView.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: insets.top)
         closeStoriesButton.isHidden = !cameraOpen || previewOpen // stories: Snapchat's own X (top right) and the edge swipe close them
         // camera: top left (Snapchat's own menu sits top right); stories: top right
         closeStoriesButton.frame = CGRect(x: cameraOpen ? 12 : view.bounds.width - 56, y: insets.top + 8, width: 44, height: 44)
@@ -367,13 +431,13 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     @objc private func edgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
         guard gesture.state == .ended, inApp,
               gesture.translation(in: view).x > 50 || gesture.velocity(in: view).x > 400 else { return }
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        haptic(.light)
         webView.evaluateJavaScript("window.__dgBack && window.__dgBack()", in: nil, in: world)
     }
 
     /// Camera: camera.js opens Snapchat Web's camera (in the pane the phone layout hides) full screen.
     @objc private func openCamera() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        haptic(.light)
         webView.becomeFirstResponder()
         webView.evaluateJavaScript("window.__dgOpenCamera ? window.__dgOpenCamera() : 'missing'", in: nil, in: world) { [weak self] result in
             if case .success(let value) = result, let text = value as? String, text != "ok" {
@@ -385,7 +449,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     }
 
     @objc private func openStories() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        haptic(.light)
         webView.becomeFirstResponder()
         webView.evaluateJavaScript("window.__dgOpenStories ? window.__dgOpenStories() : 'missing'",
                                    in: nil, in: world) { [weak self] result in
@@ -531,7 +595,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             case "heavy": style = .heavy
             default: style = .light
             }
-            UIImpactFeedbackGenerator(style: style).impactOccurred()
+            haptic(style)
             replyHandler(true, nil)
         case "dump":
             dump(body["name"] as? String ?? "page", note: body["note"] as? String ?? "")
@@ -545,11 +609,112 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             storiesOpen = body["stories"] as? Bool ?? false
             cameraOpen = body["camera"] as? Bool ?? false
             previewOpen = body["preview"] as? Bool ?? false
+            edgeBack?.isEnabled = !((body["chat"] as? Bool ?? false) && !storiesOpen && !cameraOpen)
             setChatOpen(body["chat"] as? Bool ?? false, force: true)
             replyHandler(true, nil)
+
+        // MARK: settings ops (settings.js in the darkmobile world; App.swift is the only writer of "dgSettings")
+        case "setSetting":
+            guard let key = body["key"] as? String else { return replyHandler(nil, "no key") }
+            let rawValue = body["value"]
+            let value: Any? = (rawValue as? NSNull) != nil ? nil : rawValue
+            let ok = SettingsStore.shared.set(key, value)
+            replyHandler(ok, ok ? nil : "invalid key")
+        case "openSettings":
+            presentSettingsSheet()
+            replyHandler(true, nil)
+        case "getSettings":
+            replyHandler(SettingsStore.shared.merged, nil)
+
+        // Chat-row long-press contract (native <-> page):
+        //  Page -> native: postMessage({ op: "rowMenu", title: "<friend name>", convId: "<id>", x, y }) -
+        //    the page side that detects the long press on a chat-list row and decides to open this menu is
+        //    implemented elsewhere (not in this file); x/y are viewport coordinates used only to anchor an
+        //    iPad popover (harmless no-op on iPhone).
+        //  Native -> page: after the user picks something, evaluateJavaScript calls
+        //    window.__dgRowMenuResult && window.__dgRowMenuResult({ convId, action, value })
+        //    where action is one of:
+        //      "open"     - "Open chat" tapped; value is always null; the page should navigate to convId.
+        //      "copyName" - "Copy name" tapped (native already put it on the pasteboard); value is the name.
+        //      "nickname" - "Set nickname..." was saved; value is the new nickname string, or null if the
+        //                   field was cleared (removed). Also stored under setting key "x_nicknames" as
+        //                   {convId: nickname}, so dgSetting("x_nicknames", {}) reads the whole map.
+        //    Cancelling the action sheet or the nickname alert sends nothing back.
+        case "rowMenu":
+            guard let title = body["title"] as? String, let convId = body["convId"] as? String else {
+                return replyHandler(nil, "bad rowMenu")
+            }
+            let x = CGFloat((body["x"] as? Double) ?? Double(webView.bounds.midX))
+            let y = CGFloat((body["y"] as? Double) ?? Double(webView.bounds.midY))
+            presentRowMenu(title: title, convId: convId, x: x, y: y)
+            replyHandler(true, nil)
+
         default:
             replyHandler(nil, "unknown op")
         }
+    }
+
+    // MARK: settings sheet
+
+    /// The op "openSettings" (from the page's dgOpenSettings(), e.g. appmenu.js's tap on header.js's
+    /// ".dg-fake-more") and the three-finger tap both present this.
+    private func presentSettingsSheet() {
+        let root = SettingsRootViewController(delegate: self)
+        let nav = UINavigationController(rootViewController: root)
+        nav.overrideUserInterfaceStyle = .dark
+        if let sheet = nav.sheetPresentationController {
+            sheet.detents = [.medium(), .large()]
+            sheet.prefersGrabberVisible = true
+        }
+        present(nav, animated: true)
+    }
+
+    // MARK: chat-row long-press sheet (see the "rowMenu" op's contract comment above)
+
+    private func presentRowMenu(title: String, convId: String, x: CGFloat, y: CGFloat) {
+        let alert = UIAlertController(title: title, message: nil, preferredStyle: .actionSheet)
+        if let popover = alert.popoverPresentationController {
+            popover.sourceView = view
+            popover.sourceRect = CGRect(x: x, y: y, width: 1, height: 1)
+        }
+        alert.addAction(UIAlertAction(title: "Open chat", style: .default) { [weak self] _ in
+            self?.sendRowMenuResult(convId: convId, action: "open", value: nil)
+        })
+        alert.addAction(UIAlertAction(title: "Set nickname\u{2026}", style: .default) { [weak self] _ in
+            self?.presentNicknamePrompt(convId: convId)
+        })
+        alert.addAction(UIAlertAction(title: "Copy name", style: .default) { [weak self] _ in
+            UIPasteboard.general.string = title
+            self?.sendRowMenuResult(convId: convId, action: "copyName", value: title)
+        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    private func presentNicknamePrompt(convId: String) {
+        let nicknames = (SettingsStore.shared.value("x_nicknames") as? [String: String]) ?? [:]
+        let alert = UIAlertController(title: "Set nickname", message: nil, preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = nicknames[convId]
+            field.placeholder = "Nickname"
+            field.autocapitalizationType = .words
+            field.clearButtonMode = .whileEditing
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
+            let text = alert.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            var updated = nicknames
+            if text.isEmpty { updated.removeValue(forKey: convId) } else { updated[convId] = text }
+            SettingsStore.shared.set("x_nicknames", updated)
+            self?.sendRowMenuResult(convId: convId, action: "nickname", value: text.isEmpty ? nil : text)
+        })
+        present(alert, animated: true)
+    }
+
+    private func sendRowMenuResult(convId: String, action: String, value: Any?) {
+        let payload: [String: Any] = ["convId": convId, "action": action, "value": value ?? NSNull()]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload), let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.__dgRowMenuResult && window.__dgRowMenuResult(\(json))", in: nil, in: world)
     }
 
     // MARK: navigation
@@ -614,6 +779,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// WKWebView._updateVisibleContentRects each frame) - only while a finger is down or an animation runs,
     /// so it costs no battery the rest of the time.
     private func renderFast(for seconds: CFTimeInterval) {
+        guard SettingsStore.shared.bool("highRefresh") else { return }
         fastUntil = max(fastUntil, CACurrentMediaTime() + seconds)
         guard displayLink == nil else { return }
         let link = CADisplayLink(target: self, selector: #selector(fastTick(_:)))
@@ -635,7 +801,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// Saves what the chat list looks like right now, for the launch picture (only the plain chat list: a chat,
     /// the camera or the keyboard would show up in the wrong place next launch).
     @objc private func saveLaunchPicture() {
-        guard inApp, !chatOpen, !storiesOpen, !cameraOpen, keyboardOverlap == 0, launchCover.superview == nil,
+        guard SettingsStore.shared.bool("launchPicture"),
+              inApp, !chatOpen, !storiesOpen, !cameraOpen, keyboardOverlap == 0, launchCover.superview == nil,
               let url = Self.launchPictureURL else { return }
         let config = WKSnapshotConfiguration()
         config.afterScreenUpdates = false
@@ -699,6 +866,36 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(nil) })
         alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(alert.textFields?.first?.text) })
         present(alert, animated: true)
+    }
+}
+
+/// The settings sheet (SettingsRootViewController) talks back to the web view through this.
+extension WebViewController: SettingsActionsDelegate {
+    /// Native colours that match the page's theme setting (theme.js), so the strips around the web view and the
+    /// tab bar don't stay grey under a true-black or midnight page. "dark" = the original colours.
+    static func themeColors() -> (background: UIColor, composer: UIColor, bar: UIColor) {
+        func rgb(_ hex: Int) -> UIColor {
+            UIColor(red: CGFloat((hex >> 16) & 0xff) / 255, green: CGFloat((hex >> 8) & 0xff) / 255, blue: CGFloat(hex & 0xff) / 255, alpha: 1)
+        }
+        switch SettingsStore.shared.value("theme") as? String ?? "dark" {
+        case "true-black": return (rgb(0x000000), rgb(0x0a0a0a), rgb(0x0a0a0a))
+        case "midnight": return (rgb(0x0d1117), rgb(0x141a21), rgb(0x161b22))
+        default: return (background, rgb(0x1c1c1e), tabBarColor)
+        }
+    }
+
+    func settingsDidChange() {
+        view.setNeedsLayout() // theme colours of the native strips / tab bar
+        webView.evaluateJavaScript("window.__dgApplySettings && window.__dgApplySettings(\(SettingsStore.shared.mergedJSON))", in: nil, in: world)
+    }
+
+    func performSettingsAction(_ action: String) {
+        switch action {
+        case "reload": webView.reload()
+        case "diagnostics": presentDiagnostics()
+        case "clearLaunchPicture": Self.clearLaunchPicture()
+        default: break
+        }
     }
 }
 

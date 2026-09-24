@@ -162,7 +162,7 @@
 
   // ---- gesture state machine: one active touch at a time -------------------------------------------
   const LOCK_MIN = 8, LOCK_BIAS = 1.2, MOVE_CANCEL = 10, LONG_PRESS_MS = 230;
-  const ROW_THRESHOLD = 70, ROW_MAX = 120, BACK_THRESHOLD = 90, REPLY_THRESHOLD = 55, REPLY_MAX = 70;
+  const REPLY_THRESHOLD = 55, REPLY_MAX = 70;
   let g = null;
 
   const clearStyle = (el) => { el.style.transition = ""; el.style.transform = ""; el.style.opacity = ""; };
@@ -173,36 +173,108 @@
     setTimeout(() => clearStyle(el), 260);
   };
 
-  function applyDrag(gs) {
+  // ---- open / close a chat by dragging it, like the app ----------------------------------------------
+  // Both panes live in the same grid cell and glass.css hides one of them (display: none). While a chat is being
+  // dragged, html[data-dg-peek] shows both: the chat list stays underneath and the chat follows the finger on top
+  // (translateX), so you can move it back and forth and let go: past ~35% of the width or a flick = it finishes,
+  // otherwise it springs back. Starting on a chat-list row opens that chat right away (it loads while you drag);
+  // in an open chat, dragging it sideways uncovers the list. bridge.js keeps the native tab bar in list mode
+  // while an opening drag is undecided (data-dg-peek="open"), so the page isn't resized under your finger.
+  const peekW = () => { const r = document.querySelector("[data-dg-root]"); return (r && r.clientWidth) || window.innerWidth || 550; };
+  const EASE = "transform 0.3s cubic-bezier(0.22, 1, 0.36, 1)";
+  const column = () => document.querySelector("[data-dg-column]");
+  // The position lives in CSS variables on <html> (gestures.css applies them to whatever element is the chat pane
+  // right now): opening a chat makes Snapchat re-render, and an inline transform on the old pane element was lost -
+  // the chat then sat fully open while the finger was still dragging (device report, 2026-09-23).
+  let lastCol = null, moves = 0;
+  const setX = (x, animate) => {
+    html.style.setProperty("--dg-peek-x", Math.round(x) + "px");
+    html.style.setProperty("--dg-peek-tr", animate ? EASE : "none");
+    const c = column();
+    if (c !== lastCol) { trail("PEEK pane " + (lastCol ? "replaced" : "found") + (c ? "" : " (none)")); lastCol = c; }
+  };
+  const endPeek = () => {
+    html.removeAttribute("data-dg-peek");
+    html.style.removeProperty("--dg-peek-x");
+    html.style.removeProperty("--dg-peek-tr");
+    lastCol = null;
+  };
+  // after an animation: run `then` once the transform has arrived (transitionend, or a timeout as a backstop)
+  const settle = (then) => {
+    let done = false;
+    const go = (e) => {
+      if (done || (e && !(e.target && e.target.matches && e.target.matches("[data-dg-column]")))) return;
+      done = true; document.removeEventListener("transitionend", go, true); then();
+    };
+    document.addEventListener("transitionend", go, true);
+    setTimeout(() => go(), 380);
+  };
+  const whenClass = (want, then) => { // wait (max ~0.8s) until glass.js has switched to dg-list / dg-chat
+    const t0 = performance.now();
+    (function wait() { if (html.classList.contains(want) || performance.now() - t0 > 800) then(); else requestAnimationFrame(wait); })();
+  };
+  function startOpenPeek(gs) {
+    gs.side = gs.dx > 0 ? -1 : 1; // swiping right pulls the chat in from the left, like the app (left: from the right)
+    html.setAttribute("data-dg-peek", "open");
+    setX(gs.side * peekW() + gs.dx, false);
+    const r = gs.el.getBoundingClientRect();
+    fireTapAt(r.left + r.width * 0.35, r.top + r.height / 2); // open that chat now; it loads while the finger moves
+    haptic("light");
+  }
+  function startClosePeek(gs) {
+    html.setAttribute("data-dg-peek", "close");
+    dispatchEvent(new Event("resize")); // the list was display:none - let react-virtualized measure and draw its rows
+    setX(gs.dx, false);
+  }
+  function movePeek(gs) {
+    const w = peekW();
+    if (++moves % 12 === 0) trail("PEEK move dx " + Math.round(gs.dx) + " w " + w + " class " + (html.classList.contains("dg-chat") ? "chat" : "list"));
+    if (gs.kind === "row") setX(gs.side < 0 ? Math.min(0, -w + gs.dx) : Math.max(0, w + gs.dx), false);
+    else setX(Math.max(-w, Math.min(w, gs.dx)), false);
+  }
+  function finishPeek(gs) {
+    const w = peekW();
+    trail("PEEK let go " + gs.kind + " dx " + Math.round(gs.dx) + " of " + w);
+    const now = performance.now();
+    const recent = gs.samples.filter((p) => now - p.t < 90);
+    const v = recent.length > 1 ? (recent[recent.length - 1].x - recent[0].x) / Math.max(1, recent[recent.length - 1].t - recent[0].t) : 0; // px/ms, last ~90ms
     if (gs.kind === "row") {
-      gs.el.style.transition = "none";
-      gs.el.style.transform = "translateX(" + Math.max(-ROW_MAX, Math.min(gs.dx, ROW_MAX)) + "px)";
-    } else if (gs.kind === "back") {
-      const w = window.innerWidth || 400;
-      gs.el.style.transition = "none";
-      gs.el.style.transform = "translateX(" + Math.max(-w, Math.min(gs.dx, w)) + "px)";
-      gs.el.style.opacity = String(Math.max(0.55, 1 - (Math.abs(gs.dx) / w) * 0.5));
+      const progress = Math.abs(gs.dx) / w;
+      const flick = gs.side < 0 ? v > 0.45 : v < -0.45, flickBack = gs.side < 0 ? v < -0.45 : v > 0.45;
+      if ((progress > 0.35 || flick) && !flickBack) { // open it all the way
+        haptic("light");
+        html.setAttribute("data-dg-peek", "settle"); // the tab bar may leave now, during the slide
+        setX(0, true);
+        settle(endPeek);
+      } else { // put it back and close the chat again
+        setX(gs.side * w, true);
+        settle(() => { window.__dgBack && window.__dgBack(); whenClass("dg-list", endPeek); });
+      }
+    } else {
+      const progress = Math.abs(gs.dx) / w;
+      const flick = Math.abs(v) > 0.45 && Math.sign(v) === Math.sign(gs.dx);
+      const flickBack = Math.abs(v) > 0.45 && Math.sign(v) !== Math.sign(gs.dx);
+      if ((progress > 0.35 || flick) && !flickBack) { // close: the chat leaves, the list stays
+        haptic("light");
+        setX(gs.dx < 0 ? -w : w, true);
+        settle(() => { window.__dgBack && window.__dgBack(); whenClass("dg-list", endPeek); });
+      } else {
+        setX(0, true);
+        settle(endPeek);
+      }
+    }
+  }
+
+  function applyDrag(gs) {
+    if (gs.kind === "row" || gs.kind === "back") {
+      if (!gs.peeking) { gs.peeking = true; (gs.kind === "row" ? startOpenPeek : startClosePeek)(gs); }
+      movePeek(gs);
     } else if (gs.kind === "bubble") {
       gs.el.style.transition = "none";
       gs.el.style.transform = "translateX(" + Math.min(gs.dx, REPLY_MAX) * 0.7 + "px)";
     }
   }
 
-  function commitRow(gs) {
-    clearStyle(gs.el); // snap back to the real layout position first so the tap coordinates are right
-    const r = gs.el.getBoundingClientRect();
-    fireTapAt(r.left + r.width * 0.35, r.top + r.height / 2); // left of the row's camera icon (right ~30%)
-  }
-  function commitBack(gs) {
-    const w = window.innerWidth || 400;
-    gs.el.style.transition = "transform 0.18s ease, opacity 0.18s ease";
-    gs.el.style.transform = "translateX(" + (gs.dx < 0 ? -w : w) + "px)";
-    gs.el.style.opacity = "0.35";
-    setTimeout(() => {
-      window.__dgBack && window.__dgBack();
-      setTimeout(() => clearStyle(gs.el), 260);
-    }, 150);
-  }
   function commitReply(gs) {
     springBack(gs.el, false);
     const r = gs.el.getBoundingClientRect();
@@ -262,11 +334,15 @@
     }
   }, { passive: true });
 
-  document.addEventListener("touchmove", (e) => {
+  const seen = new WeakSet();
+  const once = (fn) => (e) => { if (seen.has(e)) return; seen.add(e); fn(e); };
+  const onMove = once((e) => {
     if (!g || e.touches.length !== 1) return;
     const t = e.touches[0];
     g.dx = t.clientX - g.x0;
     g.dy = t.clientY - g.y0;
+    (g.samples || (g.samples = [])).push({ x: t.clientX, t: performance.now() });
+    if (g.samples.length > 12) g.samples.shift();
     if (g.longTimer && (Math.abs(g.dx) > MOVE_CANCEL || Math.abs(g.dy) > MOVE_CANCEL)) { clearTimeout(g.longTimer); g.longTimer = null; }
     if (!g.locked) {
       if (Math.abs(g.dx) < LOCK_MIN && Math.abs(g.dy) < LOCK_MIN) return;
@@ -281,7 +357,8 @@
     if (g.locked !== "x" || (g.kind === "bubble" && g.dx <= 0)) return;
     e.preventDefault();
     applyDrag(g);
-  }, { passive: false });
+  });
+  document.addEventListener("touchmove", onMove, { passive: false });
 
   function finish(e) {
     if (!g) return;
@@ -290,16 +367,11 @@
     if (gs.longTimer) clearTimeout(gs.longTimer);
     if (gs.longFired) { e.preventDefault(); return; } // already handled; suppress the trailing synthetic click
     if (gs.locked !== "x" || (gs.kind === "bubble" && gs.dx <= 0)) return; // plain tap or vertical scroll: let the page handle it natively
-    const dist = Math.abs(gs.dx);
-    const v = dist / Math.max(1, performance.now() - gs.t0); // px/ms, for a fast flick under the distance threshold
-    if (gs.kind === "row" && (dist > ROW_THRESHOLD || (dist > 30 && v > 0.5))) {
+    const v = Math.abs(gs.dx) / Math.max(1, performance.now() - gs.t0); // px/ms, for a fast flick under the distance threshold
+    if (gs.peeking) {
       e.preventDefault();
-      haptic("light");
-      commitRow(gs);
-    } else if (gs.kind === "back" && (dist > BACK_THRESHOLD || (dist > 40 && v > 0.6))) {
-      e.preventDefault();
-      haptic("light");
-      commitBack(gs);
+      if (e.type === "touchcancel") gs.dx = 0; // the system took the touch: treat it as "let go where it started"
+      finishPeek(gs);
     } else if (gs.kind === "bubble" && (gs.dx > REPLY_THRESHOLD || (gs.dx > 30 && v > 0.5))) {
       e.preventDefault();
       commitReply(gs);
@@ -308,6 +380,16 @@
       springBack(gs.el, gs.kind === "back");
     }
   }
-  document.addEventListener("touchend", finish, { passive: false });
-  document.addEventListener("touchcancel", finish, { passive: false });
+  const onEnd = once(finish);
+  document.addEventListener("touchend", onEnd, { passive: false });
+  document.addEventListener("touchcancel", onEnd, { passive: false });
+  // iOS keeps sending a touch's events to the element it started on, even after that element has been taken out of
+  // the page (which Snapchat's list does when a chat opens): listen there too, so the drag keeps following the finger
+  document.addEventListener("touchstart", (e) => {
+    const t = e.target;
+    if (!g || !t || !t.addEventListener) return;
+    for (const [type, fn] of [["touchmove", onMove], ["touchend", onEnd], ["touchcancel", onEnd]]) t.addEventListener(type, fn, { passive: false });
+    const drop = () => { for (const [type, fn] of [["touchmove", onMove], ["touchend", onEnd], ["touchcancel", onEnd]]) t.removeEventListener(type, fn); };
+    t.addEventListener("touchend", drop, { once: true }); t.addEventListener("touchcancel", drop, { once: true });
+  }, { passive: true });
 })();

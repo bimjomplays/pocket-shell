@@ -104,7 +104,26 @@
     if (!ultraId) findLenses();
   }
 
+  // Camera roll: a picture picked with the photo button is shown in place of the camera, so Snapchat's own
+  // shutter turns it into a normal snap (Snapchat Web has no upload). Drawn flipped exactly like back-camera
+  // frames, because Snapchat mirrors whatever this canvas shows (it assumes a selfie camera).
+  let photo = null, photoFlip = true; // flip button on the chip in case a snap comes out mirrored (unconfirmed on device)
+  function drawPhoto() {
+    const pw = photo.width, ph = photo.height;
+    const cover = Math.max(W / pw, H / ph), fit = Math.min(W / pw, H / ph);
+    ctx.save();
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+    if (photoFlip) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+    // the whole photo fits in the 9:16 frame (a landscape shot isn't cropped to a sliver); the empty space is filled
+    // with a dimmed, zoomed copy of it, like the app does for camera-roll snaps
+    ctx.globalAlpha = 0.35;
+    ctx.drawImage(photo, (W - pw * cover) / 2, (H - ph * cover) / 2, pw * cover, ph * cover);
+    ctx.globalAlpha = 1;
+    ctx.drawImage(photo, (W - pw * fit) / 2, (H - ph * fit) / 2, pw * fit, ph * fit);
+    ctx.restore();
+  }
   function draw() {
+    if (photo) return drawPhoto();
     const vw = video.videoWidth, vh = video.videoHeight;
     if (vw && vh) {
       const digital = Math.max(1, (lens === "ultra" ? zoom / 0.5 : zoom) / hwZoom);
@@ -126,6 +145,7 @@
   setInterval(() => { if (out) draw(); }, 250);
 
   function shutdown() {
+    setPhoto(null);
     clearInterval(watch); watch = 0;
     if (out) for (const t of out.getTracks()) t.stop();
     out = null;
@@ -240,4 +260,56 @@
     probe.errors = (window.__dgErrors || []).slice(-4);
     document.documentElement.setAttribute("data-dg-probe", JSON.stringify(probe));
   });
+
+  // ---- camera roll button (page DOM, shown only on the live camera screen) ---------------------------
+  let rollBtn = null, rollChip = null, rollInput = null;
+  function setPhoto(bitmap) {
+    if (photo && photo.close) try { photo.close(); } catch (e) {}
+    photo = bitmap;
+    if (rollChip) rollChip.hidden = !photo;
+    if (out) draw();
+  }
+  function rollUI() {
+    const html = document.documentElement;
+    const live = html.classList.contains("dg-camera") && !!out && !document.querySelector('button[title^="Close snap preview"]');
+    if (!rollBtn && live && document.body) {
+      const st = document.createElement("style");
+      st.textContent = ".dg-roll-btn{position:fixed;top:76px;left:15px;width:52px;height:52px;border-radius:50%;border:0;z-index:2147483000;"
+        + "background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}"
+        + ".dg-roll-btn:active{transform:scale(.92)}.dg-roll-btn svg{width:26px;height:26px}"
+        + ".dg-roll-chip{position:fixed;top:84px;left:78px;z-index:2147483000;display:flex;align-items:center;gap:8px;padding:8px 8px 8px 14px;"
+        + "border-radius:18px;background:rgba(0,0,0,.6);color:#fff;font:600 15px/1 -apple-system,system-ui,sans-serif}"
+        + ".dg-roll-chip[hidden]{display:none}.dg-roll-chip button{width:26px;height:26px;border-radius:50%;border:0;background:rgba(255,255,255,.22);color:#fff;font:700 14px/1 sans-serif}";
+      document.head.appendChild(st);
+      rollInput = document.createElement("input");
+      rollInput.type = "file"; rollInput.accept = "image/*"; rollInput.style.display = "none";
+      rollInput.addEventListener("change", async () => {
+        const f = rollInput.files && rollInput.files[0];
+        rollInput.value = "";
+        if (!f) return;
+        try { setPhoto(await createImageBitmap(f)); }
+        catch (e) { // older engines: go through an <img>
+          const img = new Image(); img.src = URL.createObjectURL(f);
+          try { await img.decode(); setPhoto(img); } catch (e2) {}
+        }
+      });
+      rollBtn = document.createElement("button");
+      rollBtn.className = "dg-roll-btn"; rollBtn.type = "button"; rollBtn.setAttribute("aria-label", "Photo from library");
+      rollBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-8 9"/></svg>';
+      rollBtn.addEventListener("click", (e) => { e.stopPropagation(); rollInput.click(); });
+      rollChip = document.createElement("div");
+      rollChip.className = "dg-roll-chip"; rollChip.hidden = true;
+      rollChip.innerHTML = "Photo <button type=\"button\" aria-label=\"Mirror\">⇆</button><button type=\"button\" aria-label=\"Back to camera\">✕</button>";
+      const [flipBtn, closeBtn] = rollChip.querySelectorAll("button");
+      flipBtn.addEventListener("click", (e) => { e.stopPropagation(); photoFlip = !photoFlip; if (out) draw(); });
+      closeBtn.addEventListener("click", (e) => { e.stopPropagation(); setPhoto(null); });
+      document.body.append(rollInput, rollBtn, rollChip);
+    }
+    if (rollBtn) {
+      rollBtn.style.display = live ? "" : "none";
+      rollChip.style.display = live ? "" : "none";
+    }
+  }
+  new MutationObserver(rollUI).observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+  setInterval(rollUI, 600); // the snap preview appears/disappears without a class change
 })();

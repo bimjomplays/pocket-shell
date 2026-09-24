@@ -89,9 +89,9 @@ html.dg-glass [data-dg-root] > :is([data-dg-sidebar], [data-dg-column]) {
   max-width: none !important;
   margin-left: 0 !important;
 }
-html.dg-glass.dg-list [data-dg-column],
-html.dg-glass.dg-chat [data-dg-sidebar] {
-  display: none !important;
+html.dg-glass.dg-list:not([data-dg-peek]) [data-dg-column],
+html.dg-glass.dg-chat:not([data-dg-peek]) [data-dg-sidebar] {
+  display: none !important; /* while a chat is dragged (data-dg-peek, gestures.js) both panes show */
 }
 html.dg-glass.dg-list [data-dg-fill] {
   width: auto !important;
@@ -211,96 +211,5 @@ html.dg-glass.dg-list [data-dg-sidebar] .ReactVirtualized__Grid__innerScrollCont
   border-radius: 12px;
 }
 
-/* GIF picker (gif-picker.js) */
-.dg-gif-button {
-  font: 700 11px/1 Inter, system-ui, sans-serif !important;
-  letter-spacing: 0.04em;
-  color: var(--sigIconSecondary, #b4b4c2) !important;
-}
-.dg-gif-panel {
-  position: fixed;
-  z-index: 2147483000;
-  width: 340px;
-  height: 420px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  box-sizing: border-box;
-  background: rgb(18, 18, 21);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
-  color: #f2f2f7;
-  font: 13px/1.4 Inter, system-ui, sans-serif;
-}
-.dg-gif-search {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 8px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.06);
-  color: inherit;
-  font: inherit;
-  outline: none;
-}
-.dg-gif-search:focus { border-color: #5e5eed; }
-.dg-gif-note:empty { display: none; }
-.dg-gif-note p { margin: 0 0 8px; color: #b4b4c2; }
-.dg-gif-grid {
-  flex: 1;
-  min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-}
-.dg-gif-col {
-  flex: 1;
-  min-width: 0;
-}
-.dg-gif-tile {
-  display: block;
-  width: 100%;
-  margin-bottom: 6px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  cursor: pointer;
-}
-.dg-gif-tile:hover { outline: 2px solid #5e5eed; }
-.dg-gif-tabs { display: flex; gap: 6px; }
-.dg-gif-tabs button {
-  padding: 4px 10px;
-  border: 0;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #b4b4c2;
-  font: 600 12px/1.4 Inter, system-ui, sans-serif;
-  cursor: pointer;
-}
-.dg-gif-tabs button.dg-gif-tab-on { background: #5e5eed; color: #fff; }
-.dg-gif-item { position: relative; }
-.dg-gif-fav {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  font-size: 15px;
-  line-height: 26px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-.dg-gif-item:hover .dg-gif-fav,
-.dg-gif-fav.dg-gif-fav-on { opacity: 1; }
-.dg-gif-fav.dg-gif-fav-on { color: #ffd23f; }
-.dg-gif-busy { opacity: 0.4; }
-.dg-gif-credit { font-size: 10px; color: #8f8f9e; text-align: right; }
+/* GIF picker (gif-picker.js): now a Discord-style bottom sheet, styled in ios/Resources/gifs.css (iOS-app
+   only, loaded via App.swift's cssScript, same as chat.css/header.css/etc.) instead of here. */

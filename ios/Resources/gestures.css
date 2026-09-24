@@ -40,3 +40,13 @@ html.dg-glass [data-dg-actionmenu] > div > [data-dg-am-actions] > div {
 html.dg-glass [data-dg-actionmenu] > div > [data-dg-am-actions] > div:first-child { border-top: 0 !important; }
 html.dg-glass [data-dg-actionmenu] > div > [data-dg-am-actions] > div span { font-size: 20px !important; line-height: 1.2 !important; }
 html.dg-glass [data-dg-actionmenu] > div > [data-dg-am-actions] > div svg { width: 25px !important; height: 25px !important; flex: 0 0 25px !important; }
+
+/* Dragging a chat open / closed (gestures.js "peek"): both panes show, the list underneath, the chat on top
+   following the finger (glass.css skips its display:none while data-dg-peek is set). The slide-in animation is
+   off because the finger is doing the moving. */
+html.dg-glass[data-dg-peek] [data-dg-sidebar] { z-index: 1; }
+html.dg-glass[data-dg-peek] :is([data-dg-column], [data-dg-root] > :not([data-dg-sidebar])) { /* (also a freshly re-rendered pane before glass.js marks it) */
+  animation: none !important; position: relative; z-index: 2;
+  transform: translate3d(var(--dg-peek-x, 0px), 0, 0) !important; transition: var(--dg-peek-tr, none) !important;
+  will-change: transform; box-shadow: 0 0 28px rgba(0, 0, 0, 0.6);
+}

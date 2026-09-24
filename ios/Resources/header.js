@@ -25,7 +25,7 @@
       /* Snapchat gives it align-self: flex-start, which in WebKit shrinks it to its content (58px) */
       align-self: stretch !important; justify-self: stretch !important;
       width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important;
-      background: #121212 !important; z-index: 102 !important;
+      background: var(--dg-bg, #121212) !important; z-index: 102 !important;
     }
     html.dg-list [data-dg-column] div:has(> form [role="searchbox"]) {
       width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important;
@@ -69,7 +69,7 @@
       opacity: 0 !important; padding: 0 !important;
     }
     html.dg-list [data-dg-sidebar] :has(> [data-dg-pill]:focus-within) {
-      left: 8px !important; right: 8px !important; width: auto !important; background: #121212 !important;
+      left: 8px !important; right: 8px !important; width: auto !important; background: var(--dg-bg, #121212) !important;
     }
     html.dg-list [data-dg-pill]:focus-within { width: 100% !important; }
     html.dg-list [data-dg-pill]:focus-within > :nth-child(2) { flex: 1 1 auto !important; min-width: 0 !important; }

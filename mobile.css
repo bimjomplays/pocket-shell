@@ -2,9 +2,9 @@
    Loaded after glass.css, so every glass/black/indigo value there is put back to Snapchat's here. */
 html.dg-glass[theme="dark"], html.dg-glass[theme="dark"] body {
   color-scheme: dark;
-  background: #121212 !important;
-  --sigBackgroundPrimary: #121212 !important;
-  --sigBackgroundSecondary: #1e1e1e !important;
+  background: var(--dg-bg, #121212) !important;
+  --sigBackgroundPrimary: var(--dg-bg, #121212) !important;
+  --sigBackgroundSecondary: var(--dg-surface, #1e1e1e) !important;
   --sigBackgroundSecondaryRGB: 30, 30, 30 !important;
   --sigBackgroundSecondaryHover: #2b2b2b !important;
   --sigBackgroundFeedHover: rgba(255, 255, 255, 0.1) !important;
@@ -12,11 +12,11 @@ html.dg-glass[theme="dark"], html.dg-glass[theme="dark"] body {
   --sigBackgroundMessageSaved: #333232 !important;
   --sigBackgroundMessageSavedHover: #3a3a3a !important;
   --sigColorBackgroundBorder: rgba(255, 255, 255, 0.1) !important;
-  --sigSurface: #1e1e1e !important;
+  --sigSurface: var(--dg-surface, #1e1e1e) !important;
   --sigSurfaceRGB: 30, 30, 30 !important;
   --sigSurfaceDown: #212121 !important;
   --sigAboveSurface: #292929 !important;
-  --sigConversationBoxBackground: #1e1e1e !important;
+  --sigConversationBoxBackground: var(--dg-surface, #1e1e1e) !important;
   --sigMediaControlContainerBackground: rgba(255, 255, 255, 0.1) !important;
   --sigTextPrimary: #dedede !important;
   --sigTextSecondary: #999 !important;
@@ -27,19 +27,19 @@ html.dg-glass[theme="dark"], html.dg-glass[theme="dark"] body {
   --sigButtonPrimaryHover: #42bfff !important;
   --sigButtonSecondary: #2b2b2b !important;
   --sigButtonSecondaryHover: #424242 !important;
-  --sigButtonInactive: #1e1e1e !important;
-  --sigMain: #121212 !important;
-  --sigSubscreen: #121212 !important;
+  --sigButtonInactive: var(--dg-surface, #1e1e1e) !important;
+  --sigMain: var(--dg-bg, #121212) !important;
+  --sigSubscreen: var(--dg-bg, #121212) !important;
   font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
 /* every pane glass.css painted black or see-through: the chat list, its rows, the conversation, headers */
 html.dg-glass :is([data-dg-sidebar], [data-dg-column]),
 html.dg-glass.dg-chat [data-dg-header],
 html.dg-glass.dg-list [data-dg-clear] {
-  background: #121212 !important;
+  background: var(--dg-bg, #121212) !important;
 }
 /* the conversation pane keeps its background-image: that is the chat wallpaper */
-html.dg-glass.dg-chat [data-dg-flat] { background-color: #121212 !important; }
+html.dg-glass.dg-chat [data-dg-flat] { background-color: var(--dg-bg, #121212) !important; }
 html.dg-glass.dg-chat [data-dg-header],
 html.dg-glass.dg-list [data-dg-clear] {
   box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.08) !important;
@@ -49,13 +49,13 @@ html.dg-glass.dg-list [data-dg-fill] {
   margin: 0 !important;
   height: 100% !important;
   border-radius: 0 !important;
-  background-color: #121212 !important;
+  background-color: var(--dg-bg, #121212) !important;
   box-shadow: none !important;
 }
-html.dg-glass.dg-list [data-dg-fill]:hover { background-color: #1e1e1e !important; }
+html.dg-glass.dg-list [data-dg-fill]:hover { background-color: var(--dg-surface, #1e1e1e) !important; }
 /* search field and small buttons: Snapchat's raised grey */
 html.dg-glass.dg-list :is([data-dg-pill], [data-dg-faint]) {
-  background-color: #1e1e1e !important;
+  background-color: var(--dg-surface, #1e1e1e) !important;
   box-shadow: none !important;
 }
 html.dg-glass.dg-list [data-dg-pill]:focus-within { box-shadow: inset 0 0 0 2px #0fadff !important; }
@@ -66,10 +66,6 @@ html.dg-glass.dg-chat li[data-dg-bubble] {
   border-color: transparent !important;
   box-shadow: none !important;
 }
-/* GIF picker in the same palette */
-.dg-gif-panel { background: #1e1e1e !important; }
-.dg-gif-search:focus, .dg-gif-tile:hover { border-color: #0fadff !important; outline-color: #0fadff !important; }
-.dg-gif-tabs button.dg-gif-tab-on { background: #0fadff !important; }
 html.dg-glass :is(input, textarea, button) {
   font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
@@ -77,15 +73,6 @@ html.dg-glass :is(input, textarea, button) {
   html.dg-glass :is(input, textarea, [contenteditable="true"]) {
     font-size: 16px !important;
   }
-  .dg-gif-panel {
-    left: max(8px, env(safe-area-inset-left)) !important;
-    right: max(8px, env(safe-area-inset-right)) !important;
-    bottom: max(8px, env(safe-area-inset-bottom)) !important;
-    width: auto !important;
-    height: min(420px, 60dvh) !important;
-    max-height: 60dvh !important;
-  }
-  .dg-gif-fav { opacity: 1; min-width: 32px; min-height: 32px; }
   .dg-gif-button { min-width: 44px; min-height: 44px; }
 }
 

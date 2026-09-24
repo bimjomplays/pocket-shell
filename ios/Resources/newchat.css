@@ -1,7 +1,7 @@
 /* New Chat sheet styled after the real app: rounded sheet with a grabber and title, tall "To:" pill,
    "New Group" card, friend cards and one rounded Recents group. SHEET = the fixed box, BOX = its inner div. */
 html.dg-list [data-dg-column] div:has(> div > form [role="searchbox"]) {
-  background: #121212 !important; border-radius: 22px 22px 0 0 !important; overflow: hidden !important;
+  background: var(--dg-bg, #121212) !important; border-radius: 22px 22px 0 0 !important; overflow: hidden !important;
 }
 html.dg-list [data-dg-column] div:has(> form [role="searchbox"]) { padding-top: 66px !important; position: relative !important; }
 html.dg-list [data-dg-column] div:has(> form [role="searchbox"])::before {
@@ -10,10 +10,10 @@ html.dg-list [data-dg-column] div:has(> form [role="searchbox"])::before {
 }
 html.dg-list [data-dg-column] div:has(> form [role="searchbox"])::after {
   content: "New Chat"; position: absolute; top: 26px; left: 0; right: 0; text-align: center;
-  color: #fff; font: 600 23px/1.2 -apple-system, BlinkMacSystemFont, sans-serif;
+  color: var(--dg-text, #fff); font: 600 23px/1.2 -apple-system, BlinkMacSystemFont, sans-serif;
   padding-bottom: 12px; border-bottom: 2px solid #2b2b2b;
 }
-html.dg-list [data-dg-column] form:has([role="searchbox"]) > div { padding: 14px 18px 0 !important; background: #121212 !important; }
+html.dg-list [data-dg-column] form:has([role="searchbox"]) > div { padding: 14px 18px 0 !important; background: var(--dg-bg, #121212) !important; }
 /* To: pill + New Group card. Snapchat's pill holds [search icon + "To:" field] and the Group button: the
    pill itself goes transparent and wraps, its first child becomes the pill, the button the card under it. */
 html.dg-list [data-dg-column] form div[role="searchbox"] {
@@ -28,27 +28,27 @@ html.dg-list [data-dg-column] form div[role="searchbox"] > div:first-child {
 html.dg-list [data-dg-column] form div[role="searchbox"] > div:first-child > svg { display: none !important; }
 html.dg-list [data-dg-column] form div[role="searchbox"] > button {
   position: static !important; flex: 1 1 100% !important; height: 66px !important; border-radius: 12px !important;
-  background: #1e1e1e !important; color: #fff !important; justify-content: flex-start !important; margin: 0 !important;
+  background: var(--dg-surface, #1e1e1e) !important; color: var(--dg-text, #fff) !important; justify-content: flex-start !important; margin: 0 !important;
   padding: 0 22px !important; gap: 18px !important; display: flex !important; align-items: center !important;
 }
 html.dg-list [data-dg-column] form div[role="searchbox"] > button svg { transform: scale(1.5); }
 html.dg-list [data-dg-column] form div[role="searchbox"] > button span { font-size: 0 !important; }
 html.dg-list [data-dg-column] form div[role="searchbox"] > button span::after {
-  content: "New Group"; font: 500 22px/1.2 -apple-system, BlinkMacSystemFont, sans-serif; color: #fff;
+  content: "New Group"; font: 500 22px/1.2 -apple-system, BlinkMacSystemFont, sans-serif; color: var(--dg-text, #fff);
 }
 html.dg-list [data-dg-column] form div[role="searchbox"] > button::after {
-  content: "\203A"; margin-left: auto; font: 300 34px/1 -apple-system, sans-serif; color: #dedede;
+  content: "\203A"; margin-left: auto; font: 300 34px/1 -apple-system, sans-serif; color: var(--dg-text-secondary, #dedede);
 }
 /* lists (LIST = the form's scrolling ul) */
 html.dg-list [data-dg-column] form:has([role="searchbox"]) > div > ul { padding: 4px 0 24px !important; }
 html.dg-list [data-dg-column] form:has([role="searchbox"]) > div > ul h2 { margin: 20px 2px 12px !important; padding: 0 !important; }
 html.dg-list [data-dg-column] form:has([role="searchbox"]) > div > ul h2 span {
-  font: 700 17px/1.2 -apple-system, BlinkMacSystemFont, sans-serif !important; color: #fff !important;
+  font: 700 17px/1.2 -apple-system, BlinkMacSystemFont, sans-serif !important; color: var(--dg-text, #fff) !important;
 }
 html.dg-list [data-dg-column] form:has([role="searchbox"]) > div > ul > ul { gap: 6px !important; }
 html.dg-list [data-dg-column] form:has([role="searchbox"]) > div > ul li > div:has(img) {
   min-height: 64px !important; height: auto !important; padding: 6px 12px !important; box-sizing: border-box !important;
-  background: #1e1e1e !important; border: 0 !important; box-shadow: none !important; gap: 12px !important;
+  background: var(--dg-surface, #1e1e1e) !important; border: 0 !important; box-shadow: none !important; gap: 12px !important;
   align-items: center !important;
 }
 html.dg-list [data-dg-column] form:has([role="searchbox"]) > div > ul > ul > li > div { border-radius: 12px !important; }

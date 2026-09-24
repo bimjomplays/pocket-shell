@@ -15,7 +15,7 @@ html.dg-camera #snap-preview-container > div:last-child:has(> button) > button s
 }
 html.dg-camera #snap-preview-container > div:last-child:has(> button) > button svg { transform: scale(1.5) !important; }
 html.dg-camera #snap-preview-container > div:last-child:has(> button) > button:last-child {
-  background: #0fadff !important; color: #fff !important; padding: 0 30px !important;
+  background: var(--dg-accent, #0fadff) !important; color: #fff !important; padding: 0 30px !important;
 }
 /* top tools (close, caption, ...): bigger round buttons */
 html.dg-camera #snap-preview-container > div:first-child > button,

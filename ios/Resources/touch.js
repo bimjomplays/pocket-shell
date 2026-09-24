@@ -28,10 +28,27 @@
     @keyframes dg-slide-in { from { transform: translateX(28%); opacity: 0; } to { transform: none; opacity: 1; } }
     @keyframes dg-fade-in { from { opacity: 0; } to { opacity: 1; } }
     html.dg-chat [data-dg-column] { animation: dg-slide-in 0.16s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
-    html.dg-chat[data-dg-settling] [data-dg-column] { animation: none !important; opacity: 0 !important; }
+    /* Opening a chat: the pane (header + message box) slides in at once; only the messages wait until Snapchat has
+       loaded them and chat.js has pinned them to the newest one, with placeholder bubbles shimmering meanwhile.
+       (Holding back the whole pane hid the jump but made opening feel slow - device report 2026-09-21.) */
+    html.dg-chat [data-dg-column] ul[id^="cv-"] { transition: opacity 0.12s ease; }
+    html.dg-chat[data-dg-settling] [data-dg-column] ul[id^="cv-"] { opacity: 0 !important; transition: none; }
+    html.dg-chat [data-dg-column] { position: relative; }
+    html.dg-chat[data-dg-settling] [data-dg-column]::after {
+      content: ""; position: absolute; left: 14px; right: 14px; bottom: 96px; height: 320px; pointer-events: none; z-index: 5;
+      background:
+        linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.06) 50%, transparent 70%) 0 0 / 200% 100% no-repeat,
+        linear-gradient(var(--dg-surface, #1e1e1e), var(--dg-surface, #1e1e1e)) 0 0 / 62% 54px no-repeat,
+        linear-gradient(var(--dg-surface, #1e1e1e), var(--dg-surface, #1e1e1e)) 0 70px / 44% 40px no-repeat,
+        linear-gradient(var(--dg-surface, #1e1e1e), var(--dg-surface, #1e1e1e)) 0 126px / 70% 72px no-repeat,
+        linear-gradient(var(--dg-surface, #1e1e1e), var(--dg-surface, #1e1e1e)) 0 214px / 38% 40px no-repeat,
+        linear-gradient(var(--dg-surface, #1e1e1e), var(--dg-surface, #1e1e1e)) 0 270px / 56% 50px no-repeat;
+      border-radius: 12px; animation: dg-shimmer 1.1s linear infinite;
+    }
+    @keyframes dg-shimmer { from { background-position: 150% 0, 0 0, 0 70px, 0 126px, 0 214px, 0 270px; } to { background-position: -50% 0, 0 0, 0 70px, 0 126px, 0 214px, 0 270px; } }
     html.dg-list:not(.dg-stories) [data-dg-sidebar] { animation: dg-fade-in 0.18s ease both; }
     @media (prefers-reduced-motion: reduce) {
-      html.dg-chat [data-dg-column], html.dg-list [data-dg-sidebar] { animation: none !important; }
+      html.dg-chat [data-dg-column], html.dg-list [data-dg-sidebar], html.dg-chat [data-dg-column]::after { animation: none !important; }
     }`;
   let pressed = null, px = 0, py = 0;
   const release = () => { if (pressed) { pressed.removeAttribute("data-dg-pressed"); pressed = null; } };
@@ -50,6 +67,13 @@
   }, { capture: true, passive: true });
   addEventListener("touchend", () => setTimeout(release, 60), { capture: true, passive: true }); // long enough to be seen on a quick tap
   addEventListener("touchcancel", release, { capture: true, passive: true });
+  // a light tap on the phone when a message goes out (the send arrow inside the message field), like the app;
+  // the app skips it when haptics are switched off in Settings
+  addEventListener("touchend", (e) => {
+    const b = e.target.closest && e.target.closest("[data-dg-cmp-field] button");
+    if (!b || e.changedTouches.length !== 1) return;
+    try { window.webkit.messageHandlers.dg.postMessage({ op: "haptic", style: "light" }).catch(() => {}); } catch (err) {}
+  }, { capture: true, passive: true });
 
   (function start() {
     if (!document.documentElement) return void setTimeout(start, 10);

@@ -5,7 +5,8 @@
   let last = "";
   const report = () => {
     const c = document.documentElement.classList;
-    const chat = c.contains("dg-chat"), stories = c.contains("dg-stories") || c.contains("dg-camera");
+    // (a chat still being dragged open is not "open" for the native side yet: no tab-bar / resize mid-drag)
+    const chat = c.contains("dg-chat") && document.documentElement.getAttribute("data-dg-peek") !== "open", stories = c.contains("dg-stories") || c.contains("dg-camera");
     // opening a chat ends stories / camera mode. Only touch the class list when there is something to
     // remove: WebKit reports a class mutation even for a no-op remove(), and this runs from a class
     // observer - unconditional, it looped forever and hung the page the moment a chat opened.
@@ -73,7 +74,7 @@
       + " videoBytes " + v.webkitVideoDecodedByteCount + " duration " + (v.duration || 0).toFixed(1));
   }, 700);
   note("start " + location.pathname);
-  new MutationObserver(report).observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+  new MutationObserver(report).observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-dg-peek"] });
   setInterval(report, 500);
   report();
 })();

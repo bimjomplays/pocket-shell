@@ -17,7 +17,8 @@
   const html = document.documentElement;
   let open = false, touched = false;
   let rafId = 0, until = 0, firstPinAt = 0, hiddenEl = null, shown = false, lastH = -1, calm = 0;
-  addEventListener("touchmove", () => { touched = true; stop(); }, { passive: true, capture: true });
+  // a finger scrolling the chat ends the pinning - but not a finger dragging the whole chat open (gestures.js peek)
+  addEventListener("touchmove", () => { if (html.hasAttribute("data-dg-peek")) return; touched = true; stop(); }, { passive: true, capture: true });
   // dragging the conversation puts the keyboard away, like Messages / the Snapchat app
   let startY = null;
   addEventListener("touchstart", (e) => {
@@ -51,7 +52,7 @@
     if (!hiddenEl) return;
     hiddenEl = null;
     shown = true;
-    html.removeAttribute("data-dg-settling"); // touch.js's slide-in animation starts now, on a finished layout
+    html.removeAttribute("data-dg-settling"); // the messages fade in, already at the newest one (touch.js)
   }
   function stop() {
     if (rafId) cancelAnimationFrame(rafId);
@@ -203,4 +204,10 @@
     rafId = requestAnimationFrame(tick);
     record();
   }).observe(html, { attributes: true, attributeFilter: ["class"] });
+  // a chat dragged open (gestures.js) may take longer than the pinning window: pin once more when the drag ends
+  new MutationObserver(() => {
+    if (!open || touched || html.hasAttribute("data-dg-peek")) return;
+    until = Math.max(until, performance.now() + 500);
+    if (!rafId) rafId = requestAnimationFrame(tick);
+  }).observe(html, { attributes: true, attributeFilter: ["data-dg-peek"] });
 })();
