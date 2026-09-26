@@ -31,7 +31,8 @@
   // shows them as pop-ups (an internal hiccup isn't something the user can act on).
   function trail(where, message, type = "log") {
     try { console.log("[ghost]", where, message); } catch { /* ignore */ }
-    post({ ghost: "event", type, data: { where, message: String(message && message.stack || message) } });
+    const text = message && message.message ? message.message + (message.stack ? " | " + String(message.stack).split("\n")[0] : "") : String(message);
+    post({ ghost: "event", type, data: { where, message: text } });
   }
 
   function safe(where, fn, fallback) {
@@ -314,6 +315,54 @@
     };
   }
 
+  // Friends/people: state.user.publicUsers is a Map userId -> { user_id, username, display_name, mutable_username,
+  // bitmoji_avatar_id, bitmoji_selfie_id? } (main.js: "publicUsers:new Map", readers `.get(userId)`, and the
+  // search/friend-picker code reading e.display_name / e.mutable_username). Device run 1 showed every
+  // conversation as "Conversation": the old code looked for names inside messaging.conversations, which has none.
+  function publicUser(id) {
+    const s = state();
+    const map = s && s.user && s.user.publicUsers;
+    if (!id || !map) return null;
+    const raw = typeof map.get === "function" ? map.get(id) : map[id];
+    if (!raw) return null;
+    const name = firstString(raw.display_name, raw.displayName, raw.display, raw.mutable_username, raw.username);
+    return {
+      id,
+      name: name || id,
+      username: firstString(raw.mutable_username, raw.username),
+      avatarUrl: undefined,
+      bitmojiUrl: bitmojiUrl(firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId), firstString(raw.bitmoji_selfie_id, raw.bitmojiSelfieId)),
+    };
+  }
+  const idOf = (p) => (typeof p === "string" ? p : p && firstString(p.id, p.userId, p.user_id, p.participantId, p.str)) || undefined;
+  let meIdCache = null;
+  function meId() {
+    if (meIdCache) return meIdCache;
+    const s = state();
+    const direct = s && s.auth && firstString(s.auth.userId, s.auth.user_id, s.auth.currentUserId);
+    if (direct) return (meIdCache = direct);
+    const counts = new Map();
+    const feed = messaging().feed || {};
+    const keys = Object.keys(feed);
+    for (const k of keys) for (const p of (feed[k] && feed[k].participants) || []) { const id = idOf(p); if (id) counts.set(id, (counts.get(id) || 0) + 1); }
+    let best = null, bestN = 0;
+    for (const [id, n] of counts) if (n > bestN) { best = id; bestN = n; }
+    if (best && keys.length >= 3 && bestN >= keys.length * 0.8) meIdCache = best; // you're in every chat of yours
+    return best;
+  }
+  function personFor(id) { return publicUser(id) || (id ? { id, name: "Unknown", username: undefined } : null); }
+  function newestTimestamp(obj, depth) {
+    let best = 0;
+    if (!obj || typeof obj !== "object" || depth < 0) return best;
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (typeof v === "number" && /time|Ts$|Ms$|stamp/i.test(k) && v > 1e12 && v < 4e12 && v > best) best = v;
+      else if (typeof v === "string" && /time|stamp/i.test(k) && /^\d{13}$/.test(v) && +v > best) best = +v;
+      else if (v && typeof v === "object" && !(v instanceof Map)) best = Math.max(best, newestTimestamp(v, depth - 1));
+    }
+    return best;
+  }
+
   function conversationTitleAndParticipants(entry) {
     const conv = entry && entry.conversation;
     const rawParticipants = (conv && (conv.participants || conv.participantUsers)) || [];
@@ -327,6 +376,8 @@
   }
 
   function toConversation(key, entry) {
+    const feed = (messaging().feed || {})[key];
+    if (feed) return safe("feed-conversation", () => fromFeed(key, feed, entry), null);
     if (!entry) return null;
     const { title, isGroup, participants } = conversationTitleAndParticipants(entry);
     let lastMessage = null;
@@ -357,6 +408,56 @@
     };
   }
 
+  // A feed entry (state.messaging.feed[conversationId]) is what Snapchat's own chat list renders; fields read by the
+  // bundle: conversationId, participants, conversationType, conversationTitle, streakMetadata {count,
+  // expirationTimestampMs}, displayInfo { feedItem {snap|chat|call|...}, feedItemCreatorId, viewed,
+  // lastSenderUserIds, isLocked }.
+  function fromFeed(key, feed, entry) {
+    const me = meId();
+    const ids = ((feed.participants) || []).map(idOf).filter(Boolean);
+    const others = ids.filter((id) => id !== me);
+    const participants = others.map(personFor).filter(Boolean);
+    const isGroup = others.length > 1 || feed.conversationType === 1;
+    const title = firstString(feed.conversationTitle) || participants.map((p) => p.name).join(", ") || "Conversation";
+    const info = feed.displayInfo || {};
+    const item = info.feedItem || {};
+    const creator = idOf(info.feedItemCreatorId);
+    const fromMe = !!(creator && me && creator === me);
+    const kindCase = item.$case || ["snap", "chat", "call", "chatMedia", "note"].find((k) => item[k]) || "none";
+    const kind = { snap: "snap", chat: "text", call: "call", chatMedia: "chat-media", note: "audio" }[kindCase] || "none";
+    const unread = info.viewed === false && !fromMe;
+    const streak = feed.streakMetadata && feed.streakMetadata.count ? {
+      count: Number(feed.streakMetadata.count) || 0,
+      expiring: !!(feed.streakMetadata.expirationTimestampMs && Number(feed.streakMetadata.expirationTimestampMs) - Date.now() < 4 * 3600e3),
+    } : undefined;
+    let text;
+    if (kind === "text" && entry && entry.messages && typeof entry.messages.values === "function") {
+      let last = null; for (const m of entry.messages.values()) last = m;
+      const norm = last && toMessage(key, undefined, last);
+      if (norm && norm.kind === "text") text = norm.text;
+    }
+    return {
+      id: key,
+      title,
+      isGroup,
+      participants,
+      avatarUrl: undefined,
+      lastActivityTs: newestTimestamp(feed, 3) || 0,
+      preview: { kind, text, fromMe, status: info.viewed ? (fromMe ? "opened" : "viewed") : (fromMe ? "delivered" : "received") },
+      unreadCount: unread ? 1 : 0,
+      hasUnreadSnap: unread && kind === "snap",
+      streak,
+      muted: undefined,
+      pinned: undefined,
+    };
+  }
+  const allConversationIds = () => {
+    const m = messaging();
+    const ids = new Set(Object.keys(m.feed || {}));
+    for (const k of Object.keys(m.conversations || {})) ids.add(k);
+    return [...ids];
+  };
+
   // ------------------------------------------------------------------------------------------------
   // 4. events: `ready` once, `conversations` on every store change (throttled ~150ms per API.md).
   // ------------------------------------------------------------------------------------------------
@@ -367,7 +468,7 @@
   const emitConversations = throttle(() => {
     const convs = safe("conversations", () => {
       const map = messaging().conversations || {};
-      return Object.keys(map).map((k) => toConversation(k, map[k])).filter(Boolean);
+      return allConversationIds().map((k) => toConversation(k, map[k])).filter(Boolean).sort((a, b) => b.lastActivityTs - a.lastActivityTs);
     }, []);
     post({ ghost: "event", type: "conversations", data: { conversations: convs } });
   }, 150);
@@ -387,6 +488,8 @@
   }, 150);
 
   function meUser() {
+    const id = meId();
+    if (id) return personFor(id);
     // Best-effort / low confidence: no single "current user profile" slice was pinned down while reading
     // the bundle (see BRIDGE_NOTES.md). Heuristic: scan top-level state slices for the first flat object
     // that looks like a User by itself (not a map of them) - typically a "profile"/"identity"/"user"-ish
@@ -439,7 +542,7 @@
     listConversations() {
       requireStore();
       const map = messaging().conversations || {};
-      return Object.keys(map).map((k) => toConversation(k, map[k])).filter(Boolean);
+      return allConversationIds().map((k) => toConversation(k, map[k])).filter(Boolean).sort((a, b) => b.lastActivityTs - a.lastActivityTs);
     },
 
     async openConversation(conversationId) {
@@ -450,8 +553,17 @@
       // "enterConversation:async"); it internally re-derives the conversation id itself
       // ((0,ar.QA)(n)), fetches messages if needed, and is also what clears the unread state the same
       // way opening a chat in the real UI does.
-      if (typeof m.enterConversation === "function") await m.enterConversation(conversationId, "GHOST");
+      // Snapchat's chat pane: `useEffect(() => { enterConversation(conversationId, conversationType) })` - the second
+      // argument is the conversation TYPE (device run 1 passed a string here and every open threw).
+      const type = safe("conv-type", () => ((messaging().feed || {})[conversationId] || {}).conversationType, undefined);
+      if (typeof m.enterConversation === "function") await m.enterConversation(conversationId, type);
       const entry = conversationEntry(conversationId);
+      // ...and it reports the newest message as seen via displayedMessages(conversationId, messageId) = read receipt,
+      // exactly once per open like the real chat screen (only for the chat you actually opened)
+      safe("displayed", () => {
+        let lastId; if (entry && entry.messages && typeof entry.messages.keys === "function") for (const k of entry.messages.keys()) lastId = k;
+        if (lastId !== undefined && typeof m.displayedMessages === "function") Promise.resolve(m.displayedMessages(conversationId, lastId)).catch((e) => trail("displayed", e, "error"));
+      });
       const list = [];
       if (entry && entry.messages && typeof entry.messages.entries === "function") {
         for (const [id, msg] of entry.messages.entries()) { const n = toMessage(conversationId, id, msg); if (n) list.push(n); }
@@ -464,7 +576,7 @@
       requireStore();
       openConversations.delete(conversationId);
       const m = messaging();
-      if (typeof m.exitConversation === "function") await m.exitConversation(conversationId, "GHOST");
+      if (typeof m.exitConversation === "function") await m.exitConversation(conversationId);
       return true;
     },
 
@@ -486,7 +598,7 @@
       const m = messaging();
       if (typeof m.sendTextMessage !== "function") throw new Error("sendTextMessage action missing");
       const replyOpts = opts && opts.replyToMessageId ? { messageId: opts.replyToMessageId } : undefined;
-      await m.sendTextMessage(conversationId, text, replyOpts, "GHOST");
+      await (replyOpts ? m.sendTextMessage(conversationId, text, replyOpts) : m.sendTextMessage(conversationId, text));
       return {};
     },
 
@@ -625,6 +737,39 @@
       const s = state();
       return shapeOf(s, 3);
     },
+  };
+
+  // One sample of each record we rely on, as structure only: strings become "str(<length>)", numbers stay (ids and
+  // timestamps, not content). Lets the next round wire names/messages/snaps exactly from the phone's log.
+  function redacted(value, depth) {
+    if (value == null) return value === null ? null : "undefined";
+    const t = typeof value;
+    if (t === "string") return "str(" + value.length + ")";
+    if (t === "number" || t === "boolean") return value;
+    if (t === "function") return "fn";
+    if (t === "bigint") return "bigint";
+    if (value instanceof Uint8Array) return "bytes(" + value.length + ")";
+    if (value instanceof Map) { const e = value.entries().next().value; return { __map: value.size, first: e ? [redacted(e[0], 0), depth > 0 ? redacted(e[1], depth - 1) : "…"] : null }; }
+    if (value instanceof Set) return "Set(" + value.size + ")";
+    if (Array.isArray(value)) return { __array: value.length, first: value.length && depth > 0 ? redacted(value[0], depth - 1) : undefined };
+    if (depth <= 0) return "{" + Object.keys(value).slice(0, 12).join(",") + "}";
+    const out = {}; let n = 0;
+    for (const k of Object.keys(value)) { if (++n > 40) { out["…"] = Object.keys(value).length; break; } out[k] = safe("redact", () => redacted(value[k], depth - 1), "?"); }
+    return out;
+  }
+  methods.debugSample = () => {
+    const s = state() || {}, m = s.messaging || {};
+    const firstVal = (o) => (o && typeof o === "object" ? o[Object.keys(o)[0]] : undefined);
+    const users = s.user && s.user.publicUsers;
+    return {
+      topKeys: Object.keys(s),
+      authKeys: s.auth ? Object.keys(s.auth) : null,
+      userKeys: s.user ? Object.keys(s.user) : null,
+      meGuess: meId() ? "found" : "none",
+      feedEntry: redacted(firstVal(m.feed), 5),
+      conversationEntry: redacted(firstVal(m.conversations), 5),
+      publicUser: users && typeof users.values === "function" ? redacted(users.values().next().value, 3) : redacted(users, 1),
+    };
   };
 
   // Keys/types only, recursively, capped in depth and breadth so this stays small and NEVER includes

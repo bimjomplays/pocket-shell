@@ -399,10 +399,14 @@
     bridge.on("ready", (d) => {
       if (shapeLogged || !(d && d.loggedIn)) return;
       shapeLogged = true;
-      setTimeout(() => api.debugShape().then((shape) => {
-        const text = JSON.stringify(shape);
-        for (let i = 0; i < Math.min(text.length, 24000); i += 1500) toTrail("shape")({ where: "part " + (i / 1500 + 1), message: text.slice(i, i + 1500) });
-      }, (e) => toTrail("error")({ where: "debugShape", message: e })), 4000);
+      // (log lines are cut at 400 characters, so long dumps go out in 380-character parts)
+      const dump = (label, obj) => {
+        const text = JSON.stringify(obj);
+        for (let i = 0, n = 1; i < Math.min(text.length, 40000); i += 380, n++) toTrail(label)({ where: "part " + n, message: text.slice(i, i + 380) });
+      };
+      setTimeout(() => {
+        bridge.call("debugSample").then((x) => dump("sample", x), (e) => toTrail("error")({ where: "debugSample", message: e }));
+      }, 4000);
     });
 
     // bridge.js's own `ready` may already have fired before this listener existed — ask directly too.
