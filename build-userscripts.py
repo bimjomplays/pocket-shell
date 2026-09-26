@@ -72,6 +72,14 @@ app = root / 'ios' / 'Resources'
 (app / 'hooks.js').write_text(hooks)
 (app / 'ui.js').write_text(content)
 
+# Ghost line (branch try/ghost): the new UI and its data bridge, bundled for App.swift's GhostMode
+ghost = root / 'ghost'
+if (ghost / 'bridge.js').exists():
+    (app / 'ghost-bridge.js').write_text((ghost / 'bridge.js').read_text())
+if (ghost / 'ui.js').exists():
+    css = (ghost / 'ui.css').read_text() if (ghost / 'ui.css').exists() else ''
+    (app / 'ghost-ui.js').write_text('const GHOST_CSS = ' + json.dumps(css) + ';\n' + (ghost / 'ui.js').read_text())
+
 with zipfile.ZipFile(root / 'Dark-Mobile-Safari.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
     for path in sorted(out.glob('*.user.js')):
         archive.write(path, path.name)

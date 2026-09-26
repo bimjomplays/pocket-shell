@@ -42,6 +42,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 ///   backs the GM.* calls with the "dg" message handler below (settings in UserDefaults, Giphy downloads).
 final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply, UIScrollViewDelegate {
     private static let home = URL(string: "https://www.snapchat.com/web")!
+    /// Ghost (branch try/ghost): a completely different app UI (ghost-ui.js) over a hidden Snapchat Web page, fed by
+    /// ghost-bridge.js. Set by the GhostMode Info.plist key; without it this is the Snapchat-look app.
+    static let ghostMode = Bundle.main.object(forInfoDictionaryKey: "GhostMode") as? Bool ?? false
     // Logged out, Snapchat shows "Download Snapchat" instead of the login form when the page is narrower
     // than ~700px, and WKWebView has no "Request Desktop Website" (Safari's private wide-layout setting;
     // a width=980 viewport tag was ignored too). So outside Snapchat Web itself the web view is
@@ -123,15 +126,27 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                                            forMainFrameOnly: true, in: .page))
         scripts.addUserScript(WKUserScript(source: Self.resource("hooks"), injectionTime: .atDocumentStart,
                                            forMainFrameOnly: true, in: .page))
+        if Self.ghostMode { // reaches Snapchat's own app state before Snapchat's scripts run
+            scripts.addUserScript(WKUserScript(source: Self.resource("ghost-bridge"), injectionTime: .atDocumentStart,
+                                               forMainFrameOnly: true, in: .page))
+        }
         // Settings, darkmobile world: window.__dgSettingsInit first, then settings.js right after gm-shim so
         // every later script in this list can call dgSetting()/dgOnSettings()/dgSetSetting()/dgOpenSettings()
         // from the moment it runs. appmenu.js (after header.js) wires header.js's decorative "..." button to
         // dgOpenSettings().
         // one script, in this order: settings first, then the page scripts, then the stylesheets (an array + joined, not a
         // long `+` chain: Swift's type checker can give up on those)
-        let worldScripts: [String] = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON);"]
-            + ["gm-shim", "settings", "ui", "bridge", "theme", "textscale", "header", "appmenu", "stories", "camera", "fit", "touch", "chat", "gestures", "qol", "perf", "streaks"].map { Self.resource($0) }
-            + ["newchat", "camera", "stories", "header", "snap", "chat", "gestures", "gifs", "theme", "qol"].map { Self.cssScript($0) }
+        var worldScripts: [String]
+        if Self.ghostMode {
+            // Ghost: only the plumbing + the new UI (no Snapchat restyling at all). __ghostScale lets the UI undo the
+            // page scale, so 1 CSS px of Ghost = 1 point on the phone.
+            worldScripts = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON); window.__ghostScale = \(Double(Self.appScale));"]
+            worldScripts += ["gm-shim", "settings", "bridge", "perf", "ghost-ui"].map { Self.resource($0) }
+        } else {
+            worldScripts = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON);"]
+            worldScripts += ["gm-shim", "settings", "ui", "bridge", "theme", "textscale", "header", "appmenu", "stories", "camera", "fit", "touch", "chat", "gestures", "qol", "perf", "streaks"].map { Self.resource($0) }
+            worldScripts += ["newchat", "camera", "stories", "header", "snap", "chat", "gestures", "gifs", "theme", "qol"].map { Self.cssScript($0) }
+        }
         scripts.addUserScript(WKUserScript(source: worldScripts.joined(separator: "\n"),
                                            injectionTime: .atDocumentStart, forMainFrameOnly: true, in: world))
         scripts.addScriptMessageHandler(self, contentWorld: world, name: "dg")
@@ -184,6 +199,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
 
         let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(edgeSwipe(_:)))
         edgeBack = back
+        back.isEnabled = !Self.ghostMode // Ghost has its own swipe-back
         back.edges = .left
         view.addGestureRecognizer(back)
 
@@ -301,13 +317,13 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         webView.backgroundColor = colors.background
         webView.scrollView.backgroundColor = colors.background
         tabBar.backgroundColor = colors.bar
-        let showBar = inApp && !chatOpen && !storiesOpen && keyboardOverlap == 0
+        let showBar = inApp && !Self.ghostMode && !chatOpen && !storiesOpen && keyboardOverlap == 0
         if showBar != lastShowBar {
             lastShowBar = showBar
             trail("NATIVE bar \(showBar) inApp \(inApp) chat \(chatOpen) stories \(storiesOpen) camera \(cameraOpen) kb \(keyboardOverlap)")
         }
         topTapView.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: insets.top)
-        closeStoriesButton.isHidden = !cameraOpen || previewOpen // stories: Snapchat's own X (top right) and the edge swipe close them
+        closeStoriesButton.isHidden = Self.ghostMode || !cameraOpen || previewOpen // stories: Snapchat's own X (top right) and the edge swipe close them
         // camera: top left (Snapchat's own menu sits top right); stories: top right
         closeStoriesButton.frame = CGRect(x: cameraOpen ? 12 : view.bounds.width - 56, y: insets.top + 8, width: 44, height: 44)
         let barTotal = Self.tabBarHeight + insets.bottom
@@ -512,7 +528,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-            guard let self, self.inApp, !self.healed else { return }
+            guard let self, self.inApp, !self.healed, !Self.ghostMode else { return } // (Ghost doesn't use Snapchat's layout)
             let check = "document.documentElement.classList.contains('dg-list') || document.documentElement.classList.contains('dg-chat')"
             self.webView.evaluateJavaScript(check) { result, _ in
                 guard (result as? Bool) == false else { return }
@@ -609,7 +625,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             storiesOpen = body["stories"] as? Bool ?? false
             cameraOpen = body["camera"] as? Bool ?? false
             previewOpen = body["preview"] as? Bool ?? false
-            edgeBack?.isEnabled = !((body["chat"] as? Bool ?? false) && !storiesOpen && !cameraOpen)
+            edgeBack?.isEnabled = !Self.ghostMode && !((body["chat"] as? Bool ?? false) && !storiesOpen && !cameraOpen)
             setChatOpen(body["chat"] as? Bool ?? false, force: true)
             replyHandler(true, nil)
 
@@ -806,7 +822,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
               let url = Self.launchPictureURL else { return }
         let config = WKSnapshotConfiguration()
         config.afterScreenUpdates = false
-        webView.evaluateJavaScript("document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2") { [weak self] ready, _ in
+        webView.evaluateJavaScript(Self.ghostMode ? "document.documentElement.hasAttribute('data-ghost-ready')" : "document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2") { [weak self] ready, _ in
             guard (ready as? Bool) == true, let self else { return }
             self.webView.takeSnapshot(with: config) { image, _ in
                 guard let data = image?.pngData() else { return }
@@ -820,7 +836,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private func checkLaunchCover() {
         guard launchCover.superview != nil else { return }
         launchCoverChecks += 1
-        let js = "document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2 && getComputedStyle(document.body).opacity === '1'"
+        let js = Self.ghostMode ? "document.documentElement.hasAttribute('data-ghost-ready')"
+            : "document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2 && getComputedStyle(document.body).opacity === '1'"
         webView.evaluateJavaScript(js) { [weak self] ready, _ in
             guard let self else { return }
             if !self.inApp || (ready as? Bool) == true || self.launchCoverChecks > 60 {
