@@ -758,7 +758,8 @@
     const streak = find(sm, (o) => "streakStatus" in o, 5);
     if (streak) { const st = toNum(streak.streakStatus); return { kind: "system", text: st === 2 ? "\uD83D\uDD25 Streak ended" : st === 3 ? "\uD83D\uDD25 Streak restored" : "\uD83D\uDD25 Streak started" }; }
     const saved = find(sm, (o) => "messageType" in o && "userId" in o && Object.keys(o).length <= 3, 5);
-    if (saved) return { kind: "system", text: who(saved.userId || senderId) + (toNum(saved.messageType) === 2 ? " saved a Snap" : " saved a chat") };
+    // {userId, messageType: CHAT 1 / SNAP 2} is Snapchat's "deleted" notice (what it leaves behind after Delete)
+    if (saved) return { kind: "system", text: who(saved.userId || senderId) + (toNum(saved.messageType) === 2 ? " deleted a Snap" : " deleted a chat") };
     return { kind: "system", text: "Chat update" };
   }
 
@@ -1434,6 +1435,11 @@
         // n.descriptor.conversationId / n.descriptor.messageId / n.metadata.reactions itself), not bare
         // ids - so a message we haven't seen yet (not in our local cache) can't be reacted to.
         if (!rawMessage) throw new Error("message not loaded locally, open the conversation first");
+        // switching reactions: take the old one off first (Snapchat's own bar does remove + add)
+        const me = meId();
+        const mineNow = ((rawMessage.metadata && rawMessage.metadata.reactions) || []).find((x) => idOf(x.userId) === me);
+        if (mineNow && typeof m.removeReaction === "function") await m.removeReaction(rawMessage);
+        const fresh = findRaw(entry.messages, messageId) || rawMessage;
         // Snapchat's reaction bar (main.js, search 'reactionSource:yn.hD.ACTION_MENU'): reactToMessage(message,
         // {intentionType: BigInt(n)}, {metricsMessageType: MEDIA 5, metricsMessageMediaType: NO_MEDIA 0, reactionSource:
         // ACTION_MENU 2}). Its reactions are a fixed set (LOVE 1 ... SALUTE 14); any other emoji goes as {emoji}.
@@ -1441,7 +1447,7 @@
           "\u2753": 8, "\uD83D\uDE18": 9, "\uD83D\uDE2D": 10, "\uD83D\uDC80": 11, "\u2757": 12, "\uD83D\uDE21": 13, "\uD83E\uDEE1": 14 };
         const intent = INTENT[emoji];
         const content = intent ? { intentionType: BigInt(intent) } : { emoji };
-        await m.reactToMessage(rawMessage, content, { metricsMessageType: 5, metricsMessageMediaType: 0, reactionSource: 2 });
+        await m.reactToMessage(fresh, content, { metricsMessageType: 5, metricsMessageMediaType: 0, reactionSource: 2 });
       }
       return true;
     },
@@ -1642,20 +1648,44 @@
       const d = raw && decodeContent(raw.messageContent);
       const sh = d && d.content && d.content.share && d.content.share.share;
       if (!sh) return { kind: "unknown" };
+      if (sh.$case === "legacyAd" || sh.$case === "legacyDiscover") {
+        // a shared video that carries its own encrypted file (like chat media): cover = the file itself if it's an image
+        const media = sh[sh.$case].media;
+        return { kind: sh.$case, video: !!(media && media.type !== 0), creator: sh.$case === "legacyAd" ? "Sponsored" : "Discover" };
+      }
       if (sh.$case !== "spotlightStoryShare") return { kind: sh.$case };
       const sp = (state() || {}).spotlight;
       if (!sp || typeof sp.fetchSingleSpotlightSnap !== "function") return { kind: "spotlight" };
       const r = await sp.fetchSingleSpotlightSnap(sh.spotlightStoryShare.compositeStoryId, undefined);
       shareCache.set(conversationId + "|" + messageId, r);
-      const at = r && r.attribution;
-      return { kind: "spotlight", thumb: r && r.decryptedThumbnailURL, views: r && r.engagementStats ? String(r.engagementStats.viewCount) : undefined,
-        creator: at && (at.displayName || at.username || (at.creator && at.creator.displayName)) };
+      const at = r && r.attribution, ci = r && r.snap && r.snap.creatorInfo;
+      return { kind: "spotlight", thumb: r && (r.decryptedThumbnailURL || r.chatDecryptedThumbnailURL), views: r && r.engagementStats ? String(r.engagementStats.viewCount) : undefined,
+        creator: (at && (at.displayName || at.username)) || (ci && (ci.displayName || ci.username)) || undefined };
     },
     async loadShare(conversationId, messageId) {
       requireStore();
+      const entry = conversationEntry(conversationId);
+      const raw = entry && entry.messages && findRaw(entry.messages, messageId);
+      const d = raw && decodeContent(raw.messageContent);
+      const sh = d && d.content && d.content.share && d.content.share.share;
+      if (sh && (sh.$case === "legacyAd" || sh.$case === "legacyDiscover")) { // (main.js m6: O5(media) + gw(remoteMediaReferences))
+        const media = sh[sh.$case].media;
+        const rmr = raw.messageContent.remoteMediaReferences && raw.messageContent.remoteMediaReferences[0];
+        const ref = rmr && mediaReferenceFromRaw(rmr.mediaReferences && rmr.mediaReferences[0]);
+        if (!media || !ref) throw new Error("not available");
+        const out = await resolveMediaInfos([{ mediaMetadata: { encryptionInfo: media.encryptionInfo, dimensions: media.dimensions, hasSound: media.hasSound, zipped: !!media.zipped }, mediaReference: ref }], undefined, "chat_share");
+        if (!out.length) throw new Error("not available");
+        return { media: out };
+      }
       let r = shareCache.get(conversationId + "|" + messageId);
       if (!r) { await methods.shareInfo(conversationId, messageId); r = shareCache.get(conversationId + "|" + messageId); }
       if (!r || !r.snap) throw new Error("not available");
+      // Spotlight videos come with a plain (unencrypted) copy on Snapchat's CDN: play that (device sample 2026-09-27:
+      // snap.mediaInfo.unencryptedFlatVideoUrl / boltWatermarkedVideoUrl on cf-st.sc-cdn.net)
+      const mi = r.snap.mediaInfo || {};
+      const flat = mi.unencryptedFlatVideoUrl || mi.boltWatermarkedVideoUrl;
+      if (flat) return { media: [{ type: "video", url: flat, durationSec: mi.duration || undefined }] };
+      if (mi.unencryptedImageUrl) return { media: [{ type: "image", url: mi.unencryptedImageUrl }] };
       // every media-looking object in the snap: {mediaUrl} or {mediaReference} with its key
       const found = [];
       const seen = new Set();

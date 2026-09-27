@@ -1668,3 +1668,8 @@ input, textarea {
 .gh-set-row .gh-avatar { width: 34px !important; height: 34px !important; }
 .gh-set-unhide { color: var(--gh-accent); font-weight: 600; font-size: 15px; padding: 6px 4px; }
 .gh-set-open { color: var(--gh-text-secondary); font-weight: 500; }
+.gh-react-more { width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.1); color: var(--gh-text); flex: none; }
+.gh-emoji-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; padding: 4px 0 12px; }
+.gh-emoji-cell { font-size: 28px; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border-radius: 10px; }
+.gh-emoji-cell:active { background: rgba(255,255,255,0.1); }
+.gh-share-still svg { display: none; }

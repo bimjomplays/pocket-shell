@@ -1709,10 +1709,14 @@
     meta.append(t1, t2);
     b.append(cover, meta, tickMetaEl(m, isMe, "gh-media-meta"));
     const convId = m.conversationId || ctx.state.currentConvId;
-    if (m.text === "Spotlight") api.shareInfo(convId, m.id).then((r) => {
+    api.shareInfo(convId, m.id).then((r) => {
       if (!r) return;
       if (r.thumb) { const img = el("img"); img.alt = ""; img.src = r.thumb; cover.prepend(img); }
       if (r.creator) t1.textContent = r.creator;
+      if (r.kind === "legacyAd" || r.kind === "legacyDiscover") {
+        t2.textContent = r.video ? "Video · Tap to watch" : "Tap to view";
+        if (!r.video) api.loadShare(convId, m.id).then((x) => { const ref = x && x.media && x.media[0]; if (ref && ref.url) { const img = el("img"); img.alt = ""; img.src = ref.url; cover.prepend(img); cover.classList.add("gh-share-still"); } }).catch(() => {});
+      }
       if (r.views) t2.textContent = Number(r.views).toLocaleString() + " views";
     }).catch(() => { t2.textContent = "No longer available"; });
     b.addEventListener("click", async () => {
@@ -2251,6 +2255,10 @@
       b.setAttribute("aria-label", "React " + emoji);
       reactRow.appendChild(b);
     }
+    const more = el("button", "gh-react-more gh-press");
+    more.appendChild(icon("plus", 20));
+    more.setAttribute("aria-label", "More reactions");
+    reactRow.appendChild(more);
     const replyItem = sheet.querySelector('[data-act="reply"]');
     replyItem.append(icon("reply"), textSpan("Reply"));
     const copyItem = sheet.querySelector('[data-act="copy"]');
@@ -2309,6 +2317,7 @@
         s.close();
       };
     }
+    s.reactRow.querySelector(".gh-react-more").onclick = () => { haptic("light"); s.close(); openEmojiReactPicker(ctx, convId, message); };
     s.replyItem.onclick = () => { setReplyTo(ctx, message); ctx.conv.textarea.focus(); s.close(); };
     s.copyItem.onclick = () => { copyToClipboard(message.text || ""); s.close(); };
     const saveLabel = s.saveItem.querySelector("span");
@@ -3200,6 +3209,25 @@
     mic.addEventListener("touchend", () => finish(false));
     mic.addEventListener("touchcancel", () => finish(true));
     mic.addEventListener("click", (e) => { if (!("ontouchstart" in window)) { if (r.rec) finish(false); else start(e.clientX); } });
+  }
+
+  // any emoji as a reaction (Snapchat's newer apps show these; the fixed set above goes as Snapchat's reaction ids)
+  const EMOJI_GRID = ("😀 😃 😄 😁 😆 🥹 😅 😂 🤣 🥲 ☺️ 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🥸 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 ☹️ 😣 😖 😫 😩 🥺 😢 😭 😮‍💨 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🫣 🤗 🫡 🤔 🫢 🤭 🤫 🤥 😶 🫠 😐 😑 😬 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🫥 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕 🤑 🤠 😈 👿 👹 👺 🤡 💩 👻 💀 ☠️ 👽 🤖 🎃 😺 😸 😹 😻 😼 😽 🙀 😿 😾 " +
+    "👍 👎 👊 ✊ 🤛 🤜 👏 🙌 🫶 👐 🤲 🤝 🙏 ✌️ 🤞 🫰 🤟 🤘 👌 🤌 🤏 👈 👉 👆 👇 ☝️ ✋ 🤚 🖐️ 🖖 👋 🤙 💪 🦾 🖕 ✍️ 🤳 💅 👀 👁️ 👅 👄 🫦 🧠 " +
+    "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❤️‍🔥 ❣️ 💕 💞 💓 💗 💖 💘 💝 💯 💢 💥 💫 💦 💨 🔥 ✨ ⭐ 🌟 ⚡ 🌈 ☀️ 🌙 ❄️ 💧 🎉 🎊 🎁 🏆 🥇 ⚽ 🏀 🎮 🎵 🎶 🎤 📸 💡 💰 💎 🚀 ✅ ❌ ⚠️ ❓ ❗ 🆗 🆒 🆕 🔞 💤").split(" ").filter(Boolean);
+  function openEmojiReactPicker(ctx, convId, message) {
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const t = el("div", "gh-set-group-title"); t.textContent = "React with any emoji"; s.sheet.appendChild(t);
+    const grid = el("div", "gh-emoji-grid");
+    for (const e of EMOJI_GRID) {
+      const b = el("button", "gh-emoji-cell gh-press"); b.textContent = e;
+      b.addEventListener("click", () => { haptic("light"); closeSheetGeneric(s.backdrop, s.sheet); api.react(convId, message.id, e).catch(() => ctx.showToast("Couldn't react")); });
+      grid.appendChild(b);
+    }
+    s.sheet.appendChild(grid);
+    openSheetGeneric(s.backdrop, s.sheet);
   }
 
   // =====================================================================================================
