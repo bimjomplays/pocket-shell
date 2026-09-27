@@ -1397,3 +1397,15 @@ input, textarea {
 .gh-sticker-tile:active { background: rgba(255,255,255,0.08); transform: scale(0.94); }
 .gh-sticker-tile img { width: 100%; height: 100%; object-fit: contain; }
 .gh-gif-empty { grid-column: 1 / -1; padding: 40px 16px; text-align: center; color: var(--gh-text-secondary); font-size: 14px; }
+/* your own stickers/GIFs picked up the blue outgoing-bubble background and got squeezed (device 2026-09-27) */
+.gh-group .gh-bubble.gh-sticker, .gh-group .gh-bubble.gh-gif-bubble { background: none; box-shadow: none; padding: 0; }
+.gh-group .gh-bubble.gh-sticker::before { display: none; }
+.gh-bubble.gh-sticker { width: max-content; max-width: none; }
+.gh-sticker img { width: 140px; height: 140px; max-width: 140px; max-height: 140px; min-width: 0; object-fit: contain; }
+/* the group row shrink-wraps its content, so the column's 78% cap was 78% of ITSELF - wide stickers overflowed the
+   screen. Cap the row against the chat width instead. */
+.gh-group { max-width: 80%; }
+.gh-messages[data-group="1"] .gh-group[data-me="0"] { max-width: calc(80% + 40px); }
+.gh-group-col { max-width: 100%; }
+/* stacked sticky date pills: the newer one must fully hide the older one under it */
+.gh-day-sep { background-color: rgb(30, 44, 58) !important; min-width: 104px; text-align: center; box-sizing: border-box; }
