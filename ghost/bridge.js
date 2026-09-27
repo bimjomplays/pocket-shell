@@ -314,6 +314,7 @@
   const CASE_KIND = { text: "text", snapReply: "text", storyReply: "text", botResponse: "text", chatMedia: "chat-media", externalMedia: "chat-media",
     externalMediaMessageContent: "chat-media", snapdoc: "snap", snap: "snap", snapMessageContent: "snap", tinySnap: "snap", note: "audio", voiceNote: "audio",
     sticker: "sticker", creativeToolItem: "gif", share: "unknown", storyShare: "unknown", spotlightShare: "unknown", url: "text" };
+  let gifSampled = false;
   const REACTION_EMOJI = { 1: "\u2764\uFE0F", 2: "\uD83D\uDE02", 3: "\uD83D\uDD25", 4: "\uD83D\uDC4D", 5: "\uD83D\uDE2E", 6: "\uD83D\uDE22", 7: "\uD83D\uDE21" };
   // message ids cross to the UI as strings; Snapchat's Map keys are bigints
   function findRaw(map, messageId) {
@@ -340,7 +341,15 @@
     else if (kase === "snapReply") text = c.snapReply && (c.snapReply.text || (c.snapReply.content && c.snapReply.content.text));
     else if (kase === "storyReply") text = c.storyReply && c.storyReply.text;
     else if (kase === "url") text = c.url && (c.url.url || c.url.text);
-    if (kase === "creativeToolItem") { const it = c.creativeToolItem; kind = it && (it.giphy || /giphy/i.test(JSON.stringify(Object.keys(it)))) ? "gif" : "sticker"; }
+    let media;
+    if (kase === "creativeToolItem") {
+      const it = c.creativeToolItem;
+      const json = safe("gif-json", () => JSON.stringify(it, (k, v) => (typeof v === "bigint" ? String(v) : v instanceof Uint8Array ? undefined : v)), "") || "";
+      const m = json.match(/giphy[^"]*?\/media\/(?:v1\.[^/"]+\/)?([A-Za-z0-9]{6,64})\//i) || json.match(/"(?:giphyId|gifId|id)"\s*:\s*"([A-Za-z0-9]{10,40})"/);
+      kind = /giphy/i.test(json) || m ? "gif" : "sticker";
+      if (m) media = [{ type: "image", url: "https://media.giphy.com/media/" + m[1] + "/giphy.webp" }];
+      else if (/giphy/i.test(json) && !gifSampled) { gifSampled = true; trail("sample-gif", json.replace(/"[^"]{1,}"/g, (x) => (/giphy|media|url|id/i.test(x) ? x : '"…"')).slice(0, 900)); }
+    }
     if (kind === "text" && typeof text !== "string") text = kase ? "" : undefined;
     const md = raw.metadata || {};
     const senderId = idOf(raw.senderId) || idOf(raw.senderUserId);
@@ -358,7 +367,7 @@
       ts: toNum(md.createdAt) || Date.now(),
       kind,
       text: text || (kind === "unknown" && kase ? "[" + kase + "]" : text),
-      media: undefined, // media download/decrypt goes through Snapchat's media manager - next step
+      media, // chat photos/videos: download/decrypt goes through Snapchat's media manager - next step
       replyTo: mc.quotedMessage ? { messageId: String(mc.quotedMessage.messageId || ""), text: undefined } : undefined,
       reactions: reactions.length ? reactions : undefined,
       saved: (md.savedBy || []).length > 0,
@@ -378,7 +387,42 @@
   const idObjs = new Map(); // uuid string -> Snapchat's {id, str} object, remembered from the feed
   let ensureFails = 0;
   const wantUsers = new Set(); // ids with no record yet: asked for via user.ensureUsers (what Snapchat does for rows)
+  // Snapchat's own lookup (main.js module with `e.user.mutualOutgoingAndBlockedFriends`, `e.user.publicUsers` and
+  // `e.user.fetchPublicInfo`): `f = id => state => users.get(id)` over friends, public users, requests and me.
+  // Friends are NOT all in publicUsers (device: ~50 "Unknown" rows), so this is tried first.
+  let userSelector;
+  function snapUserSelector() {
+    if (userSelector !== undefined) return userSelector;
+    userSelector = null;
+    safe("user-selector", () => {
+      const factories = webpackRequire && webpackRequire.m, s = state();
+      if (!factories || !s) return;
+      const probeId = meId();
+      for (const id of Object.keys(factories)) {
+        const src = String(factories[id]);
+        if (!src.includes("mutualOutgoingAndBlockedFriends") || !src.includes("fetchPublicInfo") || !src.includes("publicUsers")) continue;
+        const exp = webpackRequire(id);
+        for (const k of Object.keys(exp)) {
+          const fn = safe("sel-export", () => exp[k], null);
+          if (typeof fn !== "function" || fn.length !== 1) continue;
+          const r = safe("sel-probe", () => { const g = fn(probeId); return typeof g === "function" ? g(s) : undefined; }, undefined);
+          if (r && typeof r === "object" && ("display_name" in r || "mutable_username" in r || "username" in r)) {
+            userSelector = fn; trail("user-selector", "found in module " + id); return;
+          }
+        }
+      }
+      trail("user-selector", "not found", "error");
+    });
+    return userSelector;
+  }
   function publicUser(id) {
+    const sel = meId() ? snapUserSelector() : null;
+    const viaSnap = sel && safe("sel-get", () => sel(id)(state()), null);
+    if (viaSnap && typeof viaSnap === "object") {
+      const name = firstString(viaSnap.display_name, viaSnap.displayName, viaSnap.display, viaSnap.mutable_username, viaSnap.username);
+      if (name) return { id, name, username: firstString(viaSnap.mutable_username, viaSnap.username), avatarUrl: undefined,
+        bitmojiUrl: bitmojiUrl(firstString(viaSnap.bitmoji_avatar_id, viaSnap.bitmojiAvatarId), firstString(viaSnap.bitmoji_selfie_id, viaSnap.bitmojiSelfieId)) };
+    }
     const s = state();
     const map = s && s.user && s.user.publicUsers;
     if (!id || !map) return null;
@@ -442,9 +486,10 @@
     for (const k of Object.keys(obj)) {
       const v = obj[k];
       const num = typeof v === "bigint" ? Number(v) : v;
-      if (typeof num === "number" && /time|Ts$|Ms$|stamp/i.test(k) && num > 1e12 && num < 4e12 && num > best) best = num;
+      // (not expiry/deadline fields: those are in the future and sorted a stale chat to the top)
+      if (typeof num === "number" && /time|Ts$|Ms$|stamp/i.test(k) && !/expir|deadline/i.test(k) && num > 1e12 && num <= Date.now() + 60e3 && num > best) best = num;
       else if (typeof v === "string" && /time|stamp/i.test(k) && /^\d{13}$/.test(v) && +v > best) best = +v;
-      else if (v && typeof v === "object" && !(v instanceof Map)) best = Math.max(best, newestTimestamp(v, depth - 1));
+      else if (v && typeof v === "object" && !(v instanceof Map) && !/expir|deadline|notification/i.test(k)) best = Math.max(best, newestTimestamp(v, depth - 1));
     }
     return best;
   }
@@ -526,13 +571,16 @@
       const norm = last && toMessage(key, undefined, last);
       if (norm && norm.kind === "text") text = norm.text;
     }
+    // no text loaded yet (Snapchat only has message text for chats that were opened): say what Snapchat's list says
+    if (kind === "text" && !text) text = fromMe ? (info.viewed ? "Opened" : "Delivered") : (unread ? "New Chat" : "Received");
+    if (kind === "snap" && !text) text = fromMe ? (info.viewed ? "Opened" : "Delivered") : (unread ? "New Snap" : "Received");
     return {
       id: key,
       title,
       isGroup,
       participants,
       avatarUrl: undefined,
-      lastActivityTs: newestTimestamp(feed, 3) || 0,
+      lastActivityTs: toNum(info.displayTimestamp) || toNum(feed.lastEventUpdateTimestamp) || newestTimestamp(feed, 3) || 0,
       preview: { kind, text, fromMe, status: info.viewed ? (fromMe ? "opened" : "viewed") : (fromMe ? "delivered" : "received") },
       unreadCount: unread ? Math.max(1, unreadChats) : 0,
       hasUnreadSnap: unread && kind === "snap",
@@ -558,7 +606,7 @@
   setInterval(() => {
     if (!wantUsers.size || !store) return;
     const u = (state() || {}).user;
-    if (ensureFails >= 3) return;
+    if (ensureFails >= 1) return;
     const ids = [...wantUsers].slice(0, 64).map((id) => idObjs.get(id) || id); for (const id of [...wantUsers].slice(0, 64)) wantUsers.delete(id);
     if (u && typeof u.ensureUsers === "function") safe("ensureUsers", () => Promise.resolve(u.ensureUsers(ids)).then((recs) => {
       // it returns the records too: keep them, whether or not they land in publicUsers
@@ -566,6 +614,14 @@
       emitConversations();
     }).catch((e) => { ensureFails++; trail("ensureUsers", e, "error"); }));
   }, 1200);
+  let pages = 0;
+  setInterval(() => {
+    if (!store || pages >= 30) return;
+    const m = messaging();
+    if (m.hasNoMoreFeedEntries || m.queryingFeed || typeof m.pageFeed !== "function") return;
+    pages++;
+    safe("pageFeed", () => m.pageFeed());
+  }, 900);
   const allConversationIds = () => {
     const m = messaging();
     const ids = new Set(Object.keys(m.feed || {}));

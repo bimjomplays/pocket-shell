@@ -1650,7 +1650,22 @@
     s.body.appendChild(skelGrid);
     const res = await fetcher();
     if (mySeq !== s.seq) return;
-    if (!res || res.needKey) { s.body.innerHTML = ""; const n = el("div", "gh-gif-note"); n.textContent = "GIF search needs a GIPHY API key (set via GIF settings)."; s.body.appendChild(n); return; }
+    if (!res || res.needKey) { // Ghost is its own app, so it has its own key store: ask for the key right here
+      s.body.innerHTML = "";
+      const n = el("div", "gh-gif-note");
+      n.textContent = "GIFs need a free GIPHY API key once: developers.giphy.com \u2192 Create an App \u2192 API. Paste it here:";
+      const input = document.createElement("input");
+      input.className = "gh-gif-keyinput"; input.placeholder = "GIPHY API key"; input.autocapitalize = "off"; input.autocomplete = "off"; input.spellcheck = false;
+      input.style.cssText = "display:block;width:calc(100% - 32px);margin:12px 16px;padding:12px 14px;border-radius:12px;border:0;background:rgba(255,255,255,.08);color:inherit;font:16px -apple-system,system-ui,sans-serif";
+      const save = el("button", "gh-gif-keysave");
+      save.textContent = "Save";
+      save.style.cssText = "display:block;margin:0 16px;padding:11px 18px;border-radius:12px;border:0;background:#3e88f7;color:#fff;font:600 16px -apple-system,system-ui,sans-serif";
+      const go = async () => { const k = input.value.trim(); if (!k) return; await storage.set("giphyKey", k); s.body.innerHTML = ""; s.seq++; loadGifGrid(ctx, s, s.seq, fetcher); };
+      save.addEventListener("click", go);
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+      s.body.append(n, input, save);
+      return;
+    }
     if (res.error) { s.body.innerHTML = ""; const n = el("div", "gh-gif-note"); n.textContent = res.error; s.body.appendChild(n); return; }
     if (!res.results || !res.results.length) { s.body.innerHTML = ""; const n = el("div", "gh-gif-note"); n.textContent = "No GIFs found"; s.body.appendChild(n); return; }
     s.body.innerHTML = "";
