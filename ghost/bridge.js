@@ -1597,6 +1597,17 @@
     },
     flipCamera() { const c = window.__dgCam; if (c && typeof c.flip === "function") { c.flip(); return true; } return false; },
 
+    // Voice note: Snapchat's own voice-note sender (main.js 66836, the "$case:\"note\"...audio" encoder): it measures
+    // the clip, uploads it and sends the note - messaging.sendVoiceNote(destinations, blob, locale).
+    async sendVoiceNote(conversationId, blob) {
+      requireStore();
+      const m = messaging();
+      if (typeof m.sendVoiceNote !== "function") throw new Error("voice notes aren't available");
+      const file = blob instanceof File ? blob : new File([blob], "voice.m4a", { type: blob.type || "audio/mp4" });
+      await m.sendVoiceNote({ phoneNumbers: [], conversations: [convIdObj(conversationId)], stories: [], massSnaps: [] }, file, navigator.language || "en-US");
+      return true;
+    },
+
     // Favourite stickers: a sticker someone sent is kept as its exact message content (for Bitmoji/GIF/custom
     // stickers that's a reference to Snapchat's own copy of the image + its key), and sending a favourite sends that
     // same content again - the way Snapchat's own "favourite sticker" works, nothing re-uploaded.

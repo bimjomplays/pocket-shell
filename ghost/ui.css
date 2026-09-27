@@ -1637,3 +1637,15 @@ input, textarea {
 .gh-sticker-sheet .gh-gif-tab { flex: none; }
 .gh-sticker-add { flex-direction: column; gap: 4px; border: 1.5px dashed rgba(255,255,255,0.25); color: var(--gh-text-secondary); font-size: 12px; }
 .gh-call-line[data-missed="1"] { color: var(--gh-danger); }
+
+/* voice recording (hold the mic) */
+.gh-composer { position: relative; }
+.gh-rec-bar {
+  position: absolute; left: 8px; right: 56px; top: 6px; bottom: calc(6px + var(--gh-safe-b)); border-radius: 19px;
+  display: none; align-items: center; gap: 10px; padding: 0 16px; background: var(--gh-bg-input); z-index: 3;
+}
+.gh-rec-bar[data-on="1"] { display: flex; animation: gh-fadein 0.15s ease; }
+.gh-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #ff3b30; animation: gh-pulse 1s ease-in-out infinite; }
+.gh-rec-time { font-variant-numeric: tabular-nums; font-size: 16px; }
+.gh-rec-hint { flex: 1; text-align: center; color: var(--gh-text-secondary); font-size: 15px; transform: translateX(var(--rec-x, 0px)); }
+.gh-composer-mic[data-recording="1"] { transform: scale(1.6); background: var(--gh-accent); color: #fff; border-radius: 50%; }

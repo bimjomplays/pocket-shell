@@ -201,6 +201,7 @@
     sendSticker: (id, sticker) => bridge.call("sendSticker", [id, sticker], 30000),
     stickerContent: (id, msgId) => bridge.call("stickerContent", [id, msgId]),
     sendStickerRaw: (id, content, type) => bridge.call("sendStickerRaw", [id, content, type], 30000),
+    sendVoiceNote: (id, blob) => bridge.call("sendVoiceNote", [id, blob], 120000),
     sendMedia: (id, blob, opts) => bridge.call("sendMedia", [id, blob, opts || {}], 120000), // uploads can be slow on cellular
     sendSnap: (ids, blob, opts) => bridge.call("sendSnap", [ids, blob, opts || {}], 120000),
     react: (id, messageId, emoji) => bridge.call("react", [id, messageId, emoji]),
@@ -1169,7 +1170,7 @@
     conv.textarea.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && pref("sendOnReturn") && !e.isComposing) { e.preventDefault(); sendCurrentText(ctx); }
     });
-    conv.micBtn.addEventListener("click", () => { haptic(); ctx.showToast("Voice messages need a device"); });
+    initVoiceRecorder(ctx, screen);
     screen.querySelector('[data-act="attach"]').addEventListener("click", () => openAttachSheet(ctx));
     conv.fileInput.addEventListener("change", () => {
       const f = conv.fileInput.files && conv.fileInput.files[0];
@@ -3007,6 +3008,71 @@
     applyCalls(ctx, { calls: [ctx.state.activeCall] });
     try { await api.startCall(convId, !!video); }
     catch (e) { gtrail("call start failed " + (e && e.message || e)); ctx.showToast("Couldn't start the call"); closeCallScreen(ctx, true); }
+  }
+
+  // =====================================================================================================
+  // Voice messages, like Telegram: hold the mic to record, let go to send, slide left to cancel. Recorded here
+  // (the phone's own recorder, AAC) and sent as a real Snapchat voice note (bridge sendVoiceNote).
+  // =====================================================================================================
+  function initVoiceRecorder(ctx, screen) {
+    const conv = ctx.conv, mic = conv.micBtn;
+    const bar = el("div", "gh-rec-bar");
+    bar.innerHTML = '<span class="gh-rec-dot"></span><span class="gh-rec-time">0:00</span><span class="gh-rec-hint">‹ Slide to cancel</span>';
+    screen.querySelector(".gh-composer").appendChild(bar);
+    const r = { rec: null, stream: null, chunks: [], t0: 0, timer: null, x0: 0, cancelled: false, starting: false };
+    const stopAll = () => {
+      clearInterval(r.timer);
+      bar.dataset.on = "0"; mic.dataset.recording = "0"; bar.style.setProperty("--rec-x", "0px");
+      if (r.stream) { r.stream.getTracks().forEach((t) => t.stop()); r.stream = null; }
+    };
+    const start = async (x) => {
+      if (r.rec || r.starting) return;
+      r.starting = true; r.cancelled = false; r.x0 = x; r.chunks = [];
+      try {
+        r.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        if (r.cancelled) { stopAll(); r.starting = false; return; }
+        const type = ["audio/mp4", "audio/mp4;codecs=mp4a.40.2", "audio/webm"].find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t));
+        r.rec = type ? new MediaRecorder(r.stream, { mimeType: type, audioBitsPerSecond: 64000 }) : new MediaRecorder(r.stream);
+        r.rec.ondataavailable = (e) => { if (e.data && e.data.size) r.chunks.push(e.data); };
+        r.rec.start(200);
+        r.t0 = nowMs();
+        haptic("medium");
+        bar.dataset.on = "1"; mic.dataset.recording = "1";
+        const tick = () => { const s2 = Math.floor((nowMs() - r.t0) / 1000); bar.querySelector(".gh-rec-time").textContent = Math.floor(s2 / 60) + ":" + String(s2 % 60).padStart(2, "0"); if (s2 >= 300) finish(false); };
+        tick(); r.timer = setInterval(tick, 250);
+      } catch (e) {
+        gtrail("mic failed " + (e && (e.name || e.message)));
+        ctx.showToast("Microphone isn't available - allow it for Ghost in Settings");
+        stopAll();
+      }
+      r.starting = false;
+    };
+    const finish = (cancel) => {
+      const rec = r.rec;
+      if (!rec) { r.cancelled = true; return; }
+      r.rec = null;
+      const long = nowMs() - r.t0 > 700;
+      rec.onstop = async () => {
+        const blob = new Blob(r.chunks, { type: (rec.mimeType || "audio/mp4").split(";")[0] });
+        stopAll();
+        if (cancel || !long || !blob.size) { if (!cancel && !long) ctx.showToast("Hold to record, let go to send"); return; }
+        haptic("light");
+        const convId = ctx.state.currentConvId;
+        try { await api.sendVoiceNote(convId, blob); }
+        catch (e) { gtrail("voice send failed " + (e && e.message || e)); ctx.showToast("Couldn't send the voice message"); }
+      };
+      try { rec.stop(); } catch (e) { stopAll(); }
+    };
+    mic.addEventListener("touchstart", (e) => { e.preventDefault(); start(e.touches[0].clientX); }, { passive: false });
+    mic.addEventListener("touchmove", (e) => {
+      if (!r.rec) return;
+      const dx = Math.min(0, e.touches[0].clientX - r.x0);
+      bar.style.setProperty("--rec-x", dx + "px");
+      if (dx < -110) { haptic("light"); finish(true); }
+    }, { passive: true });
+    mic.addEventListener("touchend", () => finish(false));
+    mic.addEventListener("touchcancel", () => finish(true));
+    mic.addEventListener("click", (e) => { if (!("ontouchstart" in window)) { if (r.rec) finish(false); else start(e.clientX); } });
   }
 
   // =====================================================================================================
