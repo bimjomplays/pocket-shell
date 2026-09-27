@@ -507,11 +507,33 @@
     }
     return out;
   }
+  // Snapchat grabs "the microphone" long before any call, and the app hands that early request a silent
+  // stand-in (camhook.js, so music isn't interrupted). ensureAudioForCall() then reuses that silent stream and
+  // the other side hears nothing (device 2026-09-27). So: drop a stand-in / dead stream and have Snapchat open
+  // the real mic right before the call starts or is answered; release it when the call is over.
+  async function ensureRealMic() {
+    wantMic(true);
+    const L = ((state() || {}).media || {}).local;
+    if (!L) return;
+    const st = L.audio && L.audio.stream;
+    const lazy = window.__dgCam && window.__dgCam.lazyIds;
+    const bad = st && st.getAudioTracks().some((t) => (lazy && lazy.has(t.id)) || t.readyState === "ended");
+    if (bad && typeof L.disposeAudio === "function") L.disposeAudio();
+    if (typeof L.ensureAudioForCall === "function") await L.ensureAudioForCall();
+    const now = ((state() || {}).media || {}).local;
+    const real = now && now.audio && now.audio.stream && now.audio.stream.getAudioTracks().every((t) => !(lazy && lazy.has(t.id)));
+    trail("calls", "mic " + (real ? "real" : "NOT real") + ", enabled " + !!(now && now.audio && now.audio.enabled));
+  }
+  let hadCall = false;
   let lastCallsSig = "";
   function checkCalls() {
     const calls = callsSnapshot();
     const active = calls.filter((c) => c.state !== "none" || c.remote.some((r) => r.state === "outgoing"));
-    if (active.length) callIntentUntil = 0;              // the call is real now; it keeps the mic while it lasts
+    if (active.length) { callIntentUntil = 0; hadCall = true; } // the call is real now; it keeps the mic while it lasts
+    else if (hadCall && Date.now() > callIntentUntil) { // call over: give the microphone back (iOS stops "recording")
+      hadCall = false;
+      safe("mic-release", () => { const L = state().media.local; if (L && typeof L.disposeAudio === "function") L.disposeAudio(); });
+    }
     else if (Date.now() > callIntentUntil) window.__ghostWantsMic = false;
     const sig = JSON.stringify(active.map((c) => [c.conversationId, c.state, c.micOn, c.cameraOn, c.remote.map((r) => [r.userId, r.state, r.video, r.audio])]));
     if (sig !== lastCallsSig) { lastCallsSig = sig; post({ ghost: "event", type: "calls", data: { calls: active } }); }
@@ -691,6 +713,53 @@
     for (const k of map.keys()) if (String(k) === String(messageId)) return k;
     return messageId;
   }
+  // Status lines (calls, screenshots, renames, joins, streaks). Field names from Snapchat's own status-message proto
+  // (main.js module with "SCREEN_SHOT"/"CALL" enums): call = {callStatus: STARTED0 ENDED1 LEFT2 JOINED3 MISSED4,
+  // callType: AUDIO0 VIDEO1, userId, callDuration}; screenshot = {capturingUser, captureType: SCREEN_SHOT0 RECORD1};
+  // rename = {oldName, newName}; group = {statusChanges: [{affectedUser, statusChange: ADDED0 CREATED1 LEFT2}]}.
+  function describeStatus(sm, senderId) {
+    const me = meId();
+    const who = (id) => { const u = idOf(id); return !u ? "Someone" : u === me ? "You" : ((personFor(u) || {}).name || "Someone").split(" ")[0]; };
+    const find = (o, pred, depth) => {
+      if (!o || typeof o !== "object" || depth < 0) return null;
+      if (pred(o)) return o;
+      for (const k of Object.keys(o)) { const r = find(o[k], pred, depth - 1); if (r) return r; }
+      return null;
+    };
+    const call = find(sm, (o) => "callStatus" in o && "callType" in o, 5);
+    if (call) {
+      const kind = toNum(call.callType) === 1 ? "video call" : "voice call";
+      const Kind = kind[0].toUpperCase() + kind.slice(1);
+      const actor = who(call.userId || senderId);
+      let dur = toNum(call.callDuration);
+      if (dur > 36000) dur = Math.round(dur / 1000); // (milliseconds on some builds)
+      const len = dur > 0 ? (dur >= 3600 ? Math.floor(dur / 3600) + " h " + Math.floor((dur % 3600) / 60) + " min" : dur >= 60 ? Math.round(dur / 60) + " min" : dur + " sec") : "";
+      switch (toNum(call.callStatus)) {
+        case 4: return { kind: "call", text: "Missed " + kind, missed: true };
+        case 0: return { kind: "call", text: actor === "You" ? "You started a " + kind : actor + " started a " + kind };
+        case 1: return { kind: "call", text: len ? Kind + " · " + len : Kind + " ended" };
+        case 2: return { kind: "call", text: actor + " left the call" };
+        case 3: return { kind: "call", text: actor + " joined the call" };
+      }
+      return { kind: "call", text: Kind };
+    }
+    const cap = find(sm, (o) => "captureType" in o && ("capturingUser" in o || "capturingUserInfo" in o), 5);
+    if (cap) return { kind: "system", text: who(cap.capturingUser || senderId) + (toNum(cap.captureType) === 1 ? " screen-recorded!" : " took a screenshot!") };
+    const ren = find(sm, (o) => "newName" in o && "oldName" in o, 5);
+    if (ren) return { kind: "system", text: who(ren.initiatingUserId || senderId) + (ren.newName ? " named the group \u201c" + ren.newName + "\u201d" : " removed the group name") };
+    const grp = find(sm, (o) => Array.isArray(o.statusChanges), 5);
+    if (grp && grp.statusChanges.length) {
+      const c0 = grp.statusChanges[0];
+      const st = toNum(c0.statusChange);
+      return { kind: "system", text: st === 1 ? who(grp.initiatingUser || senderId) + " created the group" : st === 2 ? who(c0.affectedUser) + " left the group" : who(grp.initiatingUser || senderId) + " added " + grp.statusChanges.map((x) => who(x.affectedUser)).join(", ") };
+    }
+    const streak = find(sm, (o) => "streakStatus" in o, 5);
+    if (streak) { const st = toNum(streak.streakStatus); return { kind: "system", text: st === 2 ? "\uD83D\uDD25 Streak ended" : st === 3 ? "\uD83D\uDD25 Streak restored" : "\uD83D\uDD25 Streak started" }; }
+    const saved = find(sm, (o) => "messageType" in o && "userId" in o && Object.keys(o).length <= 3, 5);
+    if (saved) return { kind: "system", text: who(saved.userId || senderId) + (toNum(saved.messageType) === 2 ? " saved a Snap" : " saved a chat") };
+    return { kind: "system", text: "Chat update" };
+  }
+
   function toMessage(conversationId, id, raw) {
     if (!raw) return null;
     const mc = raw.messageContent || {};
@@ -718,6 +787,10 @@
       const meta = nn && nn.$case === "audio" && nn.audio && nn.audio.note;
       if (meta) media = [{ type: "audio", durationSec: toNum(meta.mediaDurationMs) / 1000 || undefined }];
       else if (nn && nn.$case === "video") kind = "unknown";
+    }
+    if (kase === "statusMessage") {
+      const st = safe("status-text", () => describeStatus(c.statusMessage, idOf(raw.senderId)), { kind: "system", text: "Chat update" });
+      kind = st.kind; text = st.text;
     }
     if (kase === "text") text = c.text && c.text.text;
     else if (kase === "snapReply") text = c.snapReply && (c.snapReply.text || (c.snapReply.content && c.snapReply.content.text));
@@ -974,11 +1047,14 @@
       expiring: toNum(sm.expirationTimestampMs) > 0 && toNum(sm.expirationTimestampMs) - Date.now() < 4 * 3600e3,
     } : undefined;
     let text;
-    if (kind === "text" && entry && entry.messages && typeof entry.messages.values === "function") {
+    let kind2 = kind;
+    if ((kind === "text" || kind === "call" || kind === "none") && entry && entry.messages && typeof entry.messages.values === "function") {
       let last = null; for (const m of entry.messages.values()) last = m;
       const norm = last && toMessage(key, undefined, last);
       if (norm && norm.kind === "text") text = norm.text;
+      else if (norm && (norm.kind === "call" || norm.kind === "system")) { kind2 = "call"; text = norm.text; } // e.g. "Missed video call"
     }
+    if (kind === "call" && !text) text = "Call";
     // no text loaded yet (Snapchat only has message text for chats that were opened): say what Snapchat's list says
     if (kind === "text" && !text) text = fromMe ? (info.viewed ? "Opened" : "Delivered") : (unread ? "New Chat" : "Received");
     if (kind === "snap" && !text) text = fromMe ? (info.viewed ? "Opened" : "Delivered") : (unread ? "New Snap" : "Received");
@@ -989,7 +1065,7 @@
       participants,
       avatarUrl: undefined,
       lastActivityTs: toNum(info.displayTimestamp) || toNum(feed.lastEventUpdateTimestamp) || newestTimestamp(feed, 3) || 0,
-      preview: { kind, text, fromMe, status: info.viewed ? (fromMe ? "opened" : "viewed") : (fromMe ? "delivered" : "received") },
+      preview: { kind: kind2, text, fromMe, status: info.viewed ? (fromMe ? "opened" : "viewed") : (fromMe ? "delivered" : "received") },
       unreadCount: unread ? Math.max(1, unreadChats) : 0,
       hasUnreadSnap: unread && kind === "snap",
       streak,
@@ -1490,7 +1566,7 @@
       requireStore();
       const f = callFns();
       if (!f || !f.start) throw new Error("calling isn't available");
-      wantMic(true);
+      await ensureRealMic();
       await f.start(callConversation(conversationId), !!video, "CHAT");
       checkCalls();
       return true;
@@ -1499,7 +1575,7 @@
       requireStore();
       const f = callFns();
       if (!f || !f.join) throw new Error("calling isn't available");
-      wantMic(true);
+      await ensureRealMic();
       await f.join(callConversation(conversationId), !!video, "incoming_button");
       checkCalls();
       return true;

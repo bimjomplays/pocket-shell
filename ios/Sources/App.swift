@@ -83,6 +83,16 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var lastShowBar: Bool?
     private var keyboardOverlap: CGFloat = 0
     private var lastGhostSafe = ""
+    private var speakerOn = false
+    /// Ghost calls: loudspeaker vs earpiece. A voice-chat session with defaultToSpeaker plus the port override.
+    private func applySpeaker() throws {
+        let session = AVAudioSession.sharedInstance()
+        var options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers]
+        if speakerOn { options.insert(.defaultToSpeaker) }
+        try? session.setCategory(.playAndRecord, mode: .voiceChat, options: options)
+        try? session.setActive(true)
+        try session.overrideOutputAudioPort(speakerOn ? .speaker : .none)
+    }
     // edge swipe = back; off in an open chat, where gestures.js drags the chat itself (interactive, like the app)
     private weak var edgeBack: UIScreenEdgePanGestureRecognizer?
     // smoothness: 120Hz while touching, and a picture of the last chat list shown at launch
@@ -651,8 +661,11 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             }
         case "speaker": // Ghost's call screen: loudspeaker on/off (WebKit leaves calls on the earpiece)
             let on = body["on"] as? Bool ?? false
+            speakerOn = on
             do {
-                try AVAudioSession.sharedInstance().overrideOutputAudioPort(on ? .speaker : .none)
+                try applySpeaker()
+                // WebKit re-configures the session as the call's audio starts; apply again once it has settled
+                for delay in [0.4, 1.2] { DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in try? self?.applySpeaker() } }
                 replyHandler(true, nil)
             } catch {
                 replyHandler(nil, error.localizedDescription)

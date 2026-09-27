@@ -1636,3 +1636,4 @@ input, textarea {
 .gh-sticker-sheet .gh-gif-tabs::-webkit-scrollbar { display: none; }
 .gh-sticker-sheet .gh-gif-tab { flex: none; }
 .gh-sticker-add { flex-direction: column; gap: 4px; border: 1.5px dashed rgba(255,255,255,0.25); color: var(--gh-text-secondary); font-size: 12px; }
+.gh-call-line[data-missed="1"] { color: var(--gh-danger); }

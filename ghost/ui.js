@@ -1385,7 +1385,7 @@
     for (const g of groups) {
       if (g.unreadDivider) { frag.appendChild(unreadSepEl()); continue; }
       if (g.daySep) frag.appendChild(sepEl(g.daySep));
-      if (g.system) { frag.appendChild(systemLineEl(g.system)); continue; }
+      if (g.system) { frag.appendChild(systemLineEl(g.system, ctx)); continue; }
       const isMe = g.from && meId && g.from.id === meId;
       const groupEl = el("div", "gh-group");
       groupEl.dataset.me = isMe ? "1" : "0";
@@ -1435,9 +1435,14 @@
     e.appendChild(t);
     return e;
   }
-  function systemLineEl(m) {
+  function systemLineEl(m, ctx) {
     const e = el("div", m.kind === "call" ? "gh-call-line" : "gh-system-line");
-    if (m.kind === "call") e.appendChild(icon("call", 14));
+    if (m.kind === "call") {
+      const video = /video/i.test(m.text || "");
+      e.appendChild(icon(video ? "videoCall" : "call", 14));
+      if (/^Missed/i.test(m.text || "")) e.dataset.missed = "1";
+      if (ctx) { e.classList.add("gh-press"); e.addEventListener("click", () => startCallFrom(ctx, video)); } // tap to call back
+    }
     const span = el("span"); span.textContent = m.text || "";
     e.appendChild(span);
     return e;
