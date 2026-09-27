@@ -86,12 +86,9 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var speakerOn = false
     /// Ghost calls: loudspeaker vs earpiece. A voice-chat session with defaultToSpeaker plus the port override.
     private func applySpeaker() throws {
-        let session = AVAudioSession.sharedInstance()
-        var options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers]
-        if speakerOn { options.insert(.defaultToSpeaker) }
-        try? session.setCategory(.playAndRecord, mode: .voiceChat, options: options)
-        try? session.setActive(true)
-        try session.overrideOutputAudioPort(speakerOn ? .speaker : .none)
+        // Only the output route: changing the category/mode under WebKit's call audio cut the other side off entirely
+        // (device 2026-09-27). With the real microphone open, WebKit's session is already play-and-record.
+        try AVAudioSession.sharedInstance().overrideOutputAudioPort(speakerOn ? .speaker : .none)
     }
     // edge swipe = back; off in an open chat, where gestures.js drags the chat itself (interactive, like the app)
     private weak var edgeBack: UIScreenEdgePanGestureRecognizer?

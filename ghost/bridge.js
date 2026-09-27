@@ -569,6 +569,7 @@
   }
 
   function uuidObj(str) { return { id: Uint8Array.from(String(str).replace(/-/g, "").match(/../g).map((x) => parseInt(x, 16))), str }; }
+  const shareCache = new Map();
   let lastStory = null;
   let storyThumbFnCache;
   function storyThumbFn() {
@@ -697,9 +698,11 @@
 
   const CASE_KIND = { text: "text", snapReply: "text", storyReply: "text", botResponse: "text", chatMedia: "chat-media", externalMedia: "chat-media",
     externalMediaMessageContent: "chat-media", snapdoc: "snap", snap: "snap", snapMessageContent: "snap", tinySnap: "snap", note: "audio", voiceNote: "audio",
-    sticker: "sticker", creativeToolItem: "gif", share: "unknown", storyShare: "unknown", spotlightShare: "unknown", url: "text" };
+    sticker: "sticker", creativeToolItem: "gif", share: "share", storyShare: "share", spotlightShare: "share", url: "text" };
   let gifSampled = false;
-  const REACTION_EMOJI = { 1: "\u2764\uFE0F", 2: "\uD83D\uDE02", 3: "\uD83D\uDD25", 4: "\uD83D\uDC4D", 5: "\uD83D\uDE2E", 6: "\uD83D\uDE22", 7: "\uD83D\uDE21" };
+  // Snapchat's reaction set (main.js enum with LOVE=1 ... SALUTE=14)
+  const REACTION_EMOJI = { 1: "\u2764\uFE0F", 2: "\uD83D\uDE02", 3: "\uD83D\uDD25", 4: "\uD83D\uDC4D", 5: "\uD83D\uDC4E", 6: "\uD83D\uDE22", 7: "\uD83D\uDE2E",
+    8: "\u2753", 9: "\uD83D\uDE18", 10: "\uD83D\uDE2D", 11: "\uD83D\uDC80", 12: "\u2757", 13: "\uD83D\uDE21", 14: "\uD83E\uDEE1" };
   // message ids cross to the UI as strings; Snapchat's Map keys are bigints
   function findRaw(map, messageId) {
     if (!map || typeof map.entries !== "function") return undefined;
@@ -731,8 +734,7 @@
       const kind = toNum(call.callType) === 1 ? "video call" : "voice call";
       const Kind = kind[0].toUpperCase() + kind.slice(1);
       const actor = who(call.userId || senderId);
-      let dur = toNum(call.callDuration);
-      if (dur > 36000) dur = Math.round(dur / 1000); // (milliseconds on some builds)
+      const dur = Math.round(toNum(call.callDuration) / 1000); // milliseconds (a 52 s call = 52000; device 2026-09-27)
       const len = dur > 0 ? (dur >= 3600 ? Math.floor(dur / 3600) + " h " + Math.floor((dur % 3600) / 60) + " min" : dur >= 60 ? Math.round(dur / 60) + " min" : dur + " sec") : "";
       switch (toNum(call.callStatus)) {
         case 4: return { kind: "call", text: "Missed " + kind, missed: true };
@@ -787,6 +789,11 @@
       const meta = nn && nn.$case === "audio" && nn.audio && nn.audio.note;
       if (meta) media = [{ type: "audio", durationSec: toNum(meta.mediaDurationMs) / 1000 || undefined }];
       else if (nn && nn.$case === "video") kind = "unknown";
+    }
+    if (kase === "share" || kase === "storyShare" || kase === "spotlightShare") {
+      const sh = c.share && c.share.share;
+      const sc = sh && sh.$case;
+      text = sc === "spotlightStoryShare" || kase === "spotlightShare" ? "Spotlight" : sc === "story" || kase === "storyShare" ? "Story" : sc === "legacyDiscover" ? "Discover" : "Shared";
     }
     if (kase === "statusMessage") {
       const st = safe("status-text", () => describeStatus(c.statusMessage, idOf(raw.senderId)), { kind: "system", text: "Chat update" });
@@ -1427,8 +1434,25 @@
         // n.descriptor.conversationId / n.descriptor.messageId / n.metadata.reactions itself), not bare
         // ids - so a message we haven't seen yet (not in our local cache) can't be reacted to.
         if (!rawMessage) throw new Error("message not loaded locally, open the conversation first");
-        await m.reactToMessage(rawMessage, emoji, "GHOST");
+        // Snapchat's reaction bar (main.js, search 'reactionSource:yn.hD.ACTION_MENU'): reactToMessage(message,
+        // {intentionType: BigInt(n)}, {metricsMessageType: MEDIA 5, metricsMessageMediaType: NO_MEDIA 0, reactionSource:
+        // ACTION_MENU 2}). Its reactions are a fixed set (LOVE 1 ... SALUTE 14); any other emoji goes as {emoji}.
+        const INTENT = { "\u2764\uFE0F": 1, "\u2764": 1, "\uD83D\uDE02": 2, "\uD83D\uDD25": 3, "\uD83D\uDC4D": 4, "\uD83D\uDC4E": 5, "\uD83D\uDE22": 6, "\uD83D\uDE2E": 7,
+          "\u2753": 8, "\uD83D\uDE18": 9, "\uD83D\uDE2D": 10, "\uD83D\uDC80": 11, "\u2757": 12, "\uD83D\uDE21": 13, "\uD83E\uDEE1": 14 };
+        const intent = INTENT[emoji];
+        const content = intent ? { intentionType: BigInt(intent) } : { emoji };
+        await m.reactToMessage(rawMessage, content, { metricsMessageType: 5, metricsMessageMediaType: 0, reactionSource: 2 });
       }
+      return true;
+    },
+
+    // Delete for everyone (only your own messages), as Snapchat Web's own "Delete": updateMessage(conv, id, ERASE 5)
+    async deleteMessage(conversationId, messageId) {
+      requireStore();
+      const m = messaging();
+      if (typeof m.updateMessage !== "function") throw new Error("updateMessage action missing");
+      const entry = conversationEntry(conversationId);
+      await m.updateMessage(convIdObj(conversationId), realKey(entry && entry.messages, messageId), 5);
       return true;
     },
 
@@ -1606,6 +1630,51 @@
       const file = blob instanceof File ? blob : new File([blob], "voice.m4a", { type: blob.type || "audio/mp4" });
       await m.sendVoiceNote({ phoneNumbers: [], conversations: [convIdObj(conversationId)], stories: [], massSnaps: [] }, file, navigator.language || "en-US");
       return true;
+    },
+
+    // Shared Spotlight videos / stories. Snapchat's chat card (main.js p6): spotlight.fetchSingleSpotlightSnap(
+    // compositeStoryId) -> {snap, decryptedThumbnailURL, engagementStats, attribution}. The video itself is found in that
+    // snap (a mediaUrl, or a media reference + key) and handed to Snapchat's own media resolver.
+    async shareInfo(conversationId, messageId) {
+      requireStore();
+      const entry = conversationEntry(conversationId);
+      const raw = entry && entry.messages && findRaw(entry.messages, messageId);
+      const d = raw && decodeContent(raw.messageContent);
+      const sh = d && d.content && d.content.share && d.content.share.share;
+      if (!sh) return { kind: "unknown" };
+      if (sh.$case !== "spotlightStoryShare") return { kind: sh.$case };
+      const sp = (state() || {}).spotlight;
+      if (!sp || typeof sp.fetchSingleSpotlightSnap !== "function") return { kind: "spotlight" };
+      const r = await sp.fetchSingleSpotlightSnap(sh.spotlightStoryShare.compositeStoryId, undefined);
+      shareCache.set(conversationId + "|" + messageId, r);
+      const at = r && r.attribution;
+      return { kind: "spotlight", thumb: r && r.decryptedThumbnailURL, views: r && r.engagementStats ? String(r.engagementStats.viewCount) : undefined,
+        creator: at && (at.displayName || at.username || (at.creator && at.creator.displayName)) };
+    },
+    async loadShare(conversationId, messageId) {
+      requireStore();
+      let r = shareCache.get(conversationId + "|" + messageId);
+      if (!r) { await methods.shareInfo(conversationId, messageId); r = shareCache.get(conversationId + "|" + messageId); }
+      if (!r || !r.snap) throw new Error("not available");
+      // every media-looking object in the snap: {mediaUrl} or {mediaReference} with its key
+      const found = [];
+      const seen = new Set();
+      const walk = (o, depth) => {
+        if (!o || typeof o !== "object" || depth > 8 || seen.has(o)) return;
+        seen.add(o);
+        if ((typeof o.mediaUrl === "string" && o.mediaUrl) || (o.mediaReference && typeof o.mediaReference === "object")) found.push(o);
+        for (const k of Object.keys(o)) { const v = o[k]; if (v && typeof v === "object" && !(v instanceof Uint8Array)) walk(v, depth + 1); }
+      };
+      walk(r.snap, 0);
+      for (const m of found) {
+        const ref = m.mediaReference ? (m.mediaReference.contentObject || m.mediaReference.mediaReferenceKey ? mediaReferenceFromRaw(m.mediaReference) : m.mediaReference) : { resolvedUrl: m.mediaUrl };
+        if (m.mediaUrl && !ref.resolvedUrl) ref.resolvedUrl = m.mediaUrl;
+        const info = { mediaMetadata: { encryptionInfo: m.encryptionInfoV2 || m.encryptionInfoV1 || m.encryptionInfo, dimensions: m.dimensions, hasSound: m.hasSound !== false, zipped: !!m.zipped }, mediaReference: ref };
+        const media = await resolveMediaInfos([info], undefined, "spotlight").catch(() => []);
+        if (media.length) return { media };
+      }
+      trail("share", "no playable media in spotlight snap (" + found.length + " candidates)", "error");
+      throw new Error("not available");
     },
 
     // Favourite stickers: a sticker someone sent is kept as its exact message content (for Bitmoji/GIF/custom

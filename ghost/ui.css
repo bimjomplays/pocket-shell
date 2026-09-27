@@ -1649,3 +1649,22 @@ input, textarea {
 .gh-rec-time { font-variant-numeric: tabular-nums; font-size: 16px; }
 .gh-rec-hint { flex: 1; text-align: center; color: var(--gh-text-secondary); font-size: 15px; transform: translateX(var(--rec-x, 0px)); }
 .gh-composer-mic[data-recording="1"] { transform: scale(1.6); background: var(--gh-accent); color: #fff; border-radius: 50%; }
+.gh-action-danger { color: var(--gh-danger); }
+.gh-msg-deleting { opacity: 0.35; transition: opacity 0.2s ease; pointer-events: none; }
+
+/* shared Spotlight videos / stories */
+.gh-share-card { padding: 0; overflow: hidden; width: 200px; background: var(--gh-bg-panel) !important; }
+.gh-share-cover { position: relative; height: 260px; background: linear-gradient(160deg, #2a2f45, #111); display: flex; align-items: center; justify-content: center; color: #fff; }
+.gh-share-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.gh-share-cover svg { position: relative; z-index: 1; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.5)); }
+.gh-share-meta { padding: 8px 12px 10px; }
+.gh-share-title { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-share-sub { font-size: 12.5px; color: var(--gh-text-secondary); }
+.gh-share-card .gh-media-meta { top: 8px; bottom: auto; }
+
+/* pinned chats + hidden chats */
+.gh-row[data-pinned="1"] { background: rgba(255,255,255,0.025); }
+.gh-row[data-pinned="1"] .gh-row-time::before { content: "📌"; font-size: 11px; margin-right: 4px; }
+.gh-set-row .gh-avatar { width: 34px !important; height: 34px !important; }
+.gh-set-unhide { color: var(--gh-accent); font-weight: 600; font-size: 15px; padding: 6px 4px; }
+.gh-set-open { color: var(--gh-text-secondary); font-weight: 500; }

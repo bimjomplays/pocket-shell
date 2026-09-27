@@ -53,6 +53,8 @@
   // ---- inline icons (all authored here — trusted strings only, never mixed with user data) ------------
   const ICONS = {
     back: '<path d="M15 18l-6-6 6-6"/>',
+    pin: '<path d="M9 4h6l-1 6 3 3H7l3-3-1-6z"/><path d="M12 13v7"/>',
+    eyeOff: '<path d="M3 3l18 18"/><path d="M10.6 5.1A9.8 9.8 0 0112 5c5 0 9 4.5 10 7-.4 1-1.2 2.3-2.4 3.5M6.3 6.3C4.3 7.6 2.9 9.6 2 12c1 2.5 5 7 10 7 1.8 0 3.4-.5 4.8-1.3"/><path d="M9.9 9.9a3 3 0 004.2 4.2"/>',
     palette: '<path d="M12 3a9 9 0 100 18c1.1 0 1.7-.9 1.4-1.9-.3-.9.2-1.9 1.2-1.9H17a4 4 0 004-4c0-5.6-4-10.2-9-10.2z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7" r="1.2"/><circle cx="15" cy="7.5" r="1.2"/>',
     database: '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/>',
     vibrate: '<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M3 9v6M21 9v6"/>',
@@ -205,6 +207,9 @@
     sendMedia: (id, blob, opts) => bridge.call("sendMedia", [id, blob, opts || {}], 120000), // uploads can be slow on cellular
     sendSnap: (ids, blob, opts) => bridge.call("sendSnap", [ids, blob, opts || {}], 120000),
     react: (id, messageId, emoji) => bridge.call("react", [id, messageId, emoji]),
+    shareInfo: (id, messageId) => bridge.call("shareInfo", [id, messageId], 30000),
+    loadShare: (id, messageId) => bridge.call("loadShare", [id, messageId], 60000),
+    deleteMessage: (id, messageId) => bridge.call("deleteMessage", [id, messageId]),
     saveMessage: (id, messageId, saved) => bridge.call("saveMessage", [id, messageId, saved]),
     openSnap: (id, messageId) => bridge.call("openSnap", [id, messageId], 45000),
     closeSnap: (id, messageId) => bridge.call("closeSnap", [id, messageId]),
@@ -691,7 +696,7 @@
     const storiesEl = screen.querySelector(".gh-stories");
     const ptr = screen.querySelector(".gh-ptr");
 
-    screen.querySelector(".gh-edit-btn").addEventListener("click", () => { haptic(); ctx.showToast("Editing chats isn't available yet"); });
+    screen.querySelector(".gh-edit-btn").addEventListener("click", () => { haptic(); ctx.showToast("Hold a chat to pin or hide it"); });
     for (const b of screen.querySelectorAll('[data-act="new"]')) {
       b.addEventListener("click", () => { haptic(); openNewChatSheet(ctx); });
     }
@@ -925,12 +930,19 @@
     const list = home.list;
     const seen = new Set();
     let prevEl = home.storiesEl; // the sticky search field + stories rail are permanent, pinned before all rows
-    for (const conv of ctx.state.conversations) {
+    // pinned chats first (in pin order), hidden chats left out (Settings > Chats > Hidden Chats brings them back;
+    // searching still finds them)
+    const pins = pref("pinnedChats") || [], hidden = new Set(pref("hiddenChats") || []);
+    const byId = new Map(ctx.state.conversations.map((c) => [c.id, c]));
+    const ordered = [...pins.map((id) => byId.get(id)).filter(Boolean), ...ctx.state.conversations.filter((c) => !pins.includes(c.id))];
+    for (const conv of ordered) {
       if (q && !(conv.title || "").toLowerCase().includes(q)) continue;
+      if (!q && hidden.has(conv.id)) continue;
       seen.add(conv.id);
       let row = home.rows.get(conv.id);
       if (!row) { row = buildHomeRow(ctx, conv); home.rows.set(conv.id, row); }
       else updateHomeRow(row, conv);
+      row.el.dataset.pinned = pins.includes(conv.id) ? "1" : "0";
       const desiredNext = prevEl ? prevEl.nextSibling : list.firstChild;
       if (row.el !== desiredNext) list.insertBefore(row.el, desiredNext);
       prevEl = row.el;
@@ -977,6 +989,13 @@
     rowEl._avSig = avatarSig(conv);
     // tap = open the chat; double-tap = snap camera for this person (like Snapchat). The chat opens at once on the
     // first tap (no waiting to see if a second one comes); the camera then slides up over it.
+    // hold a chat: pin / hide
+    let holdT = null, held = false;
+    rowEl.addEventListener("touchstart", () => { held = false; holdT = setTimeout(() => { held = true; haptic("medium"); openRowMenu(ctx, conv.id); }, 480); }, { passive: true });
+    const cancelHold = () => clearTimeout(holdT);
+    rowEl.addEventListener("touchmove", cancelHold, { passive: true });
+    rowEl.addEventListener("touchend", cancelHold, { passive: true });
+    rowEl.addEventListener("click", (e) => { if (held) { held = false; e.stopImmediatePropagation(); } }, true);
     rowEl.addEventListener("click", () => {
       ctx.state.rowTap = { id: conv.id, t: nowMs(), row: rowEl }; // a 2nd tap lands on the chat screen - see the root listener
       openConversationScreen(ctx, conv.id);
@@ -984,6 +1003,42 @@
     const row = { el: rowEl, id: conv.id };
     updateHomeRow(row, conv);
     return row;
+  }
+  function togglePin(ctx, id) {
+    const pins = (pref("pinnedChats") || []).slice();
+    const i = pins.indexOf(id);
+    if (i >= 0) pins.splice(i, 1); else pins.unshift(id);
+    setPref(ctx, "pinnedChats", pins.slice(0, 15));
+    renderHomeList(ctx);
+    return i < 0;
+  }
+  function setHidden(ctx, id, hide) {
+    const h = new Set(pref("hiddenChats") || []);
+    if (hide) h.add(id); else h.delete(id);
+    setPref(ctx, "hiddenChats", [...h]);
+    if (hide) setPref(ctx, "pinnedChats", (pref("pinnedChats") || []).filter((x) => x !== id));
+    renderHomeList(ctx);
+  }
+  // the menu you get by holding a chat in the list
+  function openRowMenu(ctx, id) {
+    const cd = ctx.state.convById.get(id);
+    if (!cd) return;
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const head = el("div", "gh-chat-sheet-head");
+    head.appendChild(makeAvatar(convAvatarUser(cd), 56));
+    const nm = el("div", "gh-chat-sheet-name"); nm.textContent = cd.title || "Chat";
+    head.appendChild(nm);
+    s.sheet.appendChild(head);
+    const g = el("div", "gh-set-group"); s.sheet.appendChild(g);
+    const pinned = (pref("pinnedChats") || []).includes(id);
+    const close = () => closeSheetGeneric(s.backdrop, s.sheet);
+    setRow(g, { icon: "pin", tint: "#ff9433", label: pinned ? "Unpin" : "Pin to Top", onClick: () => { const now = togglePin(ctx, id); close(); ctx.showToast(now ? "Pinned" : "Unpinned"); } });
+    setRow(g, { icon: "camera", tint: "#f23c57", label: "Send a Snap", onClick: () => { close(); openCamera(ctx, { to: id }); } });
+    setRow(g, { icon: "eyeOff", tint: "#8e8e93", label: "Hide Chat", onClick: () => { setHidden(ctx, id, true); close(); ctx.showToast("Hidden - find it in Settings > Chats > Hidden Chats"); } });
+    const f = el("div", "gh-set-group-foot"); f.textContent = "Hidden chats stay in Snapchat; they just leave this list. Searching still finds them."; s.sheet.appendChild(f);
+    openSheetGeneric(s.backdrop, s.sheet);
   }
   function updateHomeRow(row, conv) {
     const rowEl = row.el;
@@ -1367,7 +1422,16 @@
       const daySep = !sameDay ? fmtDaySeparator(m.ts) : null;
       const continuesFromPrev = !!prev && prev.from && m.from && prev.from.id === m.from.id
         && (m.ts - prev.ts) < 5 * 60 * 1000 && !daySep && prev.kind !== "system" && prev.kind !== "call" && m.kind !== "system" && m.kind !== "call";
-      if (m.kind === "system" || m.kind === "call") { groups.push({ daySep, system: m }); cur = null; continue; }
+      if (m.kind === "system" || m.kind === "call") {
+        // both sides log the same call (one says voice, the other video): show it once, as video if either says so
+        const last = groups[groups.length - 1];
+        const tail = (t) => (String(t || "").split("\u00b7")[1] || "").trim();
+        if (m.kind === "call" && last && last.system && last.system.kind === "call" && !daySep && Math.abs(m.ts - last.system.ts) < 120000 && tail(m.text) === tail(last.system.text)) {
+          if (/^Video/.test(m.text || "") && !/^Video/.test(last.system.text || "")) last.system = m;
+          continue;
+        }
+        groups.push({ daySep, system: m }); cur = null; continue;
+      }
       if (!continuesFromPrev || !cur || i === start) {
         cur = { daySep, from: m.from, first: true, items: [m] };
         groups.push(cur);
@@ -1587,6 +1651,7 @@
         return b;
       }
       case "snap": return snapTileEl(ctx, m, isMe);
+      case "share": return shareCardEl(ctx, m, isMe);
       case "audio": return audioBubbleEl(ctx, m, isMe, isLast);
       case "unknown": {
         const b = el("div", "gh-bubble gh-unknown");
@@ -1631,6 +1696,37 @@
       wrap.addEventListener("click", () => openViewerSingle(opts.ctx, ref));
     }
     return wrap;
+  }
+
+  // Shared Spotlight videos / stories: a card with the video's cover; tap to watch it here (bridge loadShare).
+  function shareCardEl(ctx, m, isMe) {
+    const b = el("div", "gh-bubble gh-share-card gh-press");
+    const cover = el("div", "gh-share-cover");
+    cover.appendChild(icon("play", 30));
+    const meta = el("div", "gh-share-meta");
+    const t1 = el("div", "gh-share-title"); t1.textContent = m.text === "Story" ? "Shared a Story" : m.text === "Spotlight" ? "Spotlight" : "Shared";
+    const t2 = el("div", "gh-share-sub"); t2.textContent = "Tap to watch";
+    meta.append(t1, t2);
+    b.append(cover, meta, tickMetaEl(m, isMe, "gh-media-meta"));
+    const convId = m.conversationId || ctx.state.currentConvId;
+    if (m.text === "Spotlight") api.shareInfo(convId, m.id).then((r) => {
+      if (!r) return;
+      if (r.thumb) { const img = el("img"); img.alt = ""; img.src = r.thumb; cover.prepend(img); }
+      if (r.creator) t1.textContent = r.creator;
+      if (r.views) t2.textContent = Number(r.views).toLocaleString() + " views";
+    }).catch(() => { t2.textContent = "No longer available"; });
+    b.addEventListener("click", async () => {
+      haptic();
+      t2.textContent = "Loading…";
+      try {
+        const r = await api.loadShare(convId, m.id);
+        const ref = r && r.media && r.media[0];
+        if (!ref) throw new Error("none");
+        openViewerSingle(ctx, ref);
+        t2.textContent = "Tap to watch";
+      } catch (e) { t2.textContent = "Can't play this one here"; ctx.showToast("Couldn't load that video"); }
+    });
+    return b;
   }
 
   // Snaps look like Snapchat's own chat rows: a small coloured square (red = photo / silent video, purple = video
@@ -2132,7 +2228,7 @@
   // =====================================================================================================
   // Action sheet (long-press a message)
   // =====================================================================================================
-  const REACTION_EMOJIS = ["❤️", "😂", "😮", "😢", "😡", "👍"];
+  const REACTION_EMOJIS = ["\u2764\uFE0F", "\uD83D\uDE02", "\uD83D\uDD25", "\uD83D\uDC4D", "\uD83D\uDE2E", "\uD83D\uDE22", "\uD83D\uDC80"]; // Snapchat's own reaction set (sent as its reaction ids)
   function buildActionSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-action-sheet"); sheet.style.display = "none";
@@ -2144,6 +2240,7 @@
         <div class="gh-action-item" data-act="copy"></div>
         <div class="gh-action-item" data-act="save"></div>
         <div class="gh-action-item" data-act="fav"></div>
+        <div class="gh-action-item gh-action-danger" data-act="delete"></div>
       </div>
     `;
     const reactRow = sheet.querySelector(".gh-react-row");
@@ -2162,12 +2259,14 @@
     saveItem.append(icon("star"), textSpan("Save"));
     const favItem = sheet.querySelector('[data-act="fav"]');
     favItem.append(icon("emoji"), textSpan("Add to Favorite Stickers"));
+    const delItem = sheet.querySelector('[data-act="delete"]');
+    delItem.append(icon("trash"), textSpan("Delete for Everyone"));
 
     overlaysRoot.appendChild(backdrop);
     overlaysRoot.appendChild(sheet);
     function textSpan(t) { const s = el("span"); s.textContent = t; return s; }
 
-    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, favItem, message: null, liftedEl: null };
+    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, favItem, delItem, message: null, liftedEl: null };
     function closeAction() {
       if (s.liftedEl) { s.liftedEl.classList.remove("gh-msg-lifted"); s.liftedEl = null; }
       closeSheetGeneric(backdrop, sheet);
@@ -2223,6 +2322,15 @@
     const isSticker = message.kind === "sticker" || message.kind === "gif";
     s.favItem.style.display = isSticker ? "" : "none";
     s.favItem.onclick = () => { s.close(); favoriteSticker(ctx, message, wrapEl); };
+    const mineMsg = !!(message.fromMe || (message.from && message.from.id === meId));
+    s.delItem.style.display = mineMsg ? "" : "none";
+    s.delItem.onclick = async () => {
+      s.close();
+      haptic("medium");
+      if (wrapEl) wrapEl.classList.add("gh-msg-deleting");
+      try { await api.deleteMessage(convId, message.id); }
+      catch (e) { if (wrapEl) wrapEl.classList.remove("gh-msg-deleting"); ctx.showToast("Couldn't delete that message"); }
+    };
     if (wrapEl) { wrapEl.classList.add("gh-msg-lifted"); s.liftedEl = wrapEl; }
     openSheetGeneric(s.backdrop, s.sheet);
   }
@@ -2322,7 +2430,7 @@
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true,
     doubleTapCamera: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
-    wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {},
+    wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {}, pinnedChats: [], hiddenChats: [],
   };
   let prefs = Object.assign({}, PREF_DEFAULTS);
   function pref(k) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : PREF_DEFAULTS[k]; }
@@ -2477,7 +2585,7 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
+  const SETTINGS_TITLES = { hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
   const SETTINGS_PAGES = {
     main(ctx, body) {
       const me = ctx.state.me || {};
@@ -2585,8 +2693,27 @@
       setRow(g, { label: "Double-Tap a Chat for Camera", toggle: { get: () => !!pref("doubleTapCamera"), set: (v) => setPref(ctx, "doubleTapCamera", v) } });
       setRow(g, { label: "Send with Return Key", toggle: { get: () => !!pref("sendOnReturn"), set: (v) => setPref(ctx, "sendOnReturn", v) } });
       setRow(g, { label: "Show Message Times", toggle: { get: () => !!pref("showTimes"), set: (v) => setPref(ctx, "showTimes", v) } });
+      g = setGroup(body);
+      setRow(g, { label: "Hidden Chats", value: String((pref("hiddenChats") || []).length), onClick: () => pushSettingsPage(ctx, "hidden") });
       g = setGroup(body, "Voice Messages");
       setChoice(g, [["1", "Normal Speed"], ["1.5", "1.5×"], ["2", "2×"]], () => String(nativeSetting("voiceNoteSpeed", "1")), (v) => setNativeSetting("voiceNoteSpeed", v));
+    },
+    hidden(ctx, body) {
+      const ids = pref("hiddenChats") || [];
+      if (!ids.length) { const e = el("div", "gh-set-group-foot"); e.textContent = "No hidden chats. Hold a chat in your list and tap Hide Chat."; body.appendChild(e); return; }
+      const g = setGroup(body, null, "Tap Unhide to put a chat back in your list.");
+      for (const id of ids) {
+        const cd = ctx.state.convById.get(id) || { title: "Chat" };
+        const row = el("div", "gh-set-row");
+        row.appendChild(makeAvatar(convAvatarUser(cd), 34));
+        const l = el("span", "gh-set-label"); l.textContent = cd.title || "Chat"; row.appendChild(l);
+        const b = el("button", "gh-set-unhide"); b.textContent = "Unhide";
+        b.addEventListener("click", () => { haptic("light"); setHidden(ctx, id, false); row.remove(); });
+        const open = el("button", "gh-set-unhide gh-set-open"); open.textContent = "Open";
+        open.addEventListener("click", () => { closeSettings(ctx); openConversationScreen(ctx, id); });
+        row.append(open, b);
+        g.appendChild(row);
+      }
     },
     privacy(ctx, body) {
       let g = setGroup(body, null, "Turn off to read chats without friends seeing \"Opened\". Snaps still count when you open them.");
@@ -3119,13 +3246,7 @@
   async function renderSavedStickers(ctx, s) {
     const mine = s.tab === "mine";
     const list = await storage.get(mine ? "ghostMyStickers" : "ghostStickerFavs", []);
-    if (mine) {
-      const add = el("button", "gh-sticker-tile gh-sticker-add gh-press");
-      add.appendChild(icon("plus", 30));
-      const lab = el("span"); lab.textContent = "Make"; add.appendChild(lab);
-      add.addEventListener("click", () => makeSticker(ctx, s));
-      s.body.appendChild(add);
-    } else if (!list.length) {
+    if (!list.length) {
       s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Hold a sticker someone sent you and tap \"Add to Favorite Stickers\"" }));
       return;
     }
@@ -3155,55 +3276,6 @@
       s.body.appendChild(tile);
     }
   }
-  function nativeCall(msg) { try { return window.webkit.messageHandlers.dg.postMessage(msg); } catch (e) { return Promise.reject(e); } }
-  async function makeSticker(ctx, s) {
-    const f = await pickPhoto(); if (!f) return;
-    ctx.showToast("Cutting out your sticker…");
-    try {
-      const d = await decodePhoto(f);
-      const k = Math.min(1, 1024 / Math.max(d.w, d.h));
-      const c = document.createElement("canvas"); c.width = Math.round(d.w * k); c.height = Math.round(d.h * k);
-      c.getContext("2d").drawImage(d.src, 0, 0, c.width, c.height);
-      if (d.url) URL.revokeObjectURL(d.url);
-      const jpg = c.toDataURL("image/jpeg", 0.92).split(",")[1];
-      let pngBlob;
-      try {
-        const out = await nativeCall({ op: "cutout", image: jpg });
-        const bin = atob(out); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        pngBlob = new Blob([bytes], { type: "image/png" });
-      } catch (e) { // no subject found / older iOS: a round sticker instead
-        gtrail("cutout: " + (e && e.message || e));
-        const side = Math.min(c.width, c.height), r = document.createElement("canvas"); r.width = r.height = 512;
-        const g = r.getContext("2d"); g.beginPath(); g.arc(256, 256, 256, 0, Math.PI * 2); g.clip();
-        g.drawImage(c, (c.width - side) / 2, (c.height - side) / 2, side, side, 0, 0, 512, 512);
-        pngBlob = await new Promise((res) => r.toBlob(res, "image/png"));
-        ctx.showToast("Couldn't find a subject - made a round sticker");
-      }
-      // a white outline, like Snapchat/iMessage stickers
-      pngBlob = await outlineSticker(pngBlob).catch(() => pngBlob);
-      const id = "m" + Date.now().toString(36);
-      await wallDB.put("mysticker:" + id, pngBlob);
-      const cur = await storage.get("ghostMyStickers", []);
-      await storage.set("ghostMyStickers", [{ id }, ...cur].slice(0, 120));
-      haptic("light");
-      renderStickers(ctx, s);
-    } catch (e) { ctx.showToast("Couldn't make that sticker"); }
-  }
-  async function outlineSticker(blob) {
-    const bmp = await createImageBitmap(blob);
-    const pad = 14, max = 512, k = Math.min(1, (max - pad * 2) / Math.max(bmp.width, bmp.height));
-    const w = Math.round(bmp.width * k), h = Math.round(bmp.height * k);
-    const c = document.createElement("canvas"); c.width = w + pad * 2; c.height = h + pad * 2;
-    const g = c.getContext("2d");
-    // white silhouette stamped around the shape, then the sticker on top
-    const sil = document.createElement("canvas"); sil.width = w; sil.height = h;
-    const sg = sil.getContext("2d"); sg.drawImage(bmp, 0, 0, w, h); sg.globalCompositeOperation = "source-in"; sg.fillStyle = "#fff"; sg.fillRect(0, 0, w, h);
-    for (let a = 0; a < 16; a++) { const r = 7, x = Math.cos(a / 16 * Math.PI * 2) * r, y = Math.sin(a / 16 * Math.PI * 2) * r; g.drawImage(sil, pad + x, pad + y); }
-    g.drawImage(bmp, pad, pad, w, h);
-    if (bmp.close) bmp.close();
-    return new Promise((res) => c.toBlob(res, "image/png"));
-  }
-
   function buildStickerSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-gif-sheet gh-sticker-sheet");
@@ -3214,7 +3286,6 @@
       <div class="gh-gif-tabs">
         <button class="gh-gif-tab" data-tab="recent">Recent</button>
         <button class="gh-gif-tab" data-tab="favs">Favorites</button>
-        <button class="gh-gif-tab" data-tab="mine">My Stickers</button>
         <button class="gh-gif-tab" data-tab="solo">Bitmoji</button>
         <button class="gh-gif-tab" data-tab="duo">With friend</button>
         <button class="gh-gif-tab" data-tab="gifs">GIFs</button>
@@ -3276,7 +3347,7 @@
       renderGifResults(ctx, gs);
       return;
     }
-    if (s.tab === "favs" || s.tab === "mine") { renderSavedStickers(ctx, s); return; }
+    if (s.tab === "favs") { renderSavedStickers(ctx, s); return; }
     const p = stickerPeople(ctx);
     let list = [];
     if (s.tab === "recent") {
