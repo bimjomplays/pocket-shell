@@ -2,6 +2,8 @@ import UIKit
 import WebKit
 import QuartzCore
 import AVFoundation
+import Vision
+import CoreImage
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -625,6 +627,28 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "trail":
             trail(body["text"] as? String ?? "")
             replyHandler(true, nil)
+        case "cutout": // Ghost's sticker maker: lift the subject out of a photo (iOS 17 Vision), transparent PNG back
+            guard let b64 = body["image"] as? String, let data = Data(base64Encoded: b64),
+                  let image = UIImage(data: data), let cg = image.cgImage else { return replyHandler(nil, "bad image") }
+            if #available(iOS 17.0, *) {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let request = VNGenerateForegroundInstanceMaskRequest()
+                    let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+                    var png: String?
+                    var failure = "no subject found"
+                    do {
+                        try handler.perform([request])
+                        if let result = request.results?.first {
+                            let buffer = try result.generateMaskedImage(ofInstances: result.allInstances, from: handler, croppedToInstancesExtent: true)
+                            let ci = CIImage(cvPixelBuffer: buffer)
+                            if let out = CIContext().createCGImage(ci, from: ci.extent) { png = UIImage(cgImage: out).pngData()?.base64EncodedString() }
+                        }
+                    } catch { failure = error.localizedDescription }
+                    DispatchQueue.main.async { if let png { replyHandler(png, nil) } else { replyHandler(nil, failure) } }
+                }
+            } else {
+                replyHandler(nil, "needs iOS 17")
+            }
         case "speaker": // Ghost's call screen: loudspeaker on/off (WebKit leaves calls on the earpiece)
             let on = body["on"] as? Bool ?? false
             do {

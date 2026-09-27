@@ -199,6 +199,8 @@
     loadOlder: (id) => bridge.call("loadOlder", [id]),
     sendText: (id, text, opts) => bridge.call("sendText", [id, text, opts || {}]),
     sendSticker: (id, sticker) => bridge.call("sendSticker", [id, sticker], 30000),
+    stickerContent: (id, msgId) => bridge.call("stickerContent", [id, msgId]),
+    sendStickerRaw: (id, content, type) => bridge.call("sendStickerRaw", [id, content, type], 30000),
     sendMedia: (id, blob, opts) => bridge.call("sendMedia", [id, blob, opts || {}], 120000), // uploads can be slow on cellular
     sendSnap: (ids, blob, opts) => bridge.call("sendSnap", [ids, blob, opts || {}], 120000),
     react: (id, messageId, emoji) => bridge.call("react", [id, messageId, emoji]),
@@ -2090,11 +2092,12 @@
         if (Math.abs(g.dx) < LOCK_MIN && Math.abs(g.dy) < LOCK_MIN) return;
         g.locked = Math.abs(g.dx) > Math.abs(g.dy) * 1.2 ? "x" : "y";
       }
-      if (g.locked !== "x" || g.dx <= 0) return;
+      // swipe LEFT on a message to reply (like Telegram) - swiping right anywhere leaves the chat
+      if (g.locked !== "x" || g.dx >= 0) return;
       e.preventDefault();
-      const dx = Math.min(g.dx, REPLY_MAX);
+      const dx = Math.min(-g.dx, REPLY_MAX);
       const swipe = g.wrap.querySelector(".gh-msg-swipe");
-      swipe.style.setProperty("--gh-swipe-x", dx * 0.72 + "px");
+      swipe.style.setProperty("--gh-swipe-x", -dx * 0.72 + "px");
       const progress = clamp(dx / REPLY_TRIGGER, 0, 1);
       g.wrap.style.setProperty("--gh-reply-op", String(progress));
       g.wrap.style.setProperty("--gh-reply-scale", String(0.5 + 0.5 * progress));
@@ -2107,7 +2110,7 @@
       if (gs.timer) clearTimeout(gs.timer);
       const swipe = gs.wrap.querySelector(".gh-msg-swipe");
       swipe.classList.add("gh-anim");
-      if (!gs.longFired && gs.locked === "x" && gs.dx > REPLY_TRIGGER) {
+      if (!gs.longFired && gs.locked === "x" && -gs.dx > REPLY_TRIGGER) {
         const m = messageFor(gs.wrap);
         if (m) { haptic(); setReplyTo(ctx, m); conv.textarea.focus(); }
       }
@@ -2134,6 +2137,7 @@
         <div class="gh-action-item" data-act="reply"></div>
         <div class="gh-action-item" data-act="copy"></div>
         <div class="gh-action-item" data-act="save"></div>
+        <div class="gh-action-item" data-act="fav"></div>
       </div>
     `;
     const reactRow = sheet.querySelector(".gh-react-row");
@@ -2150,12 +2154,14 @@
     copyItem.append(icon("copy"), textSpan("Copy"));
     const saveItem = sheet.querySelector('[data-act="save"]');
     saveItem.append(icon("star"), textSpan("Save"));
+    const favItem = sheet.querySelector('[data-act="fav"]');
+    favItem.append(icon("emoji"), textSpan("Add to Favorite Stickers"));
 
     overlaysRoot.appendChild(backdrop);
     overlaysRoot.appendChild(sheet);
     function textSpan(t) { const s = el("span"); s.textContent = t; return s; }
 
-    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, message: null, liftedEl: null };
+    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, favItem, message: null, liftedEl: null };
     function closeAction() {
       if (s.liftedEl) { s.liftedEl.classList.remove("gh-msg-lifted"); s.liftedEl = null; }
       closeSheetGeneric(backdrop, sheet);
@@ -2208,6 +2214,9 @@
       api.saveMessage(convId, message.id, next).catch(() => {});
       s.close();
     };
+    const isSticker = message.kind === "sticker" || message.kind === "gif";
+    s.favItem.style.display = isSticker ? "" : "none";
+    s.favItem.onclick = () => { s.close(); favoriteSticker(ctx, message, wrapEl); };
     if (wrapEl) { wrapEl.classList.add("gh-msg-lifted"); s.liftedEl = wrapEl; }
     openSheetGeneric(s.backdrop, s.sheet);
   }
@@ -3014,6 +3023,116 @@
     return stickerCatalog;
   }
   const stickerUrl = (comic, me, friend) => `https://cf-st.sc-cdn.net/3d/render/${[comic, me, friend].filter(Boolean).join("-")}-v1.webp?scale=1&ua=2`;
+  // ---- Favorite + your own stickers -------------------------------------------------------------------
+  // Favorites: stickers friends sent you, kept as their exact message content (sent again as real stickers) with a
+  // picture for the grid. My Stickers: made here from your photos - the subject is cut out by iOS (like holding a
+  // subject in Photos) - and sent as transparent pictures: Snapchat Web has no way to upload new stickers.
+  async function favoriteSticker(ctx, m, wrapEl) {
+    try {
+      const r = await api.stickerContent(m.conversationId || ctx.state.currentConvId, m.id);
+      const img = wrapEl && wrapEl.querySelector("img, video");
+      let thumb = null;
+      if (img && img.tagName === "IMG" && img.src) thumb = await fetch(img.src).then((x) => x.blob()).catch(() => null);
+      if (!thumb && img && img.tagName === "VIDEO") { // GIFs play as video: keep a still frame
+        const c = document.createElement("canvas"); c.width = img.videoWidth || 200; c.height = img.videoHeight || 200;
+        try { c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); thumb = await new Promise((res) => c.toBlob(res, "image/png")); } catch (e) {}
+      }
+      const id = "f" + Date.now().toString(36);
+      if (thumb) await wallDB.put("favsticker:" + id, thumb);
+      const favs = await storage.get("ghostStickerFavs", []);
+      await storage.set("ghostStickerFavs", [{ id, content: r.content, contentType: r.contentType }, ...favs].slice(0, 120));
+      haptic("light");
+      ctx.showToast("Added to Favorite Stickers");
+    } catch (e) { ctx.showToast(e && e.message ? e.message : "Couldn't save that sticker"); }
+  }
+  async function renderSavedStickers(ctx, s) {
+    const mine = s.tab === "mine";
+    const list = await storage.get(mine ? "ghostMyStickers" : "ghostStickerFavs", []);
+    if (mine) {
+      const add = el("button", "gh-sticker-tile gh-sticker-add gh-press");
+      add.appendChild(icon("plus", 30));
+      const lab = el("span"); lab.textContent = "Make"; add.appendChild(lab);
+      add.addEventListener("click", () => makeSticker(ctx, s));
+      s.body.appendChild(add);
+    } else if (!list.length) {
+      s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Hold a sticker someone sent you and tap \"Add to Favorite Stickers\"" }));
+      return;
+    }
+    for (const it of list) {
+      const tile = el("button", "gh-sticker-tile gh-press");
+      const img = el("img"); img.alt = "";
+      wallDB.get((mine ? "mysticker:" : "favsticker:") + it.id).then((b) => { if (b) img.src = URL.createObjectURL(b); }).catch(() => {});
+      tile.appendChild(img);
+      let held = null;
+      tile.addEventListener("touchstart", () => { held = setTimeout(async () => { // hold to remove
+        held = "fired"; haptic("medium");
+        const cur = await storage.get(mine ? "ghostMyStickers" : "ghostStickerFavs", []);
+        await storage.set(mine ? "ghostMyStickers" : "ghostStickerFavs", cur.filter((x) => x.id !== it.id));
+        wallDB.del((mine ? "mysticker:" : "favsticker:") + it.id);
+        tile.remove(); ctx.showToast("Removed");
+      }, 600); }, { passive: true });
+      tile.addEventListener("touchend", () => { if (held !== "fired") clearTimeout(held); }, { passive: true });
+      tile.addEventListener("click", async () => {
+        if (held === "fired") { held = null; return; }
+        const convId = ctx.state.currentConvId; if (!convId) return;
+        haptic(); closeSheetGeneric(s.backdrop, s.sheet);
+        try {
+          if (mine) { const b = await wallDB.get("mysticker:" + it.id); await api.sendMedia(convId, new File([b], "sticker.png", { type: "image/png" }), { kind: "sticker" }); }
+          else await api.sendStickerRaw(convId, it.content, it.contentType);
+        } catch (e) { gtrail("saved sticker send failed " + (e && e.message)); ctx.showToast("Couldn't send that sticker"); }
+      });
+      s.body.appendChild(tile);
+    }
+  }
+  function nativeCall(msg) { try { return window.webkit.messageHandlers.dg.postMessage(msg); } catch (e) { return Promise.reject(e); } }
+  async function makeSticker(ctx, s) {
+    const f = await pickPhoto(); if (!f) return;
+    ctx.showToast("Cutting out your sticker…");
+    try {
+      const d = await decodePhoto(f);
+      const k = Math.min(1, 1024 / Math.max(d.w, d.h));
+      const c = document.createElement("canvas"); c.width = Math.round(d.w * k); c.height = Math.round(d.h * k);
+      c.getContext("2d").drawImage(d.src, 0, 0, c.width, c.height);
+      if (d.url) URL.revokeObjectURL(d.url);
+      const jpg = c.toDataURL("image/jpeg", 0.92).split(",")[1];
+      let pngBlob;
+      try {
+        const out = await nativeCall({ op: "cutout", image: jpg });
+        const bin = atob(out); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        pngBlob = new Blob([bytes], { type: "image/png" });
+      } catch (e) { // no subject found / older iOS: a round sticker instead
+        gtrail("cutout: " + (e && e.message || e));
+        const side = Math.min(c.width, c.height), r = document.createElement("canvas"); r.width = r.height = 512;
+        const g = r.getContext("2d"); g.beginPath(); g.arc(256, 256, 256, 0, Math.PI * 2); g.clip();
+        g.drawImage(c, (c.width - side) / 2, (c.height - side) / 2, side, side, 0, 0, 512, 512);
+        pngBlob = await new Promise((res) => r.toBlob(res, "image/png"));
+        ctx.showToast("Couldn't find a subject - made a round sticker");
+      }
+      // a white outline, like Snapchat/iMessage stickers
+      pngBlob = await outlineSticker(pngBlob).catch(() => pngBlob);
+      const id = "m" + Date.now().toString(36);
+      await wallDB.put("mysticker:" + id, pngBlob);
+      const cur = await storage.get("ghostMyStickers", []);
+      await storage.set("ghostMyStickers", [{ id }, ...cur].slice(0, 120));
+      haptic("light");
+      renderStickers(ctx, s);
+    } catch (e) { ctx.showToast("Couldn't make that sticker"); }
+  }
+  async function outlineSticker(blob) {
+    const bmp = await createImageBitmap(blob);
+    const pad = 14, max = 512, k = Math.min(1, (max - pad * 2) / Math.max(bmp.width, bmp.height));
+    const w = Math.round(bmp.width * k), h = Math.round(bmp.height * k);
+    const c = document.createElement("canvas"); c.width = w + pad * 2; c.height = h + pad * 2;
+    const g = c.getContext("2d");
+    // white silhouette stamped around the shape, then the sticker on top
+    const sil = document.createElement("canvas"); sil.width = w; sil.height = h;
+    const sg = sil.getContext("2d"); sg.drawImage(bmp, 0, 0, w, h); sg.globalCompositeOperation = "source-in"; sg.fillStyle = "#fff"; sg.fillRect(0, 0, w, h);
+    for (let a = 0; a < 16; a++) { const r = 7, x = Math.cos(a / 16 * Math.PI * 2) * r, y = Math.sin(a / 16 * Math.PI * 2) * r; g.drawImage(sil, pad + x, pad + y); }
+    g.drawImage(bmp, pad, pad, w, h);
+    if (bmp.close) bmp.close();
+    return new Promise((res) => c.toBlob(res, "image/png"));
+  }
+
   function buildStickerSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-gif-sheet gh-sticker-sheet");
@@ -3023,8 +3142,11 @@
       <div class="gh-gif-search-row"><div class="gh-search"></div></div>
       <div class="gh-gif-tabs">
         <button class="gh-gif-tab" data-tab="recent">Recent</button>
+        <button class="gh-gif-tab" data-tab="favs">Favorites</button>
+        <button class="gh-gif-tab" data-tab="mine">My Stickers</button>
         <button class="gh-gif-tab" data-tab="solo">Bitmoji</button>
         <button class="gh-gif-tab" data-tab="duo">With friend</button>
+        <button class="gh-gif-tab" data-tab="gifs">GIFs</button>
       </div>
       <div class="gh-gif-body gh-sticker-grid gh-scroll"></div>
     `;
@@ -3042,8 +3164,8 @@
       b.addEventListener("click", () => { haptic("light"); s.tab = b.dataset.tab; renderStickers(ctx, s); });
     }
     let t;
-    input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { s.query = input.value.trim().toLowerCase(); renderStickers(ctx, s); }, 200); });
-    s.body.addEventListener("scroll", () => { if (s.body.scrollTop + s.body.clientHeight > s.body.scrollHeight - 400) moreStickers(ctx, s); }, { passive: true });
+    input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { s.query = input.value.trim().toLowerCase(); renderStickers(ctx, s); }, s.tab === "gifs" ? 300 : 200); });
+    s.body.addEventListener("scroll", () => { if (s.tab !== "gifs" && s.body.scrollTop + s.body.clientHeight > s.body.scrollHeight - 400) moreStickers(ctx, s); }, { passive: true });
     return s;
   }
   function stickerPeople(ctx) {
@@ -3074,6 +3196,16 @@
     for (const [name, b] of Object.entries(s.tabs)) b.dataset.on = s.tab === name ? "1" : "0";
     s.body.innerHTML = "";
     s.body.scrollTop = 0;
+    if (s.gif) s.gif.seq++; // a GIF search still loading must not land in another tab
+    s.input.placeholder = s.tab === "gifs" ? "Search GIPHY" : "Search stickers";
+    s.body.classList.toggle("gh-sticker-grid", s.tab !== "gifs");
+    if (s.tab === "gifs") { // the GIF picker, inside the sticker sheet
+      const gs = s.gif || (s.gif = { backdrop: s.backdrop, sheet: s.sheet, body: s.body, tabs: {}, tab: "trending", query: "", seq: 0, input: s.input });
+      gs.query = s.query;
+      renderGifResults(ctx, gs);
+      return;
+    }
+    if (s.tab === "favs" || s.tab === "mine") { renderSavedStickers(ctx, s); return; }
     const p = stickerPeople(ctx);
     let list = [];
     if (s.tab === "recent") {
@@ -3946,7 +4078,10 @@
         else g = null;
       } else {
         const x = e.touches[0].clientX;
-        if (x <= EDGE_ZONE && !target.closest("input, textarea, button, .gh-msg-wrap")) begin("close", e, null);
+        // swipe right from anywhere in the chat to leave it (the edge, the header, the messages - not inside inputs,
+        // voice-note waveforms or open sheets); a leftward swipe on a message is reply instead
+        const free = !target.closest("input, textarea, button, .gh-audio-wave, .gh-sheet, .gh-call, .gh-camera, .gh-settings, .gh-viewer");
+        if ((x <= EDGE_ZONE && !target.closest("input, textarea, button")) || free) begin("close", e, null);
         else g = null;
       }
     }, { passive: true });

@@ -363,6 +363,26 @@
     if (missing.length) trail("sticker-helpers", "missing " + missing.join(","), "error");
     return stickerHelperCache;
   }
+  // send ready-made message content (encoded with Snapchat's own codec) the way its text sender does
+  async function sendContent(conversationId, content, contentType) {
+    const h = sendHelpers();
+    const client = messaging().client;
+    if (!h.proxy || !client || typeof client.getConversationManager !== "function") throw new Error("sending isn't available");
+    const u = crypto.randomUUID();
+    const attemptId = { id: Uint8Array.from(u.replace(/-/g, "").match(/../g).map((x) => parseInt(x, 16))), str: u };
+    const destinations = { phoneNumbers: [], conversations: [convIdObj(conversationId)], stories: [], massSnaps: [] };
+    const message = { content, quotedMessageId: undefined, contentType,
+      platformAnalytics: { content: undefined, metricsMessageType: 1 /* STICKER */, metricsMessageMediaType: 5 /* DERIVED_FROM_MESSAGE_TYPE */, reactionSource: 0, attemptId },
+      localMediaReferences: [], incidentalAttachments: [], savePolicy: 1 /* LIFETIME */, allowsTranscription: false, botMention: false };
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("send timed out")), 30000);
+      client.getConversationManager().sendMessageWithContent(destinations, message, h.proxy({
+        onSuccess: () => { clearTimeout(t); resolve(); },
+        onError: (e) => { clearTimeout(t); reject(new Error("Snapchat refused it (" + errText(e) + ")")); },
+        onQueued: () => {},
+      }));
+    });
+  }
   let sendHelperCache;
   function exportWhere(moduleNeedle, pick) {
     const factories = webpackRequire && webpackRequire.m;
@@ -1462,20 +1482,7 @@
       const stickerId = [comic, "1", mine, sticker.friendAvatarId || ""].filter(Boolean).join(":");
       const content = h.codec.encode({ content: { $case: "sticker", sticker: { sticker: { $case: "included", included: {
         packId: "bitmoji", stickerId, animated: false, giphySourceUrl: "", stickerType: 1, highResUri: "", isReaction: false } } } }, decorators: undefined }).finish();
-      const u = crypto.randomUUID();
-      const attemptId = { id: Uint8Array.from(u.replace(/-/g, "").match(/../g).map((x) => parseInt(x, 16))), str: u };
-      const destinations = { phoneNumbers: [], conversations: [convIdObj(conversationId)], stories: [], massSnaps: [] };
-      const message = { content, quotedMessageId: undefined, contentType: 6 /* STICKER */,
-        platformAnalytics: { content: undefined, metricsMessageType: 1 /* STICKER */, metricsMessageMediaType: 5 /* DERIVED_FROM_MESSAGE_TYPE */, reactionSource: 0, attemptId },
-        localMediaReferences: [], incidentalAttachments: [], savePolicy: 1 /* LIFETIME */, allowsTranscription: false, botMention: false };
-      await new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("sticker send timed out")), 30000);
-        client.getConversationManager().sendMessageWithContent(destinations, message, h.proxy({
-          onSuccess: () => { clearTimeout(t); resolve(); },
-          onError: (e) => { clearTimeout(t); reject(new Error("Snapchat refused the sticker (" + errText(e) + ")")); },
-          onQueued: () => {},
-        }));
-      });
+      await sendContent(conversationId, content, 6);
       return true;
     },
 
@@ -1513,6 +1520,28 @@
       return true;
     },
     flipCamera() { const c = window.__dgCam; if (c && typeof c.flip === "function") { c.flip(); return true; } return false; },
+
+    // Favourite stickers: a sticker someone sent is kept as its exact message content (for Bitmoji/GIF/custom
+    // stickers that's a reference to Snapchat's own copy of the image + its key), and sending a favourite sends that
+    // same content again - the way Snapchat's own "favourite sticker" works, nothing re-uploaded.
+    stickerContent(conversationId, messageId) {
+      requireStore();
+      const entry = conversationEntry(conversationId);
+      const raw = entry && entry.messages && findRaw(entry.messages, messageId);
+      const mc = raw && raw.messageContent;
+      if (!mc || !(mc.content instanceof Uint8Array)) throw new Error("sticker not loaded");
+      if (mc.remoteMediaReferences && mc.remoteMediaReferences.length) throw new Error("this sticker can't be saved"); // (its image is tied to the original message)
+      let bin = ""; for (const b of mc.content) bin += String.fromCharCode(b);
+      return { content: btoa(bin), contentType: mc.contentType };
+    },
+    async sendStickerRaw(conversationId, contentB64, contentType) {
+      requireStore();
+      const bin = atob(String(contentB64));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      await sendContent(conversationId, bytes, contentType || 6);
+      return true;
+    },
 
     // Swipe-up reply to a friend's story snap: Snapchat's composer does
     // sendStorySnapTextReplyMessage(conversationId, snapDoc, snapId, text) (main.js, search '"friendStorySnap"===O?.type'),
