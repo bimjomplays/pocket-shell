@@ -1679,3 +1679,16 @@ input, textarea {
 .gh-call[data-remote-video="1"] .gh-call-pip { opacity: 1; pointer-events: auto; }
 .gh-story-dest .gh-friend-name span { display: block; font-size: 12.5px; font-weight: 400; color: var(--gh-text-secondary); }
 .gh-story-dest-ic .gh-avatar { box-shadow: 0 0 0 2px var(--gh-bg-list), 0 0 0 4px var(--gh-accent); }
+
+/* in-app confirm / prompt */
+.gh-confirm { position: absolute; inset: 0; z-index: 60; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; animation: gh-fadein 0.15s ease; }
+.gh-confirm-box { width: min(300px, 84%); background: var(--gh-bg-panel); border-radius: 16px; padding: 20px 16px 12px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+.gh-confirm-text { font-size: 16px; font-weight: 600; margin-bottom: 14px; line-height: 1.3; }
+.gh-confirm-input { width: 100%; box-sizing: border-box; height: 40px; border-radius: 10px; border: none; outline: none; padding: 0 12px; margin-bottom: 12px; background: var(--gh-bg-panel-2); color: var(--gh-text); font-size: 16px; }
+.gh-confirm-row { display: flex; gap: 8px; }
+.gh-confirm-row button { flex: 1; height: 42px; border-radius: 11px; background: var(--gh-bg-panel-2); color: var(--gh-text); font-weight: 600; font-size: 16px; }
+.gh-confirm-row .gh-confirm-ok { background: var(--gh-accent); color: #fff; }
+.gh-newchat-title { margin: 6px 16px 0; height: 40px; border-radius: 10px; border: none; outline: none; padding: 0 12px; background: var(--gh-bg-panel-2); color: var(--gh-text); font-size: 16px; }
+.gh-saved-who { font-size: 12.5px; color: var(--gh-text-secondary); }
+.gh-saved-text { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-chat-sheet > * { flex-shrink: 0; }

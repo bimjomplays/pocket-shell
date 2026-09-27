@@ -871,6 +871,8 @@
       // YOUR id is in openedBy (the sender is always in it - that's why every received snap said "Opened");
       // one you sent is opened when anyone else is.
       opened: (me && senderId === me) ? others(md.openedBy).length > 0 : (md.openedBy || []).some((u) => idOf(u) === me),
+      replayable: md.playableSnapState === 4 || undefined, // PlayableSnapState VIEWEDREPLAYABLE
+      saveable: md.isSaveable === false ? false : undefined,
       snapSound: kind === "snap" ? !!(mc.snapDisplayInfo && mc.snapDisplayInfo.hasAudio) : undefined,
       pending: raw.state === 0 || raw.state === 1 ? undefined : undefined,
       failed: false,
@@ -1823,6 +1825,39 @@
       if (!story || !fn) return { url: null };
       const url = await fn(story);
       return { url: url || null };
+    },
+
+    // ---- chat settings + groups, all Snapchat's own actions (main.js messaging slice) ----------------------
+    // notifications: ChatNotificationPreference ALL_MESSAGES 0 / SILENT 1 / MENTION_ONLY 2 (groups)
+    async setChatNotifications(conversationId, pref) { requireStore(); await messaging().updateChatNotificationSettings(convIdObj(conversationId), pref); return true; },
+    // when chats delete: IMMEDIATE 0 ("after viewing") / TWENTYFOURHOURS 1; source CHAT_SETTINGS 0
+    async setRetention(conversationId, mode) { requireStore(); await messaging().updateConversationRetentionMode(convIdObj(conversationId), mode, 0); return true; },
+    chatSettings(conversationId) {
+      requireStore();
+      const entry = conversationEntry(conversationId);
+      const conv = entry && entry.conversation;
+      const feed = (messaging().feed || {})[conversationId] || {};
+      const secs = conv && conv.retentionPolicy ? toNum(conv.retentionPolicy.readRetentionTimeSeconds) : undefined;
+      const ns = feed.notificationSettings && feed.notificationSettings.chatNotificationPreference;
+      return { retention: secs === undefined ? undefined : secs >= 86400 ? 1 : 0, notifications: ns ? toNum(ns.defaultNotificationPreference) : undefined };
+    },
+    async clearChat(conversationId) { requireStore(); await messaging().clearConversation(convIdObj(conversationId)); return true; },
+    async renameGroup(conversationId, title) { requireStore(); const m = messaging(); await m.updateConversationTitle(convIdObj(conversationId), String(title)); if (typeof m.ensureNetworkConversation === "function") await m.ensureNetworkConversation(convIdObj(conversationId)); return true; },
+    async addToGroup(conversationId, userIds) { requireStore(); await messaging().inviteParticipants(convIdObj(conversationId), { snapchatters: userIds.map((u) => idObjs.get(u) || uuidObj(u)), phoneNumbers: [] }); return true; },
+    async leaveGroup(conversationId) { requireStore(); await messaging().leaveConversation(convIdObj(conversationId)); return true; },
+    async createGroup(userIds, title) {
+      requireStore();
+      const m = messaging();
+      const me = meId();
+      const id = await m.createConversationSendTo(userIds.slice(), idObjs.get(me) || uuidObj(me), String(title || ""));
+      return { conversationId: idOf(id) || null };
+    },
+    // replay a snap you already opened (only when Snapchat marks it VIEWEDREPLAYABLE = 4)
+    async replaySnap(conversationId, messageId) {
+      requireStore();
+      const entry = conversationEntry(conversationId);
+      await messaging().requestedReplaySnapFromConv(convIdObj(conversationId), realKey(entry && entry.messages, messageId));
+      return methods.openSnap(conversationId, messageId);
     },
 
     async newConversation(userIds) {

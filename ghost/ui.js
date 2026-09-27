@@ -217,6 +217,15 @@
     closeSnap: (id, messageId) => bridge.call("closeSnap", [id, messageId]),
     listStories: () => bridge.call("listStories"),
     openStory: (userId) => bridge.call("openStory", [userId]),
+    setChatNotifications: (id, p) => bridge.call("setChatNotifications", [id, p]),
+    setRetention: (id, m) => bridge.call("setRetention", [id, m]),
+    chatSettings: (id) => bridge.call("chatSettings", [id]),
+    clearChat: (id) => bridge.call("clearChat", [id]),
+    renameGroup: (id, t) => bridge.call("renameGroup", [id, t]),
+    addToGroup: (id, users) => bridge.call("addToGroup", [id, users]),
+    leaveGroup: (id) => bridge.call("leaveGroup", [id]),
+    createGroup: (users, t) => bridge.call("createGroup", [users, t], 30000),
+    replaySnap: (id, msgId) => bridge.call("replaySnap", [id, msgId], 45000),
     newConversation: (userIds) => bridge.call("newConversation", [userIds]),
     searchFriends: (q) => bridge.call("searchFriends", [q]),
     debugShape: () => bridge.call("debugShape"),
@@ -1762,11 +1771,27 @@
     const label = el("span", "gh-snap-label");
     const paint = () => {
       b.dataset.opened = m.opened ? "1" : "0";
-      label.textContent = isMe ? (m.opened ? "Opened" : "Delivered") : (m.opened ? "Opened" : "New Snap");
+      label.textContent = isMe ? (m.opened ? "Opened" : "Delivered") : (m.opened ? (m.replayable ? "Opened · Tap to replay" : "Opened") : "New Snap");
     };
     paint();
     const time = el("span", "gh-snap-time"); time.textContent = fmtClock(m.ts);
     b.append(mark, label, time);
+    if (!isMe && m.opened && m.replayable) { // one replay, like Snapchat
+      b.classList.add("gh-press");
+      b.addEventListener("click", async () => {
+        if (b.dataset.loading === "1" || !m.replayable) return;
+        haptic(); b.dataset.loading = "1";
+        try {
+          const res = await api.replaySnap(m.conversationId || ctx.state.currentConvId, m.id);
+          const items = (res && res.media) || [];
+          if (!items.length) throw new Error("empty");
+          m.replayable = false;
+          openViewerSequence(ctx, items, { title: (m.from && m.from.name) || "Snap" });
+          ctx.viewer.snap = { convId: m.conversationId || ctx.state.currentConvId, msgId: m.id, onClose: () => paint() };
+        } catch (e) { ctx.showToast("Couldn't replay that Snap"); }
+        finally { delete b.dataset.loading; paint(); }
+      });
+    }
     if (!isMe && !m.opened) {
       b.classList.add("gh-press");
       b.setAttribute("role", "button");
@@ -2905,6 +2930,50 @@
     if (ctx.state.currentConvId === convId) applyChatWallpaper(ctx, convId);
   }
 
+  // small in-app confirm and text prompt (never window.confirm/prompt - those freeze the web view)
+  function confirmSheet(ctx, text, okLabel) {
+    return new Promise((res) => {
+      const ov = el("div", "gh-confirm");
+      ov.innerHTML = '<div class="gh-confirm-box"><div class="gh-confirm-text"></div><div class="gh-confirm-row"><button data-v="0">Cancel</button><button data-v="1" class="gh-confirm-ok"></button></div></div>';
+      ov.querySelector(".gh-confirm-text").textContent = text;
+      ov.querySelector(".gh-confirm-ok").textContent = okLabel || "OK";
+      ov.addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b && e.target !== ov) return; ov.remove(); res(!!(b && b.dataset.v === "1")); });
+      ctx.root.appendChild(ov);
+    });
+  }
+  function promptSheet(ctx, text, value) {
+    return new Promise((res) => {
+      const ov = el("div", "gh-confirm");
+      ov.innerHTML = '<div class="gh-confirm-box"><div class="gh-confirm-text"></div><input class="gh-confirm-input" maxlength="60"><div class="gh-confirm-row"><button data-v="0">Cancel</button><button data-v="1" class="gh-confirm-ok">Save</button></div></div>';
+      ov.querySelector(".gh-confirm-text").textContent = text;
+      const inp = ov.querySelector("input"); inp.value = value || "";
+      ov.addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; ov.remove(); res(b.dataset.v === "1" ? inp.value.trim() : null); });
+      ctx.root.appendChild(ov);
+      setTimeout(() => inp.focus(), 50);
+    });
+  }
+  async function renameGroupPrompt(ctx, convId, current) {
+    const name = await promptSheet(ctx, "Group name", current);
+    if (name == null || !name) return;
+    try { await api.renameGroup(convId, name); ctx.showToast("Renamed"); } catch (e) { ctx.showToast("Couldn't rename"); }
+  }
+  function openSavedList(ctx, convId) {
+    const s = ctx.chatSheet;
+    const saved = ((ctx.state.messagesByConv.get(convId) || {}).messages || []).filter((m) => m.saved);
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const t = el("div", "gh-set-group-title"); t.textContent = "Saved in Chat"; s.sheet.appendChild(t);
+    if (!saved.length) { const e = el("div", "gh-set-group-foot"); e.textContent = "Nothing saved in this chat yet (among the messages loaded). Hold a message and tap Save."; s.sheet.appendChild(e); return; }
+    const g = el("div", "gh-set-group"); s.sheet.appendChild(g);
+    for (const m of saved.slice().reverse()) {
+      const row = el("div", "gh-set-row gh-saved-row");
+      const who = el("div", "gh-saved-who"); who.textContent = (m.fromMe ? "You" : (m.from && m.from.name) || "") + " \u00b7 " + fmtClock(m.ts);
+      const txt = el("div", "gh-saved-text"); txt.textContent = m.kind === "text" ? m.text : ({ "chat-media": "Photo", snap: "Snap", audio: "Voice message", sticker: "Sticker", gif: "GIF" }[m.kind] || "Message");
+      const col = el("div", "gh-set-label"); col.append(who, txt); row.appendChild(col);
+      g.appendChild(row);
+    }
+  }
+
   // Chat sheet (tap the name/picture at the top of a chat): this chat's wallpaper.
   function buildChatSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
@@ -2940,6 +3009,31 @@
       if (customAvatarUrls.has(avKey)) setRow(pg, { label: cd.isGroup ? "Use Bitmojis" : "Use Their Bitmoji", danger: true, onClick: async () => { await clearCustomAvatar(ctx, avKey); closeSheetGeneric(s.backdrop, s.sheet); } });
       const pf = el("div", "gh-set-group-foot"); pf.textContent = "Only you see this - it doesn't change anything on Snapchat."; s.sheet.appendChild(pf);
     }
+    // chat settings: notifications, when chats delete, saved messages; group tools
+    const st = await api.chatSettings(convId).catch(() => ({}));
+    const nt = el("div", "gh-set-group-title"); nt.textContent = "Notifications"; s.sheet.appendChild(nt);
+    const ng = el("div", "gh-set-group"); s.sheet.appendChild(ng);
+    let notif = st && st.notifications;
+    setChoice(ng, cd.isGroup ? [[0, "All Messages"], [2, "Mentions Only"], [1, "Silent"]] : [[0, "All Messages"], [1, "Silent"]], () => notif, (v) => { notif = v; api.setChatNotifications(convId, v).catch(() => ctx.showToast("Couldn't change that")); });
+    const rt = el("div", "gh-set-group-title"); rt.textContent = "Delete Chats"; s.sheet.appendChild(rt);
+    const rg = el("div", "gh-set-group"); s.sheet.appendChild(rg);
+    let ret = st && st.retention;
+    setChoice(rg, [[0, "After Viewing"], [1, "24 Hours After Viewing"]], () => ret, (v) => { ret = v; api.setRetention(convId, v).catch(() => ctx.showToast("Couldn't change that")); });
+    const og = el("div", "gh-set-group"); og.style.marginTop = "14px"; s.sheet.appendChild(og);
+    const saved = ((ctx.state.messagesByConv.get(convId) || {}).messages || []).filter((m) => m.saved);
+    setRow(og, { icon: "star", tint: "#f0b232", label: "Saved in Chat", value: String(saved.length), onClick: () => openSavedList(ctx, convId) });
+    if (cd.isGroup) {
+      setRow(og, { icon: "edit", tint: "#3e88f7", label: "Rename Group", onClick: () => renameGroupPrompt(ctx, convId, cd.title) });
+      setRow(og, { icon: "plus", tint: "#23a55a", label: "Add Members", onClick: () => { closeSheetGeneric(s.backdrop, s.sheet); openNewChatSheet(ctx, convId); } });
+      setRow(og, { label: "Leave Group", danger: true, onClick: async () => {
+        if (!(await confirmSheet(ctx, "Leave " + (cd.title || "this group") + "?", "Leave"))) return;
+        try { await api.leaveGroup(convId); closeSheetGeneric(s.backdrop, s.sheet); closeConversationScreen(ctx); ctx.showToast("You left the group"); } catch (e) { ctx.showToast("Couldn't leave"); }
+      } });
+    }
+    setRow(og, { label: "Clear from Chat Feed", danger: true, onClick: async () => {
+      if (!(await confirmSheet(ctx, "Clear this chat from your feed? Saved messages stay.", "Clear"))) return;
+      try { await api.clearChat(convId); closeSheetGeneric(s.backdrop, s.sheet); closeConversationScreen(ctx); } catch (e) { ctx.showToast("Couldn't clear it"); }
+    } });
     const title = el("div", "gh-set-group-title"); title.textContent = "Chat Wallpaper"; s.sheet.appendChild(title);
     const cards = el("div", "gh-set-cards gh-chat-walls");
     s.sheet.appendChild(cards);
@@ -3623,6 +3717,7 @@
       </div>
       <div class="gh-newchat-search"><div class="gh-search"></div></div>
       <div class="gh-friend-list gh-scroll" style="flex:1;min-height:0;"></div>
+      <input class="gh-newchat-title" placeholder="Group name (optional)" maxlength="60" style="display:none">
       <button class="gh-newchat-create" disabled>Chat</button>
     `;
     sheet.querySelector('[data-act="close"]').appendChild(icon("close"));
@@ -3635,15 +3730,20 @@
     searchWrap.appendChild(input);
     overlaysRoot.append(backdrop, sheet);
     backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
-    const s = { backdrop, sheet, input, list: sheet.querySelector(".gh-friend-list"), createBtn: sheet.querySelector(".gh-newchat-create"), picked: new Map(), seq: 0 };
+    const s = { backdrop, sheet, input, list: sheet.querySelector(".gh-friend-list"), createBtn: sheet.querySelector(".gh-newchat-create"), titleInput: sheet.querySelector(".gh-newchat-title"), picked: new Map(), seq: 0, addTo: null };
     sheet.querySelector('[data-act="close"]').addEventListener("click", () => { haptic("light"); closeSheetGeneric(backdrop, sheet); });
     let t;
     input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => runFriendSearch(ctx, s), 200); });
     s.createBtn.addEventListener("click", async () => {
       if (!s.picked.size) return;
       haptic();
+      if (s.addTo) { // "Add to group" mode
+        try { await api.addToGroup(s.addTo, Array.from(s.picked.keys())); closeSheetGeneric(backdrop, sheet); ctx.showToast("Added to the group"); }
+        catch (e) { ctx.showToast("Couldn't add them"); }
+        return;
+      }
       try {
-        const res = await api.newConversation(Array.from(s.picked.keys()));
+        const res = s.picked.size > 1 ? await api.createGroup(Array.from(s.picked.keys()), s.titleInput.value.trim()) : await api.newConversation(Array.from(s.picked.keys()));
         closeSheetGeneric(backdrop, sheet);
         if (res && res.conversationId) {
           if (!ctx.state.convById.has(res.conversationId)) await api.listConversations().then((cs) => applyConversations(ctx, cs || []));
@@ -3653,10 +3753,14 @@
     });
     return s;
   }
-  function openNewChatSheet(ctx) {
+  function openNewChatSheet(ctx, addTo) {
     const s = ctx.newChatSheet;
+    s.addTo = addTo || null;
     s.picked = new Map();
     s.input.value = "";
+    s.titleInput.value = "";
+    s.titleInput.style.display = "none";
+    s.createBtn.textContent = addTo ? "Add to Group" : "Chat";
     s.createBtn.disabled = true;
     openSheetGeneric(s.backdrop, s.sheet);
     runFriendSearch(ctx, s);
@@ -3681,6 +3785,7 @@
         if (s.picked.has(u.id)) s.picked.delete(u.id); else s.picked.set(u.id, u);
         row.dataset.picked = s.picked.has(u.id) ? "1" : "0";
         s.createBtn.disabled = s.picked.size === 0;
+        if (!s.addTo) { s.titleInput.style.display = s.picked.size > 1 ? "" : "none"; s.createBtn.textContent = s.picked.size > 1 ? "Create Group" : "Chat"; }
       });
       s.list.appendChild(row);
     }
