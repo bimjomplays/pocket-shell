@@ -1479,7 +1479,13 @@
       groupEl.append(gutter, col);
       frag.appendChild(groupEl);
     }
+    // keep what's on screen where it is: swapping every bubble (a new message, a read receipt...) briefly changes
+    // the list's height, and the view used to jump up (device 2026-09-27: "sending a message makes me jump up")
+    const mEl = conv.messages, fromBottom = mEl.scrollHeight - mEl.scrollTop, wasBottom = conv.atBottom;
+    conv.stickUntil = nowMs() + 150; // the scroll events our own repaint causes aren't the user scrolling up
     conv.messages.replaceChildren(conv.topSpacer, frag, conv.bottomSpacer);
+    const restore = () => { conv.stickUntil = nowMs() + 150; if (wasBottom) mEl.scrollTop = mEl.scrollHeight; else mEl.scrollTop = Math.max(0, mEl.scrollHeight - fromBottom); };
+    restore();
     // photos/stickers/voice notes finish loading after this and grow the list: stay at the bottom if you were
     if (typeof ResizeObserver === "function") {
       if (!conv.ro) conv.ro = new ResizeObserver(() => {
@@ -1498,6 +1504,7 @@
       }
       conv.topSpacer.style.height = Math.round(conv.avgHeight * start) + "px";
       conv.bottomSpacer.style.height = Math.round(conv.avgHeight * (total - end)) + "px";
+      restore();
     });
   }
 
@@ -2040,7 +2047,7 @@
     // to the top for a moment; that used to count as "you scrolled up", which revealed + fetched older
     // messages and kept you up there (device 2026-09-27: "jumps me way far up"). Until you touch the list
     // yourself, the chat stays pinned to the newest message instead.
-    if (pinnedToBottom(conv)) return;
+    if (pinnedToBottom(conv) || nowMs() < (conv.stickUntil || 0)) return; // (a repaint, not the user scrolling)
     if (m.scrollTop < 240) {
       // Sliding the LOCAL window back (more already-fetched messages to reveal) and fetching MORE history
       // from the bridge (loadOlder) are two different things that both happen "near the top" - a freshly
@@ -2091,10 +2098,7 @@
       // next ordinary scroll-driven window-shift once the user keeps scrolling toward it.
       conv.windowStart = Math.max(0, conv.windowStart - OVERSCAN);
       if (conv.windowEnd - conv.windowStart > CHUNK * 4) conv.windowEnd = conv.windowStart + CHUNK * 4; // backstop
-      renderMessageList(ctx, conv, entry, {});
-      requestAnimationFrame(() => {
-        conv.messages.scrollTop += conv.messages.scrollHeight - beforeHeight;
-      });
+      renderMessageList(ctx, conv, entry, {}); // (paintWindow keeps the view where it was as the older messages appear above)
     } catch (e) { /* leave as-is; a manual pull will retry */ }
     conv._loadingOlder = false;
   }
@@ -4163,6 +4167,17 @@
     const all = ctx.state.conversations.filter((conv) => !qv || (conv.title || "").toLowerCase().includes(qv));
     // picked first, then most recent
     const rows = [...all.filter((x) => c.picked.has(x.id)), ...all.filter((x) => !c.picked.has(x.id))].slice(0, qv ? 80 : 60);
+    if (!qv) { // posting to your story: only when you pick it here
+      const sh = el("div", "gh-cam-section"); sh.textContent = "Stories"; c.list.appendChild(sh);
+      const row = el("div", "gh-friend-row gh-press gh-story-dest");
+      row.dataset.picked = c.picked.has("__story__") ? "1" : "0";
+      const av = el("div", "gh-story-dest-ic"); av.appendChild(makeAvatar(ctx.state.me || { name: "Me" }, 44)); row.appendChild(av);
+      const name = el("div", "gh-friend-name"); name.innerHTML = "My Story<span>Friends can view for 24 hours</span>";
+      const check = el("div", "gh-friend-check"); check.appendChild(icon("check", 14));
+      row.append(name, check);
+      row.addEventListener("click", () => { haptic("light"); if (c.picked.has("__story__")) c.picked.delete("__story__"); else c.picked.add("__story__"); row.dataset.picked = c.picked.has("__story__") ? "1" : "0"; paintChosen(ctx); });
+      c.list.appendChild(row);
+    }
     const head = el("div", "gh-cam-section"); head.textContent = qv ? "Results" : "Recents"; c.list.appendChild(head);
     for (const conv of rows) {
       const row = el("div", "gh-friend-row gh-press");
@@ -4184,7 +4199,7 @@
   }
   function paintChosen(ctx) {
     const c = ctx.camera;
-    const names = [...c.picked].map((id) => (ctx.state.convById.get(id) || {}).title || "").filter(Boolean);
+    const names = [...c.picked].map((id) => id === "__story__" ? "My Story" : (ctx.state.convById.get(id) || {}).title || "").filter(Boolean);
     c.chosen.textContent = names.length ? names.join(", ") : "Pick friends";
     c.sendBtn.disabled = !names.length || c.sending;
     c.picker.dataset.has = names.length ? "1" : "0";
@@ -4196,10 +4211,10 @@
     c.sending = true; c.sendBtn.dataset.sending = "1"; paintChosen(ctx);
     const cap = c.captured, ids = Array.from(c.picked);
     try {
-      await api.sendSnap(ids, cap.blob, { kind: cap.kind, width: cap.width, height: cap.height, hasAudio: cap.hasAudio });
+      await api.sendSnap(ids.filter((x) => x !== "__story__"), cap.blob, { kind: cap.kind, width: cap.width, height: cap.height, hasAudio: cap.hasAudio, myStory: ids.includes("__story__") });
       haptic("success");
       closeCamera(ctx);
-      ctx.showToast(ids.length > 1 ? `Snap sent to ${ids.length} chats` : "Snap sent");
+      ctx.showToast(ids.includes("__story__") ? (ids.length > 1 ? "Posted to your story and sent" : "Posted to your story") : ids.length > 1 ? `Snap sent to ${ids.length} chats` : "Snap sent");
     } catch (e) {
       gtrail("snap send failed " + (e && e.message || e));
       ctx.showToast("Couldn't send that Snap");

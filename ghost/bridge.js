@@ -383,6 +383,20 @@
       }));
     });
   }
+  // Posting to My Story, like Snapchat's quick-post tray (main.js "[Stories Utils]" module): destinations.stories =
+  // [toDest(myStory())] - a fixed 16-byte My Story id + {privacyOverride: UNSET} wrapped as encoded storyData.
+  let storyPostCache;
+  function storyPostHelpers() {
+    if (storyPostCache !== undefined) return storyPostCache;
+    storyPostCache = null;
+    safe("story-post", () => {
+      const toDest = exportWhere("[Stories Utils]", (v) => typeof v === "function" && String(v).includes('$case:"myStory"'));
+      const myStory = exportWhere("[Stories Utils]", (v) => typeof v === "function" && String(v).includes("privacyOverride") && String(v).includes("storyType"));
+      if (toDest && myStory) storyPostCache = { toDest, myStory };
+      else trail("story-post", "helpers not found", "error");
+    });
+    return storyPostCache;
+  }
   let sendHelperCache;
   function exportWhere(moduleNeedle, pick) {
     const factories = webpackRequire && webpackRequire.m;
@@ -1408,8 +1422,14 @@
       const capturedSnap = video
         ? { media: blob, dimensions, mediaType: "Video", hasAudio: opts && opts.hasAudio === false ? false : true, loopPlayback: false, overlayMedia: undefined }
         : { media: blob, dimensions, mediaType: "Image", hasAudio: false, loopPlayback: false };
-      const ids = (Array.isArray(conversationIds) ? conversationIds : [conversationIds]).map(convIdObj);
-      const destinations = { conversations: ids, stories: [], phoneNumbers: [], massSnaps: [] };
+      const ids = (Array.isArray(conversationIds) ? conversationIds : [conversationIds]).filter((x) => x && x !== "__story__").map(convIdObj);
+      const stories = [];
+      if (opts && opts.myStory) {
+        const h = storyPostHelpers();
+        if (!h) throw new Error("posting to your story isn't available");
+        stories.push(h.toDest(h.myStory(false)));
+      }
+      const destinations = { conversations: ids, stories, phoneNumbers: [], massSnaps: [] };
       await new Promise((resolve, reject) => {
         const t = setTimeout(() => reject(new Error("snap send timed out")), 110000);
         Promise.resolve(m.sendSnap(destinations, capturedSnap, "LandingPage",
