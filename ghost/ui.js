@@ -296,7 +296,8 @@
     const small = (x) => x && x.url && (!x.size || x.size < 4e6);
     const file = small(f.mediumgif) ? f.mediumgif : small(f.gif) ? f.gif : f.tinygif;
     const dims = (pv && pv.dims) || (file && file.dims) || [200, 200];
-    return pv && file && r.id ? { src: "tenor", id: String(r.id), w: dims[0] || 200, h: dims[1] || 200, p: pv.url, f: file.url } : null;
+    const mp4 = f.tinymp4 || f.mp4;
+    return pv && file && r.id ? { src: "tenor", id: String(r.id), w: dims[0] || 200, h: dims[1] || 200, p: pv.url, f: file.url, v: mp4 && mp4.url } : null;
   }
   async function tenorSearch(q) {
     if (typeof window.__ghostGiphyMock === "function") return window.__ghostGiphyMock("search", { q, offset: 0 });
@@ -1315,9 +1316,15 @@
     screen.querySelector('[data-act="voice-call"]').addEventListener("click", () => startCallFrom(ctx, false));
     screen.querySelector('[data-act="video-call"]').addEventListener("click", () => startCallFrom(ctx, true));
     screen.querySelector(".gh-conv-header-avatar").addEventListener("click", () => openChatSheet(ctx));
-    const touched = () => { conv.userTouched = true; };
+    const touched = () => { conv.userTouched = true; conv.lastUserScrollAt = nowMs(); };
     conv.messages.addEventListener("touchstart", touched, { passive: true });
+    conv.messages.addEventListener("touchmove", touched, { passive: true });
+    conv.messages.addEventListener("touchend", touched, { passive: true }); // momentum keeps scrolling after the finger lifts
     conv.messages.addEventListener("wheel", touched, { passive: true });
+    // the list box itself changing size (keyboard, composer growing/shrinking): stay on the newest message
+    if (typeof ResizeObserver === "function") new ResizeObserver(() => {
+      if (conv.atBottom && ctx.state.currentConvId) conv.messages.scrollTop = conv.messages.scrollHeight;
+    }).observe(conv.messages);
     // Tapping anywhere in the message list, or starting a scroll drag, dismisses the keyboard exactly like
     // Messages/Telegram - the composer textarea is the only thing that should keep focus once you touch the
     // list itself (a tap that lands on an actual control there, e.g. a reaction pill, still works as normal;
@@ -2102,6 +2109,15 @@
     const conv = ctx.conv;
     const m = conv.messages;
     const nearBottom = m.scrollHeight - m.scrollTop - m.clientHeight < 80;
+    // Only YOUR scrolling may un-stick the chat from the bottom. The keyboard opening (the list gets shorter), the
+    // composer shrinking after a send, or a bubble growing also fire scroll events; those used to count as "you
+    // scrolled up", so the next message you sent landed below the keyboard (device 2026-09-27).
+    const userScrolling = nowMs() - (conv.lastUserScrollAt || 0) < 1200;
+    if (!userScrolling && conv.atBottom) {
+      if (!nearBottom) m.scrollTop = m.scrollHeight;
+      showJump(ctx, false);
+      return;
+    }
     conv.atBottom = nearBottom;
     if (nearBottom) showJump(ctx, false);
     if (conv._scrollScheduled) return;
@@ -2527,7 +2543,6 @@
       <div class="gh-action-list">
         <div class="gh-action-item" data-act="photo"></div>
         <div class="gh-action-item" data-act="camera"></div>
-        <div class="gh-action-item" data-act="gif"></div>
       </div>
     `;
     const row = (act, tint, iconName, label) => {
@@ -2539,7 +2554,6 @@
     };
     row("photo", "blue", "gallery", "Gallery");
     row("camera", "pink", "camera", "Camera");
-    row("gif", "green", "gifBadge", "GIF");
     overlaysRoot.append(backdrop, sheet);
     // Closing WITHOUT the slide-down transition here on purpose: the destination (gif sheet / camera /
     // file picker) covers the same screen area a moment later, so animating this sheet's own close at the
@@ -2554,7 +2568,6 @@
     backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
     sheet.querySelector('[data-act="photo"]').addEventListener("click", () => closeInstant(() => ctx.conv.fileInput.click()));
     sheet.querySelector('[data-act="camera"]').addEventListener("click", () => closeInstant(() => openCamera(ctx, { to: ctx.state.currentConvId })));
-    sheet.querySelector('[data-act="gif"]').addEventListener("click", () => closeInstant(() => openGifSheet(ctx)));
     return { backdrop, sheet };
   }
   function openAttachSheet(ctx) {
@@ -4196,6 +4209,7 @@
     renderStickers(ctx, s);
   }
   async function renderStickers(ctx, s) {
+    await loadFavSets();
     for (const [name, b] of Object.entries(s.tabs)) b.dataset.on = s.tab === name ? "1" : "0";
     s.body.innerHTML = "";
     s.body.scrollTop = 0;
@@ -4235,7 +4249,9 @@
       img.src = stickerUrl(comic, p.me, duo ? p.friend : null);
       img.addEventListener("error", () => tile.remove(), { once: true }); // a few catalog stickers don't exist in 3D
       tile.appendChild(img);
-      const held = onHold(tile, () => toggleFav(ctx, "ghostBitmojiFavs", { c: comic, duo: !!duo }, (x) => x.c === comic && !!x.duo === !!duo));
+      const toggle = () => toggleFav(ctx, "ghostBitmojiFavs", { c: comic, duo: !!duo }, (x) => x.c === comic && !!x.duo === !!duo);
+      const star = favStar(tile, favSets.bitmoji.has(comic + "|" + !!duo), toggle);
+      const held = onHold(tile, () => toggle().then((on) => { star.dataset.on = on ? "1" : "0"; }));
       tile.addEventListener("click", () => { if (held()) return; sendStickerNow(ctx, s, comic, duo); });
       frag.appendChild(tile);
     }
@@ -4271,7 +4287,10 @@
   async function toggleFav(ctx, key, item, same) {
     const list = await storage.get(key, []);
     const had = list.some(same);
-    await storage.set(key, had ? list.filter((x) => !same(x)) : [Object.assign({ t: Date.now() }, item), ...list].slice(0, 150));
+    const next = had ? list.filter((x) => !same(x)) : [Object.assign({ t: Date.now() }, item), ...list].slice(0, 150);
+    await storage.set(key, next);
+    if (key === "ghostGifFavs") favSets.gif = new Set(next.map((x) => x.id));
+    if (key === "ghostBitmojiFavs") favSets.bitmoji = new Set(next.map((x) => x.c + "|" + !!x.duo));
     ctx.showToast(had ? "Removed from Favorites" : "Added to Favorites");
     return !had;
   }
@@ -4298,19 +4317,22 @@
     const p = stickerPeople(ctx);
     for (const { kind, x } of items) {
       const tile = el("button", "gh-sticker-tile gh-press");
-      const img = el("img"); img.alt = ""; tile.appendChild(img);
-      let send, hold;
+      let img = el("img"); img.alt = "";
+      if (kind !== "gif") tile.appendChild(img);
+      let send, hold, starOn = which === "favs";
       if (kind === "bitmoji") {
         if (x.duo && !p.friend) continue;
         img.loading = "lazy"; img.src = stickerUrl(x.c, p.me, x.duo ? p.friend : null);
         img.addEventListener("error", () => tile.remove(), { once: true });
+        starOn = favSets.bitmoji.has(x.c + "|" + !!x.duo);
         send = () => sendStickerNow(ctx, s, x.c, x.duo);
-        hold = () => toggleFav(ctx, "ghostBitmojiFavs", { c: x.c, duo: !!x.duo }, (y) => y.c === x.c && !!y.duo === !!x.duo).then((on) => { if (!on && which === "favs") tile.remove(); });
+        hold = () => toggleFav(ctx, "ghostBitmojiFavs", { c: x.c, duo: !!x.duo }, (y) => y.c === x.c && !!y.duo === !!x.duo).then((on) => { if (!on && which === "favs") tile.remove(); return on; });
       } else if (kind === "gif") {
         tile.classList.add("gh-sticker-gif");
-        gifPreviewFor(x).then((r) => { if (r && r.dataUrl) img.src = r.dataUrl; });
+        gifThumb(tile, x);
+        starOn = favSets.gif.has(x.id);
         send = () => sendGif(ctx, x, s);
-        hold = () => toggleFav(ctx, "ghostGifFavs", gifEntry(x), (y) => y.id === x.id).then((on) => { if (!on && which === "favs") tile.remove(); });
+        hold = () => toggleFav(ctx, "ghostGifFavs", gifEntry(x), (y) => y.id === x.id).then((on) => { if (!on && which === "favs") tile.remove(); return on; });
       } else {
         wallDB.get("favsticker:" + x.id).then((b) => { if (b) img.src = URL.createObjectURL(b); }).catch(() => {});
         send = async () => {
@@ -4322,14 +4344,64 @@
           const cur = await storage.get("ghostStickerFavs", []);
           await storage.set("ghostStickerFavs", cur.filter((y) => y.id !== x.id));
           wallDB.del("favsticker:" + x.id); tile.remove(); ctx.showToast("Removed from Favorites");
+          return false;
         };
       }
-      const held = onHold(tile, hold);
+      const star = favStar(tile, starOn, () => Promise.resolve(hold()).then((on) => on !== false && on !== undefined ? on : false));
+      const held = onHold(tile, () => Promise.resolve(hold()).then((on) => { star.dataset.on = on ? "1" : "0"; }));
       tile.addEventListener("click", () => { if (held()) return; send(); });
       s.body.appendChild(tile);
     }
   }
-  function gifEntry(g) { return g.src === "tenor" ? { src: "tenor", id: g.id, w: g.w, h: g.h, p: g.p, f: g.f } : { id: g.id, w: g.w, h: g.h }; }
+  function gifEntry(g) { return g.src === "tenor" ? { src: "tenor", id: g.id, w: g.w, h: g.h, p: g.p, f: g.f, v: g.v } : { id: g.id, w: g.w, h: g.h }; }
+  // Animated previews: animated images stay on their first frame on the phone (see the GIF bubble note), so a tile
+  // shows Tenor's still/WebP first and swaps in its small looping MP4 once it scrolls into view; off-screen = paused.
+  let gifIO = null;
+  function gifVideoIO() {
+    if (gifIO || typeof IntersectionObserver !== "function") return gifIO;
+    gifIO = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const t = e.target;
+        if (!e.isIntersecting) { if (t._video) t._video.pause(); continue; }
+        if (t._video) { t._video.play().catch(() => {}); continue; }
+        if (t._loading) continue;
+        t._loading = true;
+        gmBytes(t._gif.v).then((bytes) => {
+          const v = el("video");
+          v.muted = true; v.loop = true; v.playsInline = true; v.autoplay = true;
+          v.setAttribute("playsinline", ""); v.setAttribute("muted", "");
+          v.src = URL.createObjectURL(new Blob([bytes], { type: "video/mp4" }));
+          v.addEventListener("loadeddata", () => { t.classList.add("gh-gif-playing"); v.play().catch(() => {}); }, { once: true });
+          t._video = v;
+          t.insertBefore(v, t.firstChild);
+        }).catch(() => {});
+      }
+    }, { rootMargin: "150px" });
+    return gifIO;
+  }
+  function gifThumb(tile, g) {
+    const img = el("img"); img.alt = "";
+    gifPreviewFor(g).then((r) => { if (r && r.dataUrl) img.src = r.dataUrl; });
+    tile.appendChild(img);
+    const io = g.v && typeof window.__ghostGiphyMock !== "function" && gifVideoIO();
+    if (io) { tile._gif = g; io.observe(tile); }
+  }
+  // favorites, kept in memory while the sheet is open so every tile knows its star
+  const favSets = { gif: new Set(), bitmoji: new Set() };
+  async function loadFavSets() {
+    favSets.gif = new Set((await storage.get("ghostGifFavs", [])).map((x) => x.id));
+    favSets.bitmoji = new Set((await storage.get("ghostBitmojiFavs", [])).map((x) => x.c + "|" + !!x.duo));
+  }
+  // Discord-style: a little star in the top-left corner of every sticker/GIF adds or removes it from Favorites
+  function favStar(tile, on, toggle) {
+    const b = el("button", "gh-fav-star");
+    b.setAttribute("aria-label", "Favorite");
+    b.dataset.on = on ? "1" : "0";
+    b.appendChild(icon("star", 13));
+    b.addEventListener("click", async (e) => { e.stopPropagation(); haptic("light"); const now = await toggle(); b.dataset.on = now ? "1" : "0"; });
+    tile.appendChild(b);
+    return b;
+  }
   async function sendGif(ctx, g, s) {
     haptic();
     const r = await gifFileFor(g);
@@ -4389,6 +4461,7 @@
     for (const [name, btn] of Object.entries(s.tabs)) btn.dataset.on = (!s.query && s.tab === name) ? "1" : "0";
   }
   async function renderGifResults(ctx, s) {
+    await loadFavSets();
     paintGifTabs(s);
     const mySeq = ++s.seq;
     s.body.innerHTML = "";
@@ -4433,10 +4506,10 @@
     tile.setAttribute("role", "button");
     tile.setAttribute("aria-label", "Send GIF");
     tile.style.aspectRatio = `${g.w} / ${g.h}`;
-    const img = el("img");
-    gifPreviewFor(g).then((r) => { if (r && r.dataUrl) img.src = r.dataUrl; });
-    tile.appendChild(img);
-    const held = onHold(tile, () => toggleFav(ctx, "ghostGifFavs", gifEntry(g), (y) => y.id === g.id));
+    gifThumb(tile, g);
+    const toggle = () => toggleFav(ctx, "ghostGifFavs", gifEntry(g), (y) => y.id === g.id);
+    const star = favStar(tile, favSets.gif.has(g.id), toggle);
+    const held = onHold(tile, () => toggle().then((on) => { star.dataset.on = on ? "1" : "0"; }));
     tile.addEventListener("click", () => { if (held()) return; sendGif(ctx, g, s); });
     return tile;
   }

@@ -1837,3 +1837,16 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 @keyframes gh-wallcard { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }
 /* GIFs among stickers (Recent / Favorites) */
 .gh-sticker-gif img { object-fit: cover; border-radius: 10px; width: 100%; height: 100%; }
+/* animated GIF tiles: the looping MP4 sits over the still preview */
+.gh-gif-tile video, .gh-sticker-gif video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.gh-gif-tile img { height: 100%; object-fit: cover; }
+.gh-sticker-tile { position: relative; overflow: hidden; }
+/* Discord-style favourite star, top-left of every sticker/GIF */
+.gh-fav-star {
+  position: absolute; top: 4px; left: 4px; z-index: 2; width: 24px; height: 24px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+  background: rgba(0,0,0,0.45); color: rgba(255,255,255,0.85); transition: transform 0.15s ease, background 0.15s ease;
+}
+.gh-fav-star:active { transform: scale(0.85); }
+.gh-fav-star[data-on="1"] { background: rgba(0,0,0,0.55); color: #ffcc33; }
+.gh-fav-star[data-on="1"] svg path, .gh-fav-star[data-on="1"] svg polygon { fill: currentColor; }
