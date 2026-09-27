@@ -506,7 +506,14 @@
   }
 
   function onStoreFound() {
+    let lastLoggedIn = loggedIn();
     unsubscribeStore = safe("subscribe", () => store.subscribe(() => {
+      const now = loggedIn();
+      if (now !== lastLoggedIn) { // login finished (or logged out): tell the UI again
+        lastLoggedIn = now;
+        trail("login", "logged in: " + now);
+        post({ ghost: "event", type: "ready", data: { loggedIn: now, me: meUser() } });
+      }
       emitConversations();
       for (const id of openConversations) emitMessagesFor(id);
     }), null);
@@ -517,7 +524,10 @@
   function loggedIn() {
     const s = state();
     if (!s) return false;
-    return !!safe("loggedIn", () => (s.auth && s.auth.hasEverLoggedIn) || !!messaging().client, false);
+    // Right after the page loads, Snapchat hasn't finished logging in yet (device run 5: `ready` said logged out,
+    // the UI hid itself and never came back). Any of these means a signed-in session:
+    return !!safe("loggedIn", () => !!(s.auth && s.auth.authToken && s.auth.authToken.token)
+      || Object.keys(messaging().feed || {}).length > 0 || !!messaging().client, false);
   }
 
   // ------------------------------------------------------------------------------------------------

@@ -392,16 +392,23 @@
       host.setAttribute("data-on", "");
     }
 
+    const uiTrail = (text) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST ui " + text }).catch(() => {}); } catch (e) {} };
     async function handleReady(data) {
+      const was = state.loggedIn;
       state.loggedIn = !!(data && data.loggedIn);
-      state.me = (data && data.me) || null;
+      state.me = (data && data.me) || state.me || null;
+      if (was !== state.loggedIn) uiTrail("logged in: " + state.loggedIn + (data && data.storeFound === false ? " (store not found yet)" : ""));
       if (!state.loggedIn) { showLoggedOut(); return; }
       showLoggedIn();
-      if (!state.homeReady) await loadInitialData(ctx);
+      if (!state.homeReady) {
+        try { await loadInitialData(ctx); } catch (e) { uiTrail("first load failed: " + (e && e.message || e)); }
+      }
       boot.classList.add("gh-boot-fade");
       state.homeReady = true;
       markReady(true);
     }
+    // Until logged in, keep asking (a `ready` from the page world can be missed, and login finishes after load).
+    setInterval(() => { if (!state.loggedIn) api.status().then(handleReady).catch(() => {}); }, 1500);
 
     bridge.on("ready", handleReady);
     bridge.on("conversations", (data) => { applyConversations(ctx, (data && data.conversations) || []); });

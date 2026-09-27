@@ -177,6 +177,10 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         view.addSubview(topTapView)
         // Launch picture: the chat list as it looked when the app was last left, shown until Snapchat has drawn
         // the real one (a cold start otherwise shows an empty dark screen for a few seconds).
+        // a picture saved by an older build shows the old design (device report: Ghost's launch showed the previous
+        // look): only use it if this same build saved it
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        if UserDefaults.standard.string(forKey: "launchPictureBuild") != build { Self.clearLaunchPicture() }
         if SettingsStore.shared.bool("launchPicture"), let url = Self.launchPictureURL, let picture = UIImage(contentsOfFile: url.path) {
             launchCover.image = picture
             launchCover.contentMode = .scaleToFill
@@ -827,6 +831,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             self.webView.takeSnapshot(with: config) { image, _ in
                 guard let data = image?.pngData() else { return }
                 DispatchQueue.global(qos: .utility).async { try? data.write(to: url, options: .atomic) }
+                UserDefaults.standard.set(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "", forKey: "launchPictureBuild")
             }
         }
     }
