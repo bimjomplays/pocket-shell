@@ -1170,7 +1170,7 @@
     conv.textarea.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && pref("sendOnReturn") && !e.isComposing) { e.preventDefault(); sendCurrentText(ctx); }
     });
-    initVoiceRecorder(ctx, screen);
+    initVoiceRecorder(ctx, screen, conv); // (ctx.conv isn't set yet while the screen is being built)
     screen.querySelector('[data-act="attach"]').addEventListener("click", () => openAttachSheet(ctx));
     conv.fileInput.addEventListener("change", () => {
       const f = conv.fileInput.files && conv.fileInput.files[0];
@@ -3014,8 +3014,8 @@
   // Voice messages, like Telegram: hold the mic to record, let go to send, slide left to cancel. Recorded here
   // (the phone's own recorder, AAC) and sent as a real Snapchat voice note (bridge sendVoiceNote).
   // =====================================================================================================
-  function initVoiceRecorder(ctx, screen) {
-    const conv = ctx.conv, mic = conv.micBtn;
+  function initVoiceRecorder(ctx, screen, conv) {
+    const mic = conv.micBtn;
     const bar = el("div", "gh-rec-bar");
     bar.innerHTML = '<span class="gh-rec-dot"></span><span class="gh-rec-time">0:00</span><span class="gh-rec-hint">‹ Slide to cancel</span>';
     screen.querySelector(".gh-composer").appendChild(bar);
