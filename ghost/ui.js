@@ -203,6 +203,7 @@
     searchFriends: (q) => bridge.call("searchFriends", [q]),
     debugShape: () => bridge.call("debugShape"),
     loadMedia: (convId, msgId) => bridge.call("loadMedia", [convId, msgId]),
+    setPresence: (convId) => bridge.call("setPresence", [convId]),
   };
 
   // =====================================================================================================
@@ -488,6 +489,8 @@
 
     // exposed for the test harness / debugging only
     host.__ghost = ctx;
+    document.addEventListener("visibilitychange", () => syncPresence(ctx));
+    try { if (typeof window.dgOnSettings === "function") window.dgOnSettings(() => syncPresence(ctx)); } catch (e) {}
   }
 
   async function loadInitialData(ctx) {
@@ -497,9 +500,26 @@
         api.listStories().catch(() => []),
       ]);
       applyConversations(ctx, convs || []);
-      ctx.state.stories = stories || [];
-      renderStories(ctx);
+      setStories(ctx, stories || []);
     } catch (e) { /* home just stays empty; the "conversations" event may still arrive */ }
+    // Friends' stories reach Snapchat's store a while after login (device: 0 at first load, 7 a minute later),
+    // so keep asking; only repaint the rail when something actually changed.
+    if (!ctx.state.storiesTimer) {
+      ctx.state.storiesTimer = setInterval(() => refreshStories(ctx), 20000);
+      setTimeout(() => refreshStories(ctx), 4000);
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshStories(ctx); });
+    }
+  }
+  function refreshStories(ctx) {
+    if (document.hidden) return;
+    api.listStories().then((list) => setStories(ctx, list || [])).catch(() => {});
+  }
+  function setStories(ctx, list) {
+    const sig = list.map((st) => (st.user && st.user.id) + ":" + st.count + ":" + (st.viewed ? 1 : 0)).join("|");
+    if (sig === ctx.state.storiesSig) return;
+    ctx.state.storiesSig = sig;
+    ctx.state.stories = list;
+    renderStories(ctx);
   }
 
   // Right after launch Snapchat's list arrives before the names do (device report: "empty conversations for a
@@ -635,6 +655,11 @@
       for (const t of [tabChats, tabStories, tabSettings]) t.dataset.active = "0";
       tabStories.dataset.active = "1";
       list.scrollTo({ top: 0, behavior: "smooth" });
+      const st = ctx.state.stories || [];
+      const next = st.find((x) => !x.viewed) || st[0];
+      if (next) openStoryViewer(ctx, next);
+      else { ctx.showToast("No stories right now"); refreshStories(ctx); }
+      setTimeout(() => { if (tabStories.dataset.active === "1") { tabStories.dataset.active = "0"; tabChats.dataset.active = "1"; } }, 400);
     });
     input.addEventListener("input", () => { home.query = input.value.trim().toLowerCase(); renderHomeList(ctx); });
     // iOS search-bar behaviour: a "Cancel" button slides in beside the field while it's active (focused or
@@ -692,10 +717,21 @@
     img.width = size; img.height = size;
     img.alt = "";
     img.loading = "lazy";
-    if (user && user.avatarUrl) img.src = user.avatarUrl;
-    else img.src = placeholderAvatarUrl(user);
+    const fallback = placeholderAvatarUrl(user);
+    const pic = user && (user.avatarUrl || user.bitmojiUrl);
+    if (pic && !brokenAvatars.has(pic)) {
+      // Bitmoji head (transparent webp) on the same Telegram gradient the letter avatar would use, so it
+      // reads as part of this app rather than Snapchat's white circles. Letters if the image won't load.
+      const [c1, c2] = gradientFor(user, (user.name || user.username || "?"));
+      img.style.background = `radial-gradient(circle at 50% 30%, rgba(255,255,255,0.22), rgba(255,255,255,0) 62%), linear-gradient(160deg, ${c1}, ${c2})`;
+      if (user.bitmojiUrl && pic === user.bitmojiUrl) img.dataset.bitmoji = "1";
+      img.addEventListener("error", () => { brokenAvatars.add(pic); delete img.dataset.bitmoji; img.style.background = ""; img.src = fallback; }, { once: true });
+      img.src = pic;
+    } else img.src = fallback;
     return img;
   }
+  const brokenAvatars = new Set();
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) brokenAvatars.clear(); }); // a failure may have been a blip
   // Telegram-style gradient letter avatars: two-stop diagonal gradients, one of a small fixed palette
   // picked deterministically from the user's id/name so the same person always gets the same colors.
   const AVATAR_GRADIENTS = [
@@ -1068,11 +1104,23 @@
     }
     if (ctx.state.currentConvId !== conversationId) return; // navigated away while loading
     renderMessageList(ctx, conv, entry, { stick: true, initial: true });
+    syncPresence(ctx);
+  }
+  // "Show me in chats" (Settings, default on): friends see my Bitmoji (phone, not laptop) in the chat I have
+  // open, like the real app. Cleared when I leave the chat or Ghost goes to the background.
+  function showInChats() { try { return typeof window.dgSetting !== "function" || window.dgSetting("showInChats", true) !== false; } catch (e) { return true; } }
+  function syncPresence(ctx) {
+    const want = (showInChats() && !document.hidden && ctx.state.currentConvId) || null;
+    if (want === ctx.state.presenceConv) return;
+    ctx.state.presenceConv = want;
+    api.setPresence(want).then((r) => { if (r && r.ok === false) gtrail("presence " + r.reason); }).catch((e) => gtrail("presence failed " + (e && e.message || e)));
   }
   function closeConversationScreen(ctx) {
     const id = ctx.state.currentConvId;
     if (id) api.closeConversation(id).catch(() => {});
     ctx.state.currentConvId = null;
+    stopVoice();
+    syncPresence(ctx);
     navigateTo(ctx, "home", true);
   }
 
@@ -1356,6 +1404,9 @@
       img.loading = "lazy";
       img.src = src;
       wrap.appendChild(img);
+      // GIFs sent as photos (yours included) stay on their first frame in an <img> on the phone: the GIF player
+      // (gif-anim.js) decodes and plays multi-frame GIFs on a canvas over it; stills are left alone
+      if (/^blob:/.test(src) && window.__dgAnimateGif) img.addEventListener("load", () => window.__dgAnimateGif(img), { once: true });
     }
     if (opts.fullscreenOnTap) {
       wrap.classList.add("gh-press");
@@ -1408,56 +1459,149 @@
         .finally(() => { mediaActive--; pumpMedia(); });
     }
   }
+  // Voice notes, Telegram-style: round play button, a waveform that fills as it plays (tap/drag it to seek),
+  // elapsed/remaining time and a 1x/1.5x/2x chip. The file comes from Snapchat's own voice-note loader (bridge
+  // loadMedia); the waveform is the real one once the file is decoded, a stable per-message pattern until then.
+  let playingVoice = null; // only one voice note plays at a time
+  // waveform decoding, one file at a time, on an OfflineAudioContext: a live AudioContext would grab the
+  // phone's audio session (and could pause the user's music) just from opening a chat
+  let waveQueue = Promise.resolve();
+  function decodeForWave(src) {
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OAC) return null;
+    let waveCtx;
+    try { waveCtx = new OAC(1, 1, 44100); } catch (e) { return null; }
+    return fetch(src).then((r) => r.arrayBuffer()).then((buf) => new Promise((res) => {
+      const p = waveCtx.decodeAudioData(buf, res, () => res(null));
+      if (p && p.then) p.then(res, () => res(null));
+    })).catch(() => null);
+  }
+  const WAVE_BARS = 30;
+  // Playback state lives per MESSAGE, not per bubble: the chat list rebuilds bubbles on every new message / scroll,
+  // and a bubble-owned <audio> kept playing with no controls (and a second copy started on the rebuilt bubble).
+  const voices = new Map(); // conversationId|messageId -> { audio, src, duration, peaks, loaded, speedIdx, state, view }
+  function stopVoice() { if (playingVoice) { try { playingVoice.pause(); } catch (e) {} playingVoice = null; } }
   function audioBubbleEl(ctx, m, isMe, isLast) {
     const ref = (m.media && m.media[0]) || {};
+    const key = m.conversationId + "|" + m.id;
+    let v = voices.get(key);
+    if (!v) {
+      const speeds0 = [1, 1.5, 2];
+      v = { audio: null, src: null, duration: ref.durationSec || 0, peaks: null, loaded: null, state: "idle", view: null,
+        speedIdx: Math.max(0, speeds0.indexOf(Number((typeof window.dgSetting === "function" && window.dgSetting("voiceNoteSpeed", "1")) || 1))) };
+      voices.set(key, v);
+    }
+    const speeds = [1, 1.5, 2];
     const b = el("div", "gh-bubble gh-audio");
     if (isLast) b.dataset.tail = "1";
     const playBtn = el("button", "gh-audio-play gh-hit");
-    playBtn.appendChild(icon("play", 16));
+    playBtn.setAttribute("aria-label", "Play voice message");
+    const body = el("div", "gh-audio-body");
     const wave = el("div", "gh-audio-wave");
     const seedBase = Math.abs(hashStr(m.id));
-    for (let i = 0; i < 24; i++) {
+    const bars = [];
+    for (let i = 0; i < WAVE_BARS; i++) {
       const bar = el("span");
-      const h = 4 + (Math.abs((seedBase * (i + 1) * 2654435761) >>> 0) % 16);
-      bar.style.height = h + "px";
-      wave.appendChild(bar);
+      bar.style.height = (4 + (Math.abs((seedBase * (i + 1) * 2654435761) >>> 0) % 15)) + "px";
+      wave.appendChild(bar); bars.push(bar);
     }
+    const info = el("div", "gh-audio-info");
+    const timeEl = el("span", "gh-audio-time");
     const speedBtn = el("button", "gh-audio-speed");
-    speedBtn.textContent = "1x";
-    const speeds = [1, 1.5, 2];
-    let speedIdx = 0;
-    let playing = false;
-    // Lazy: no HTMLAudioElement is created until the user actually presses play. With a virtualized list
-    // that can render dozens of audio messages at once, eagerly constructing an Audio() per message is
-    // wasteful and (on constrained/software-rendering setups) can even destabilize the media pipeline.
-    let audio = null;
-    let loadedRef = null;
-    if (!ref.url && !ref.blob) fetchMediaFor(m).then((list) => { loadedRef = list[0] || null; });
-    function ensureAudio() {
-      if (audio) return audio;
-      const r = loadedRef || ref;
-      const src = r.url || (r.blob ? URL.createObjectURL(r.blob) : "");
-      audio = new Audio(src);
-      audio.playbackRate = speeds[speedIdx];
-      audio.addEventListener("play", () => { playing = true; playBtn.innerHTML = ""; playBtn.appendChild(icon("pause", 16)); });
-      audio.addEventListener("pause", () => { playing = false; playBtn.innerHTML = ""; playBtn.appendChild(icon("play", 16)); });
-      audio.addEventListener("ended", () => { playing = false; playBtn.innerHTML = ""; playBtn.appendChild(icon("play", 16)); });
-      return audio;
+    speedBtn.textContent = speeds[v.speedIdx] + "x";
+    info.append(timeEl, speedBtn, tickMetaEl(m, isMe, "gh-audio-meta"));
+    body.append(wave, info);
+    b.append(playBtn, body);
+
+    const setIcon = (name) => { playBtn.innerHTML = ""; if (name === "spin") playBtn.appendChild(el("div", "gh-spinner gh-audio-spin")); else playBtn.appendChild(icon(name, 18)); };
+    const paintBars = () => { if (v.peaks) { const top = Math.max(...v.peaks) || 1; v.peaks.forEach((x, i) => { bars[i].style.height = (3 + Math.round((x / top) * 17)) + "px"; }); } };
+    const paint = () => {
+      const a = v.audio;
+      timeEl.textContent = fmtDuration(a && v.state !== "idle" && a.currentTime > 0 ? a.currentTime : v.duration);
+      const p = a && v.duration ? Math.min(1, a.currentTime / v.duration) : 0;
+      const n = Math.round(p * WAVE_BARS);
+      for (let i = 0; i < WAVE_BARS; i++) bars[i].dataset.on = i < n ? "1" : "0";
+      setIcon(v.state === "loading" ? "spin" : v.state === "playing" ? "pause" : "play");
+      b.dataset.playing = v.state === "playing" ? "1" : "0";
+    };
+    v.view = { paint, paintBars, isConnected: () => b.isConnected };
+    paintBars(); paint();
+    const refresh = () => { if (v.view) { v.view.paintBars(); v.view.paint(); } };
+
+    const ensureLoaded = () => {
+      if (v.loaded) return v.loaded;
+      v.loaded = ((ref.url || ref.blob) ? Promise.resolve([ref]) : fetchMediaFor(m)).then((list) => {
+        const r = list[0];
+        const src = r && (r.url || (r.blob ? URL.createObjectURL(r.blob) : ""));
+        if (!src) throw new Error("no file");
+        if (r.durationSec) v.duration = r.durationSec;
+        v.src = src;
+        // the real waveform (peak per bar); purely cosmetic, so failures are ignored
+        waveQueue = waveQueue.then(() => decodeForWave(src)).then((ab) => {
+          if (!ab) return;
+          if (!v.duration && ab.duration) v.duration = ab.duration;
+          const data = ab.getChannelData(0), step = Math.max(1, Math.floor(data.length / WAVE_BARS));
+          v.peaks = [];
+          for (let i = 0; i < WAVE_BARS; i++) { let mx = 0; for (let j = i * step, e = Math.min(data.length, j + step); j < e; j += 8) mx = Math.max(mx, Math.abs(data[j])); v.peaks.push(mx); }
+          refresh();
+        }).catch(() => {});
+        return src;
+      });
+      v.loaded.catch(() => { v.loaded = null; });
+      return v.loaded;
+    };
+    function makeAudio(src) {
+      const a = new Audio();
+      a.preload = "auto";
+      a.src = src;
+      a.playbackRate = speeds[v.speedIdx];
+      a.addEventListener("loadedmetadata", () => { if (isFinite(a.duration) && a.duration > 0) { v.duration = a.duration; refresh(); } });
+      a.addEventListener("play", () => { v.state = "playing"; refresh(); tickLoop(); });
+      a.addEventListener("pause", () => { if (v.state !== "idle") v.state = "paused"; refresh(); });
+      a.addEventListener("ended", () => { v.state = "idle"; a.currentTime = 0; if (playingVoice === a) playingVoice = null; refresh(); });
+      a.addEventListener("error", () => { v.state = "idle"; refresh(); gtrail("voice note won't play: " + (a.error && a.error.code)); ctx.showToast("Couldn't play that voice message"); });
+      return a;
     }
-    playBtn.addEventListener("click", () => {
+    function tickLoop() {
+      if (v.state !== "playing") return;
+      if (v.view && v.view.isConnected()) v.view.paint();
+      requestAnimationFrame(tickLoop);
+    }
+    async function play() {
+      if (!v.audio) {
+        v.state = "loading"; refresh();
+        let src;
+        try { src = await ensureLoaded(); } catch (e) { v.state = "idle"; refresh(); ctx.showToast("Couldn't load that voice message"); return; }
+        if (!v.audio) v.audio = makeAudio(src);
+      }
+      if (playingVoice && playingVoice !== v.audio) playingVoice.pause();
+      playingVoice = v.audio;
+      v.audio.play().catch((e) => { v.state = "paused"; refresh(); gtrail("voice play() rejected " + (e && e.name)); });
+    }
+    playBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
       haptic("light");
-      const a = ensureAudio();
-      if (playing) a.pause(); else a.play().catch(() => {});
+      if (v.state === "loading") return;
+      if (v.state === "playing") v.audio.pause(); else play();
     });
-    speedBtn.addEventListener("click", () => {
+    const seekTo = (clientX) => {
+      if (!v.audio || !v.duration) return;
+      const r = wave.getBoundingClientRect();
+      v.audio.currentTime = clamp((clientX - r.left) / r.width, 0, 1) * v.duration;
+      paint();
+    };
+    wave.addEventListener("click", (e) => { e.stopPropagation(); if (!v.audio) { play(); return; } seekTo(e.clientX); });
+    wave.addEventListener("touchmove", (e) => { if (v.audio && e.touches[0]) { e.stopPropagation(); seekTo(e.touches[0].clientX); } }, { passive: true });
+    speedBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
       haptic("light");
-      speedIdx = (speedIdx + 1) % speeds.length;
-      if (audio) audio.playbackRate = speeds[speedIdx];
-      speedBtn.textContent = speeds[speedIdx] + "x";
+      v.speedIdx = (v.speedIdx + 1) % speeds.length;
+      if (v.audio) v.audio.playbackRate = speeds[v.speedIdx];
+      speedBtn.textContent = speeds[v.speedIdx] + "x";
     });
-    b.append(playBtn, wave, speedBtn);
-    if (ref.durationSec) { const d = el("span", "gh-audio-speed"); d.style.background = "transparent"; d.textContent = fmtDuration(ref.durationSec); b.appendChild(d); }
-    b.appendChild(tickMetaEl(m, isMe, "gh-audio-meta"));
+    // fetch (not play) the file as soon as the bubble exists, so pressing play is instant and the time is right
+    if (!ref.url && !ref.blob) ensureLoaded().then(() => refresh(), () => {});
+    if (v.state === "playing") tickLoop();
     return b;
   }
 
@@ -2078,9 +2222,23 @@
     paintViewerItem(ctx);
   }
   function openStoryViewer(ctx, story) {
+    // Open at once with a spinner: resolving + decrypting a whole story can take a couple of seconds, and
+    // before this a tap looked like it did nothing.
+    const v = ctx.viewer;
+    const token = (v.loadToken = (v.loadToken || 0) + 1);
+    clearTimeout(v.timer);
+    v.single = true; v.items = [];
+    v.el.dataset.open = "1"; v.bars.innerHTML = ""; v.avatarSlot.style.display = "flex";
+    v.nameEl.textContent = (story.user && story.user.name) || "";
+    v.media.innerHTML = "";
+    v.media.appendChild(el("div", "gh-spinner gh-viewer-spinner"));
     api.openStory(story.user.id).then((res) => {
-      openViewerSequence(ctx, (res && res.items) || [], { title: story.user.name });
-    }).catch(() => ctx.showToast("Couldn't open that story"));
+      if (v.loadToken !== token || v.el.dataset.open !== "1") return; // closed / another story while loading
+      const items = (res && res.items) || [];
+      if (!items.length) { closeViewer(ctx); ctx.showToast("That story isn't available right now"); return; }
+      story.viewed = true;
+      openViewerSequence(ctx, items, { title: story.user.name });
+    }).catch((e) => { gtrail("story open failed " + (e && e.message || e)); closeViewer(ctx); ctx.showToast("Couldn't open that story"); });
   }
   function paintViewerItem(ctx) {
     const v = ctx.viewer;
@@ -2094,6 +2252,10 @@
       video.addEventListener("ended", () => viewerStep(ctx, 1));
       v.media.appendChild(video);
       startViewerTimer(ctx, (ref.durationSec || 6) * 1000);
+      // the bridge doesn't know a story video's length; once the file does, time the progress bar to it
+      if (!ref.durationSec) video.addEventListener("loadedmetadata", () => {
+        if (isFinite(video.duration) && video.duration > 0 && v.media.contains(video)) startViewerTimer(ctx, video.duration * 1000 + 300);
+      }, { once: true });
     } else {
       const img = el("img");
       img.src = ref.url || (ref.blob && URL.createObjectURL(ref.blob)) || "";
@@ -2142,6 +2304,7 @@
   }
   function closeViewer(ctx) {
     const v = ctx.viewer;
+    v.loadToken = (v.loadToken || 0) + 1;
     clearTimeout(v.timer);
     v.el.dataset.open = "0";
     v.el.style.transform = ""; v.el.style.opacity = "";
@@ -2384,6 +2547,8 @@
           const id = ctx.state.currentConvId;
           if (id) api.closeConversation(id).catch(() => {});
           ctx.state.currentConvId = null;
+          stopVoice();
+          syncPresence(ctx);
         } else {
           setProgress(1, true); // spring back to the conversation, still open
         }

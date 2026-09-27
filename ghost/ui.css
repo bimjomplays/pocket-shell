@@ -832,25 +832,32 @@ input, textarea {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-width: 190px;
-  padding: 4px 4px 4px 2px;
+  width: 250px; max-width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px 6px 6px;
 }
 .gh-audio-play {
-  width: 34px; height: 34px; border-radius: 50%;
-  background: rgba(255,255,255,0.18);
+  width: 42px; height: 42px; border-radius: 50%;
+  background: #fff; color: var(--gh-bubble-out-2);
   display: flex; align-items: center; justify-content: center; flex: none;
   transition: transform 0.15s var(--gh-spring);
 }
+.gh-audio-play svg { width: 20px; height: 20px; }
+.gh-group[data-me="0"] .gh-audio-play { background: var(--gh-accent); color: #fff; }
 .gh-audio-play:active, .gh-audio-speed:active { transform: scale(0.9); opacity: 0.75; }
-.gh-group[data-me="0"] .gh-audio-play { background: var(--gh-bg-panel-2); color: var(--gh-accent); }
-.gh-audio-wave { flex: 1; height: 22px; display: flex; align-items: center; gap: 2px; }
-.gh-audio-wave span { width: 2.5px; border-radius: 2px; background: currentColor; opacity: 0.55; }
+.gh-audio-spin { width: 20px; height: 20px; border-width: 2px; border-color: rgba(0,0,0,0.15); border-top-color: currentColor; }
+.gh-audio-body { flex: 1; min-width: 110px; display: flex; flex-direction: column; gap: 4px; }
+.gh-audio-wave { height: 22px; display: flex; align-items: center; gap: 2px; touch-action: none; }
+.gh-audio-wave span { flex: 1; max-width: 3px; min-height: 3px; border-radius: 2px; background: currentColor; opacity: 0.4; transition: opacity 0.12s linear, height 0.3s ease; }
+.gh-audio-wave span[data-on="1"] { opacity: 1; }
+.gh-group[data-me="0"] .gh-audio-wave span[data-on="1"] { background: var(--gh-accent); }
+.gh-audio-info { white-space: nowrap; display: flex; align-items: center; gap: 6px; font-size: 12px; opacity: 0.8; font-variant-numeric: tabular-nums; }
 .gh-audio-speed {
-  flex: none; font-size: 11px; font-weight: 700; padding: 3px 7px; border-radius: 8px;
-  background: rgba(255,255,255,0.18);
+  flex: none; font-size: 10.5px; font-weight: 700; padding: 1px 6px; border-radius: 7px; min-width: 0; min-height: 0; line-height: 16px;
+  background: rgba(255,255,255,0.2);
 }
 .gh-group[data-me="0"] .gh-audio-speed { background: var(--gh-bg-panel-2); }
-.gh-audio-meta { float: none; margin: 0 0 0 2px; } /* .gh-audio is a flex row, so the float trick doesn't apply here */
+.gh-audio-meta { float: none; margin: 0 0 0 auto; }
 
 .gh-gif-bubble { background: none; padding: 0; }
 .gh-gif-bubble .gh-media { max-width: 230px; }
@@ -1285,3 +1292,10 @@ input, textarea {
 .gh-bubble[data-tail="1"]::before { display: none !important; }
 .gh-group[data-me="0"] .gh-bubble[data-tail="1"] { border-bottom-left-radius: 6px; }
 .gh-group[data-me="1"] .gh-bubble[data-tail="1"] { border-bottom-right-radius: 6px; border-bottom-left-radius: var(--gh-radius-md); }
+
+/* sent GIFs: gif-anim.js paints the frames onto a canvas laid over the (static) <img> */
+.dg-anim { position: absolute; pointer-events: none; z-index: 0; }
+.gh-media-meta { z-index: 1; }
+.gh-viewer-spinner { position: absolute; left: 50%; top: 50%; margin: -13px 0 0 -13px; border-color: rgba(255, 255, 255, 0.2); border-top-color: #fff; }
+/* Bitmoji avatars: the render is a head-and-shoulders bust; nudge it up a little so the face sits centred */
+.gh-avatar[data-bitmoji] { object-fit: cover; object-position: 50% 12%; box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12); }

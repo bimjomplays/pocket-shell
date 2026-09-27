@@ -60,7 +60,8 @@ final class SettingsStore {
         var defaults: [String: Any] = [:]
         for rawSection in rawSections {
             let rawRows = rawSection["rows"] as? [[String: Any]] ?? []
-            let rows = rawRows.map { SettingsRow(raw: $0) }
+            // "ghostOnly" rows (e.g. showInChats) only mean something in Ghost's own UI
+            let rows = rawRows.filter { ($0["ghostOnly"] as? Bool) != true || WebViewController.ghostMode }.map { SettingsRow(raw: $0) }
             for row in rows {
                 if let key = row.key, let def = row.defaultValue { defaults[key] = def }
             }

@@ -164,6 +164,8 @@
     } catch {}
   }
 
+  window.__dgAnimateGif = check; // Ghost calls this for GIF photos in its own (shadow DOM) chat
+  if (window.__ghostNoGifScan) return; // Ghost: Snapchat's page is hidden, don't decode its images
   const scan = () => {
     for (const img of document.querySelectorAll("img[src^='blob:']")) {
       if (img.closest(".dg-gif-panel") || img.classList.contains("dg-gif")) continue;

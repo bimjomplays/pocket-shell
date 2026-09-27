@@ -171,6 +171,13 @@
       "title": "Chats",
       "rows": [
         {
+          "key": "showInChats",
+          "type": "toggle",
+          "title": "Show me in chats (as phone, not laptop)",
+          "default": true,
+          "ghostOnly": true
+        },
+        {
           "key": "quickRepliesShow",
           "type": "toggle",
           "title": "Quick replies row",

@@ -78,7 +78,9 @@ if (ghost / 'bridge.js').exists():
     (app / 'ghost-bridge.js').write_text((ghost / 'bridge.js').read_text())
 if (ghost / 'ui.js').exists():
     css = (ghost / 'ui.css').read_text() if (ghost / 'ui.css').exists() else ''
-    (app / 'ghost-ui.js').write_text('const GHOST_CSS = ' + json.dumps(css) + ';\n' + (ghost / 'ui.js').read_text())
+    # the GIF player from the Snapchat-look app, without its page scanner: animates GIFs sent as photos
+    gifanim = 'window.__ghostNoGifScan = true;\n' + read('gif-anim.js') + '\n'
+    (app / 'ghost-ui.js').write_text(gifanim + 'const GHOST_CSS = ' + json.dumps(css) + ';\n' + (ghost / 'ui.js').read_text())
 
 with zipfile.ZipFile(root / 'Dark-Mobile-Safari.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
     for path in sorted(out.glob('*.user.js')):

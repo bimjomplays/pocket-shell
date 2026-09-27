@@ -213,13 +213,15 @@
   // few field-name variants actually seen while reading the bundle (see BRIDGE_NOTES.md), never a throw.
   // ------------------------------------------------------------------------------------------------
 
-  // Verified bitmoji URL builder (main.js, search "images.bitmoji.com/3d/avatar"): given the two ids every
-  // friend/user-shaped object in this bundle carries (either as bitmojiAvatarId/bitmojiSelfieId on
-  // `publisherData`-style objects, or as the shorter avatarId/selfieId on friendship-proto objects), the
-  // public, no-auth-needed render URL is `https://images.bitmoji.com/3d/avatar/{avatarId}-{selfieId}-v1.webp`.
-  function bitmojiUrl(avatarId, selfieId) {
-    if (!avatarId || !selfieId) return undefined;
-    return `https://images.bitmoji.com/3d/avatar/${avatarId}-${selfieId}-v1.webp?transparent=1`;
+  // Bitmoji head render, exactly as Snapchat Web builds it for chat avatars (main.js, search
+  // "images.bitmoji.com/3d/avatar/${t}-${e}"): `/3d/avatar/{sceneId}-{avatarId}-v1.webp?ua=2`, called with
+  // (user.bitmoji_avatar_id, user.bitmoji_scene_id || "859643639"); a "-wc" suffix on the scene id is dropped.
+  // (An earlier version put avatarId first with the selfie id, which 404s - no Bitmoji ever showed.)
+  function bitmojiUrl(avatarId, sceneId) {
+    if (!avatarId) return undefined;
+    let scene = sceneId || "859643639";
+    if (scene.endsWith("-wc")) scene = scene.slice(0, -3);
+    return `https://images.bitmoji.com/3d/avatar/${scene}-${avatarId}-v1.webp?ua=2`;
   }
 
   function firstString(...vals) {
@@ -238,14 +240,14 @@
     const username = firstString(raw.userName, raw.username, raw.mutable_username);
     // userDisplayName: state.friendStories.stories[key].userMetadata's own name field (device sample 2026-09-27).
     const name = firstString(raw.displayName, raw.userDisplayName, username, raw.name) || username || id;
-    const avatarId = firstString(raw.bitmojiAvatarId, raw.avatarId);
-    const selfieId = firstString(raw.bitmojiSelfieId, raw.selfieId);
+    const avatarId = firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId, raw.avatarId);
+    const sceneId = firstString(raw.bitmoji_scene_id, raw.bitmojiSceneId, raw.sceneId);
     return {
       id,
       name,
       username,
       avatarUrl: undefined, // no separate non-bitmoji avatar CDN found while reading the bundle
-      bitmojiUrl: bitmojiUrl(avatarId, selfieId),
+      bitmojiUrl: bitmojiUrl(avatarId, sceneId),
       color: undefined,
     };
   }
@@ -458,6 +460,14 @@
         if (p.length >= 3) media = [{ type: "image", url: "https://cf-st.sc-cdn.net/3d/render/" + [p[0], p[2], p[3]].filter(Boolean).join("-") + "-v1.webp?scale=1&ua=2" }];
       } else if (st && st.$case === "emoji") { kind = "text"; text = st.emoji; }
     }
+    if (kase === "note") {
+      // content.note.note = {$case: "audio", audio: {note: {mediaDurationMs, ...}}} (main.js voice-note encoder,
+      // search '$case:"note",note:{note:{$case:"audio"'); "video" = video notes, which Snapchat Web can't play either
+      const nn = c.note && c.note.note;
+      const meta = nn && nn.$case === "audio" && nn.audio && nn.audio.note;
+      if (meta) media = [{ type: "audio", durationSec: toNum(meta.mediaDurationMs) / 1000 || undefined }];
+      else if (nn && nn.$case === "video") kind = "unknown";
+    }
     if (kase === "text") text = c.text && c.text.text;
     else if (kase === "snapReply") text = c.snapReply && (c.snapReply.text || (c.snapReply.content && c.snapReply.content.text));
     else if (kase === "storyReply") text = c.storyReply && c.storyReply.text;
@@ -550,7 +560,7 @@
     if (viaSnap && typeof viaSnap === "object") {
       const name = firstString(viaSnap.display_name, viaSnap.displayName, viaSnap.display, viaSnap.mutable_username, viaSnap.username);
       if (name) return { id, name, username: firstString(viaSnap.mutable_username, viaSnap.username), avatarUrl: undefined,
-        bitmojiUrl: bitmojiUrl(firstString(viaSnap.bitmoji_avatar_id, viaSnap.bitmojiAvatarId), firstString(viaSnap.bitmoji_selfie_id, viaSnap.bitmojiSelfieId)) };
+        bitmojiUrl: bitmojiUrl(firstString(viaSnap.bitmoji_avatar_id, viaSnap.bitmojiAvatarId), firstString(viaSnap.bitmoji_scene_id, viaSnap.bitmojiSceneId)) };
     }
     const s = state();
     const map = s && s.user && s.user.publicUsers;
@@ -571,7 +581,7 @@
       name: name || id,
       username: firstString(raw.mutable_username, raw.username),
       avatarUrl: undefined,
-      bitmojiUrl: bitmojiUrl(firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId), firstString(raw.bitmoji_selfie_id, raw.bitmojiSelfieId)),
+      bitmojiUrl: bitmojiUrl(firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId), firstString(raw.bitmoji_scene_id, raw.bitmojiSceneId)),
     };
   }
   // Every id in Snapchat's state is an object { id: Uint8Array(16), str: "<uuid>" } (device sample 2026-09-26);
@@ -802,15 +812,29 @@
       if (!val || typeof val !== "object") continue;
       const cid = idOf(key) || idOf(val.conversationId);
       if (!cid || !openConversations.has(cid)) continue;
-      const candidates = [val.typingUserIds, val.typing, val.typingParticipants, val.usersTyping, val.typingUsers];
-      let typingIds = null;
-      for (const c of candidates) if (Array.isArray(c)) { typingIds = c.map(idOf).filter(Boolean); break; }
-      if (!typingIds) continue;
+      // main.js (favicon typing hook): `find(info.typingParticipants, p => p.typingState === "typing")?.userId`
+      const tp = val.typingParticipants;
+      if (!tp || typeof tp !== "object") continue;
+      const parts = Array.isArray(tp) ? tp : typeof tp.values === "function" ? [...tp.values()] : Object.values(tp);
+      const typingIds = parts.filter((p) => p && p.typingState === "typing").map((p) => idOf(p.userId)).filter(Boolean);
       const sig = cid + ":" + typingIds.slice().sort().join(",");
       if (lastTypingRef.get(cid) === sig) continue;
       lastTypingRef.set(cid, sig);
       post({ ghost: "event", type: "typing", data: { conversationId: cid, userIds: typingIds } });
     }
+  }
+
+  // "Show me in chats": Snapchat's own chat pane does, on mount (main.js, search "createPresenceSession:n}"):
+  //   const dispose = presence.createPresenceSession(conversationIdObj);  (returns the cleanup)
+  //   presence.presenceSession.onUserAction({type: document visible ? "chatVisible" : "chatHidden"})
+  // Ghost never mounts that pane, so nobody saw us in a chat. We do the same calls for the ONE chat open in Ghost.
+  // presence.js (hooks) already makes the presence service report the phone, not the laptop.
+  let presenceConv = null, presenceCleanup = null;
+  function endPresence() {
+    const s = safe("presence-get", () => state().presence.presenceSession, null);
+    if (s && presenceConv && idOf(s.conversationId) === presenceConv) safe("presence-hide", () => s.onUserAction({ type: "chatHidden" }));
+    if (typeof presenceCleanup === "function") safe("presence-dispose", () => presenceCleanup());
+    presenceConv = null; presenceCleanup = null;
   }
 
   function meUser() {
@@ -1150,6 +1174,27 @@
     // event never populate `media` for these kinds themselves (loading every photo/video/voice-note in a long
     // chat eagerly would be slow and would fetch+decrypt media nobody scrolled to) - `text`/reactions/etc. are
     // still delivered eagerly as before.
+    // setPresence(conversationId) = I'm looking at this chat; setPresence(null) = I left it / the app is hidden.
+    async setPresence(conversationId) {
+      requireStore();
+      const p = (state() || {}).presence;
+      if (!p || typeof p.createPresenceSession !== "function") return { ok: false, reason: "no presence slice" };
+      if (presenceConv && presenceConv !== conversationId) endPresence();
+      if (!conversationId) return { ok: true };
+      if (presenceConv !== conversationId) {
+        presenceConv = conversationId;
+        presenceCleanup = p.createPresenceSession(convIdObj(conversationId));
+      }
+      for (let i = 0; i < 40; i++) { // the session is created asynchronously (a server round trip)
+        if (presenceConv !== conversationId) return { ok: false, reason: "superseded" };
+        const s = state().presence.presenceSession;
+        if (s && idOf(s.conversationId) === conversationId) { s.onUserAction({ type: "chatVisible" }); return { ok: true }; }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      trail("presence", "no session after 10s for " + conversationId, "error");
+      return { ok: false, reason: "session timeout" };
+    },
+
     async loadMedia(conversationId, messageId) {
       requireStore();
       const entry = conversationEntry(conversationId);
@@ -1170,12 +1215,20 @@
         return { media };
       }
       if (kase === "note" || kase === "voiceNote") {
-        const audioMeta = c.note && c.note.$case === "audio" && c.note.audio && c.note.audio.note;
+        // Same as Snapchat's own voice-note player (main.js, search 'Invalid audio note - no media metadata'):
+        // {mediaMetadata: O5(content.note.note.audio.note), mediaReference: gw(remoteMediaReferences)}, then the
+        // resolver with context "voice_note". (Before 2026-09-27 this read c.note.$case - one level too shallow -
+        // so every voice note came back empty and the play button did nothing.)
+        const nn = c.note && c.note.note;
+        const audioMeta = nn && nn.$case === "audio" && nn.audio && nn.audio.note;
         const rmr = mc.remoteMediaReferences && mc.remoteMediaReferences[0];
         const ref = rmr && mediaReferenceFromRaw(rmr.mediaReferences && rmr.mediaReferences[0]);
-        if (!audioMeta || !ref) return { media: [] };
-        const info = { mediaMetadata: { encryptionInfo: audioMeta.encryptionInfo, dimensions: audioMeta.dimensions, hasSound: audioMeta.hasSound, zipped: !!audioMeta.zipped }, mediaReference: ref };
-        return { media: await resolveMediaInfos([info], "audio", "ghost_voice_note") };
+        if (!audioMeta || !ref) { trail("voice-note", "no " + (!audioMeta ? "metadata" : "media reference") + " (" + (nn && nn.$case) + ")", "error"); return { media: [] }; }
+        const info = { mediaMetadata: { encryptionInfo: audioMeta.encryptionInfo, dimensions: audioMeta.dimensions, hasSound: true, zipped: !!audioMeta.zipped }, mediaReference: ref };
+        const media = await resolveMediaInfos([info], "audio", "voice_note");
+        const dur = toNum(audioMeta.mediaDurationMs) / 1000;
+        for (const m of media) if (dur) m.durationSec = dur;
+        return { media };
       }
       return { media: [] };
     },
