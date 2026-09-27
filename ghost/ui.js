@@ -91,7 +91,7 @@
     const wrap = document.createElement("span");
     wrap.className = "gh-svg-wrap";
     const s = size || 20;
-    wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ""}</svg>`;
+    wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
     const svg = wrap.firstChild;
     if (extraClass) svg.setAttribute("class", extraClass);
     return svg;
@@ -202,6 +202,7 @@
     newConversation: (userIds) => bridge.call("newConversation", [userIds]),
     searchFriends: (q) => bridge.call("searchFriends", [q]),
     debugShape: () => bridge.call("debugShape"),
+    loadMedia: (convId, msgId) => bridge.call("loadMedia", [convId, msgId]),
   };
 
   // =====================================================================================================
@@ -326,7 +327,22 @@
     applyZoom(host);
     applyAccent(host);
     applyReduceMotion(host);
-    window.addEventListener("resize", () => applyZoom(host));
+    // KEYBOARD: App.swift resizes the WKWebView's own frame to end right above the keyboard (see its
+    // keyboardChanged() note) rather than us reading any keyboard height ourselves - so from here, a
+    // keyboard opening/closing is just a `resize` event like any other. The composer already rises for
+    // free (it's a normal flex child of a screen that's now shorter); the one thing that does NOT happen
+    // for free is the message list's scroll position - its scrollTop is an absolute pixel count, so when
+    // clientHeight shrinks the same scrollTop now sits further from the new bottom, i.e. the chat visibly
+    // "scrolls up" out from under the keyboard. Re-pin it instantly (no animation) whenever the user was
+    // already at the bottom, exactly like the composer/list are pinned to the keyboard in Messages/Telegram.
+    window.addEventListener("resize", () => {
+      applyZoom(host);
+      const c = host.__ghost;
+      const conv = c && c.conv;
+      if (conv && conv.atBottom && c.state.navProgress > 0.5) {
+        conv.messages.scrollTop = conv.messages.scrollHeight;
+      }
+    });
     if (typeof window.dgOnSettings === "function") window.dgOnSettings(() => { applyAccent(host); applyReduceMotion(host); });
   }
 
@@ -559,7 +575,7 @@
       <div class="gh-home-body">
         <div class="gh-ptr"><div class="gh-spinner"></div></div>
         <div class="gh-list gh-scroll">
-          <div class="gh-search-sticky"><div class="gh-search"></div></div>
+          <div class="gh-search-sticky"><div class="gh-search"></div><button class="gh-search-cancel"></button></div>
           <div class="gh-stories"></div>
         </div>
       </div>
@@ -569,7 +585,9 @@
         <button class="gh-tab-btn gh-hit" data-tab="settings"></button>
       </div>
     `;
-    screen.querySelector('[data-act="new"].gh-icon-btn').appendChild(icon("compose"));
+    const newBtn = screen.querySelector('[data-act="new"].gh-icon-btn');
+    newBtn.appendChild(icon("compose"));
+    newBtn.setAttribute("aria-label", "New message");
     const tabChats = screen.querySelector('[data-tab="chats"]');
     tabChats.append(icon("chatsTab", 25), Object.assign(document.createElement("span"), { textContent: "Chats" }));
     const tabStories = screen.querySelector('[data-tab="stories"]');
@@ -584,7 +602,12 @@
     input.autocapitalize = "off";
     input.autocomplete = "off";
     input.spellcheck = false;
+    input.setAttribute("aria-label", "Search chats");
     search.appendChild(input);
+    const searchSticky = screen.querySelector(".gh-search-sticky");
+    const cancelBtn = screen.querySelector(".gh-search-cancel");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.setAttribute("aria-label", "Cancel search");
 
     const list = screen.querySelector(".gh-list");
     const storiesEl = screen.querySelector(".gh-stories");
@@ -614,6 +637,18 @@
       list.scrollTo({ top: 0, behavior: "smooth" });
     });
     input.addEventListener("input", () => { home.query = input.value.trim().toLowerCase(); renderHomeList(ctx); });
+    // iOS search-bar behaviour: a "Cancel" button slides in beside the field while it's active (focused or
+    // holds text) and slides back out once it's empty and unfocused again.
+    input.addEventListener("focus", () => { searchSticky.dataset.active = "1"; });
+    input.addEventListener("blur", () => { if (!input.value) searchSticky.dataset.active = "0"; });
+    cancelBtn.addEventListener("click", () => {
+      haptic("light");
+      input.value = "";
+      home.query = "";
+      renderHomeList(ctx);
+      input.blur();
+      searchSticky.dataset.active = "0";
+    });
 
     const home = { screen, list, storiesEl, input, ptr, rows: new Map(), query: "" };
     let scrollScheduled = false;
@@ -635,13 +670,15 @@
     const wrap = home.storiesEl;
     wrap.innerHTML = "";
     for (const s of ctx.state.stories) {
-      const item = el("div", "gh-story");
+      const item = el("div", "gh-story gh-press");
       item.dataset.unviewed = s.viewed ? "0" : "1";
+      item.setAttribute("role", "button");
       const ring = el("div", "gh-story-ring");
       const av = makeAvatar(s.user, 58);
       ring.appendChild(av);
       const name = el("span", "gh-story-name");
       name.textContent = s.user && s.user.name ? s.user.name.split(" ")[0] : "?";
+      item.setAttribute("aria-label", (s.user && s.user.name ? s.user.name + "'s story" : "Story"));
       item.append(ring, name);
       item.addEventListener("click", () => { haptic(); openStoryViewer(ctx, s); });
       wrap.appendChild(item);
@@ -876,7 +913,7 @@
       <div class="gh-composer">
         <button class="gh-composer-btn gh-hit" data-act="attach"></button>
         <div class="gh-composer-field">
-          <textarea class="gh-composer-textarea" rows="1" placeholder="Message"></textarea>
+          <textarea class="gh-composer-textarea" rows="1" placeholder="Message" aria-label="Message"></textarea>
           <button class="gh-composer-emoji-btn gh-hit" data-act="emoji"></button>
         </div>
         <div class="gh-composer-send-wrap">
@@ -886,12 +923,18 @@
       </div>
       <input type="file" accept="image/*,video/*" class="gh-file-input" style="display:none;">
     `;
-    screen.querySelector('[data-act="back"]').appendChild(icon("back"));
+    screen.querySelector('[data-act="back"]').append(icon("back"));
+    screen.querySelector('[data-act="back"]').setAttribute("aria-label", "Back");
     screen.querySelector('[data-act="attach"]').appendChild(icon("attach"));
+    screen.querySelector('[data-act="attach"]').setAttribute("aria-label", "Attach media");
     screen.querySelector('[data-act="emoji"]').appendChild(icon("emoji"));
+    screen.querySelector('[data-act="emoji"]').setAttribute("aria-label", "Emoji");
     screen.querySelector('[data-act="mic"]').appendChild(icon("mic"));
+    screen.querySelector('[data-act="mic"]').setAttribute("aria-label", "Record voice message");
     screen.querySelector('[data-act="send"]').appendChild(icon("send", 18));
+    screen.querySelector('[data-act="send"]').setAttribute("aria-label", "Send");
     screen.querySelector(".gh-reply-bar-close").appendChild(icon("close", 16));
+    screen.querySelector(".gh-reply-bar-close").setAttribute("aria-label", "Cancel reply");
     screen.querySelector(".gh-jump").append(icon("chevronDown", 16), Object.assign(document.createElement("span"), { textContent: "New messages" }));
 
     const conv = {
@@ -916,6 +959,9 @@
       avgHeight: 64,
       replyTo: null,
       atBottom: true,
+      unreadBoundaryIndex: null, // index in _all where the "Unread Messages" divider goes, set once per open
+      unreadBoundaryComputed: false,
+      pendingUnreadForDivider: 0,
     };
 
     screen.querySelector('[data-act="back"]').addEventListener("click", () => closeConversationScreen(ctx));
@@ -934,9 +980,19 @@
       conv.fileInput.value = "";
       if (f) sendMediaFile(ctx, f);
     });
-    screen.querySelector(".gh-reply-bar-close").addEventListener("click", () => setReplyTo(ctx, null));
+    screen.querySelector(".gh-reply-bar-close").addEventListener("click", () => { haptic("light"); setReplyTo(ctx, null); });
     conv.jump.addEventListener("click", () => scrollConvToBottom(ctx, true));
     conv.messages.addEventListener("scroll", () => onConvScroll(ctx), { passive: true });
+    // Tapping anywhere in the message list, or starting a scroll drag, dismisses the keyboard exactly like
+    // Messages/Telegram - the composer textarea is the only thing that should keep focus once you touch the
+    // list itself (a tap that lands on an actual control there, e.g. a reaction pill, still works as normal;
+    // blurring first just closes the keyboard, it never prevents the tap's own handler from also running).
+    conv.messages.addEventListener("touchstart", () => {
+      // NOT document.activeElement: focus inside an open shadow root is retargeted there, so the top-level
+      // document only ever reports the <ghost-app> host as "active" - the real focused control is
+      // ctx.shadow.activeElement (a footgun worth a comment, since it silently no-ops otherwise).
+      if (ctx.shadow.activeElement === conv.textarea) conv.textarea.blur();
+    }, { passive: true });
 
     initMessageGestures(ctx, conv);
     return conv;
@@ -950,9 +1006,19 @@
       conv.subEl.innerHTML = "";
       conv.subEl.append(document.createTextNode("typing"), (() => { const d = el("span", "gh-row-dots"); d.innerHTML = "<span></span><span></span><span></span>"; return d; })());
       conv.subEl.dataset.typing = "1";
+      conv.subEl.style.display = "";
     } else {
       conv.subEl.dataset.typing = "0";
-      conv.subEl.textContent = convData.isGroup ? `${(convData.participants || []).length} members` : "last seen recently";
+      // The bridge has no presence/"last seen" data (API.md) — showing one would be fabricated, so a 1:1
+      // chat's subtitle is simply omitted (matches Telegram's own behaviour when it has nothing to say).
+      // A group's member count IS real data (conv.participants, already part of the contract).
+      if (convData.isGroup) {
+        conv.subEl.textContent = `${(convData.participants || []).length} members`;
+        conv.subEl.style.display = "";
+      } else {
+        conv.subEl.textContent = "";
+        conv.subEl.style.display = "none";
+      }
     }
     const av = convData.isGroup ? { name: convData.title, avatarUrl: convData.avatarUrl } : (convData.participants && convData.participants[0]) || { name: convData.title };
     conv.avatarSlot.innerHTML = "";
@@ -982,6 +1048,12 @@
     conv.sendBtn.dataset.show = "0";
     conv.micBtn.dataset.hide = "0";
     setReplyTo(ctx, null);
+    // Capture the unread count BEFORE openConversation() marks the chat read below, so the "Unread Messages"
+    // divider can be placed against the real number the bridge reported — never fabricated, never re-derived
+    // after the fact (once marked read, unreadCount is gone). Reset every time a chat is (re)opened.
+    conv.unreadBoundaryIndex = null;
+    conv.unreadBoundaryComputed = false;
+    conv.pendingUnreadForDivider = (convData && convData.unreadCount) || 0;
     let entry = ctx.state.messagesByConv.get(conversationId);
     if (!entry) {
       conv.messages.classList.add("gh-loading-skel");
@@ -1023,6 +1095,11 @@
     }
     conv.windowStart = start;
     conv.windowEnd = end;
+    if (opts.initial && !conv.unreadBoundaryComputed) {
+      conv.unreadBoundaryComputed = true;
+      const n = conv.pendingUnreadForDivider || 0;
+      conv.unreadBoundaryIndex = (n > 0 && total > 0) ? Math.max(0, total - n) : null;
+    }
     paintWindow(ctx, conv);
     // pop-in animation for a genuinely new message (never for a virtualized-scroll window shift, which
     // calls paintWindow directly instead of coming through here — see handleWindowScroll)
@@ -1041,11 +1118,14 @@
     updateTypingIndicator(ctx);
   }
 
-  function groupsFor(all, start, end) {
+  function groupsFor(all, start, end, unreadBoundaryIndex) {
     const groups = [];
     let cur = null;
     for (let i = start; i < end; i++) {
       const m = all[i];
+      // the divider also breaks bubble grouping: the first unread message always starts a fresh run,
+      // never continues visually from the last-read one above the divider
+      if (unreadBoundaryIndex != null && i === unreadBoundaryIndex) { groups.push({ unreadDivider: true }); cur = null; }
       const prev = i > 0 ? all[i - 1] : null; // look back even outside the window for grouping context
       const sameDay = prev && startOfDay(prev.ts) === startOfDay(m.ts);
       const daySep = !sameDay ? fmtDaySeparator(m.ts) : null;
@@ -1064,9 +1144,11 @@
     const all = conv._all || [];
     const start = conv.windowStart, end = conv.windowEnd, total = all.length;
     const frag = document.createDocumentFragment();
-    const groups = groupsFor(all, start, end);
+    const groups = groupsFor(all, start, end, conv.unreadBoundaryIndex);
     const meId = ctx.state.me && ctx.state.me.id;
+    if (!groups.length && total === 0) frag.appendChild(chatEmptyEl());
     for (const g of groups) {
+      if (g.unreadDivider) { frag.appendChild(unreadSepEl()); continue; }
       if (g.daySep) frag.appendChild(sepEl(g.daySep));
       if (g.system) { frag.appendChild(systemLineEl(g.system)); continue; }
       const isMe = g.from && meId && g.from.id === meId;
@@ -1101,6 +1183,14 @@
   }
 
   function sepEl(text) { const e = el("div", "gh-day-sep"); e.textContent = text; return e; }
+  function unreadSepEl() { const e = el("div", "gh-unread-sep"); e.textContent = "Unread Messages"; return e; }
+  function chatEmptyEl() {
+    const e = el("div", "gh-chat-empty");
+    e.appendChild(icon("ghost", 34));
+    const t = el("div"); t.textContent = "No messages yet";
+    e.appendChild(t);
+    return e;
+  }
   function systemLineEl(m) {
     const e = el("div", m.kind === "call" ? "gh-call-line" : "gh-system-line");
     if (m.kind === "call") e.appendChild(icon("call", 14));
@@ -1184,9 +1274,14 @@
       }
       case "chat-media": {
         const b = el("div", "gh-bubble gh-gif-bubble", {});
-        const media = mediaEl(m.media && m.media[0], { fullscreenOnTap: true, ctx, message: m });
-        media.appendChild(tickMetaEl(m, isMe, "gh-media-meta"));
+        const build = (ref) => { const media = mediaEl(ref, { fullscreenOnTap: true, ctx, message: m, autoplay: ref && ref.type === "video" }); media.appendChild(tickMetaEl(m, isMe, "gh-media-meta")); return media; };
+        let media = build(m.media && m.media[0]);
         b.appendChild(media);
+        if (!(m.media && m.media.length)) fetchMediaFor(m).then((list) => {
+          if (!list.length || !b.isConnected && !b.parentNode) return;
+          const fresh = build(list[0]);
+          media.replaceWith(fresh); media = fresh;
+        });
         return b;
       }
       case "gif": {
@@ -1293,6 +1388,26 @@
     return b;
   }
 
+  // Photos, videos and voice notes arrive without their file (Snapchat downloads + decrypts on demand): ask the
+  // bridge for it (loadMedia -> Snapchat's own media resolver), 3 at a time, remembered per message.
+  const mediaCache = new Map(), mediaWaiting = [];
+  let mediaActive = 0;
+  function fetchMediaFor(m) {
+    const key = m.conversationId + "|" + m.id;
+    if (mediaCache.has(key)) return mediaCache.get(key);
+    const p = new Promise((resolve) => mediaWaiting.push({ m, resolve }));
+    mediaCache.set(key, p);
+    pumpMedia();
+    return p;
+  }
+  function pumpMedia() {
+    while (mediaActive < 3 && mediaWaiting.length) {
+      const { m, resolve } = mediaWaiting.shift();
+      mediaActive++;
+      api.loadMedia(m.conversationId, m.id).then((r) => resolve((r && r.media) || []), (e) => { gtrail("media load failed " + (e && e.message || e)); resolve([]); })
+        .finally(() => { mediaActive--; pumpMedia(); });
+    }
+  }
   function audioBubbleEl(ctx, m, isMe, isLast) {
     const ref = (m.media && m.media[0]) || {};
     const b = el("div", "gh-bubble gh-audio");
@@ -1316,9 +1431,12 @@
     // that can render dozens of audio messages at once, eagerly constructing an Audio() per message is
     // wasteful and (on constrained/software-rendering setups) can even destabilize the media pipeline.
     let audio = null;
+    let loadedRef = null;
+    if (!ref.url && !ref.blob) fetchMediaFor(m).then((list) => { loadedRef = list[0] || null; });
     function ensureAudio() {
       if (audio) return audio;
-      const src = ref.url || (ref.blob ? URL.createObjectURL(ref.blob) : "");
+      const r = loadedRef || ref;
+      const src = r.url || (r.blob ? URL.createObjectURL(r.blob) : "");
       audio = new Audio(src);
       audio.playbackRate = speeds[speedIdx];
       audio.addEventListener("play", () => { playing = true; playBtn.innerHTML = ""; playBtn.appendChild(icon("pause", 16)); });
@@ -1358,9 +1476,16 @@
     const m = conv.messages;
     const total = (conv._all || []).length;
     if (!total) return;
-    if (m.scrollTop < 240 && conv.windowStart > 0) {
-      conv.windowStart = Math.max(0, conv.windowStart - CHUNK);
-      paintWindow(ctx, conv);
+    if (m.scrollTop < 240) {
+      // Sliding the LOCAL window back (more already-fetched messages to reveal) and fetching MORE history
+      // from the bridge (loadOlder) are two different things that both happen "near the top" - a freshly
+      // opened conversation's first page often already satisfies windowStart === 0 with nothing local left to
+      // reveal, but the bridge can still have plenty more history (hasMore). Gating the fetch on
+      // `windowStart > 0` (as this used to) meant that common case never fetched anything at all.
+      if (conv.windowStart > 0) {
+        conv.windowStart = Math.max(0, conv.windowStart - CHUNK);
+        paintWindow(ctx, conv);
+      }
       if (conv.windowStart === 0 && conv._hasMore && !conv._loadingOlder) loadOlderMessages(ctx);
     } else if (m.scrollHeight - m.scrollTop - m.clientHeight < 240 && conv.windowEnd < total) {
       conv.windowEnd = Math.min(total, conv.windowEnd + CHUNK);
@@ -1372,17 +1497,35 @@
     const conv = ctx.conv;
     const convId = ctx.state.currentConvId;
     if (!convId || conv._loadingOlder) return;
+    // A real touch-scroll's momentum settles near the top once; a very fast/flung scroll can otherwise fire
+    // this repeatedly within the same second (each near-top scroll event asking for another fetch+repaint the
+    // instant the previous one resolves), which costs far more than any single call - measured on the
+    // scripted-scroll perf rig (2026-09-27, after fixing the bug that used to keep this from firing at all).
+    if (conv._lastLoadOlderAt && Date.now() - conv._lastLoadOlderAt < 600) return;
+    conv._lastLoadOlderAt = Date.now();
     conv._loadingOlder = true;
     const beforeHeight = conv.messages.scrollHeight;
     try {
       const res = await api.loadOlder(convId);
-      const added = (res.messages || []).length;
-      const entry = ctx.state.messagesByConv.get(convId) || { messages: [], hasMore: true };
-      entry.messages = res.messages || entry.messages;
-      entry.hasMore = !!res.hasMore;
+      const prevEntry = ctx.state.messagesByConv.get(convId) || { messages: [], hasMore: true };
+      const prevTotal = prevEntry.messages.length;
+      const entry = { messages: res.messages || prevEntry.messages, hasMore: !!res.hasMore };
       ctx.state.messagesByConv.set(convId, entry);
-      conv.windowStart += added; conv.windowEnd += added; // same logical messages, just shifted by the prepend
-      conv.windowStart = Math.max(0, conv.windowStart - added); // then re-open the new range at the top
+      const newTotal = entry.messages.length;
+      // `res.messages` (like openConversation's) is the WHOLE loaded slice from the new start onward, not just
+      // the newly-fetched page - the actual number of messages prepended is the growth in that total, never
+      // its raw length (using the raw length here used to double-count and, worse, leave windowEnd wherever
+      // that miscalculation landed with nothing to cap it back down - see below).
+      const added = Math.max(0, newTotal - prevTotal);
+      conv.windowStart += added; conv.windowEnd += added; // shift indices: same logical messages, now further along the (bigger) array
+      // Reveal only OVERSCAN's worth of the newly-fetched history per call - a smaller single-paint cost than
+      // dumping the WHOLE freshly-fetched page (up to PAGE messages) in one go, which measurably blew the
+      // scripted-scroll perf budget (2026-09-27 fix: the harness never actually exercised this path before,
+      // because of the loadOlderMessages-never-fires bug fixed just above it). The rest of what was just
+      // fetched is already sitting in conv._all, ready to be revealed near-instantly (no network) by the very
+      // next ordinary scroll-driven window-shift once the user keeps scrolling toward it.
+      conv.windowStart = Math.max(0, conv.windowStart - OVERSCAN);
+      if (conv.windowEnd - conv.windowStart > CHUNK * 4) conv.windowEnd = conv.windowStart + CHUNK * 4; // backstop
       renderMessageList(ctx, conv, entry, {});
       requestAnimationFrame(() => {
         conv.messages.scrollTop += conv.messages.scrollHeight - beforeHeight;
@@ -1534,6 +1677,7 @@
       const b = el("button", "gh-react-emoji gh-press");
       b.textContent = emoji;
       b.dataset.emoji = emoji;
+      b.setAttribute("aria-label", "React " + emoji);
       reactRow.appendChild(b);
     }
     const replyItem = sheet.querySelector('[data-act="reply"]');
@@ -1679,6 +1823,7 @@
     const input = el("input");
     input.placeholder = "Search GIPHY";
     input.autocapitalize = "off"; input.autocomplete = "off"; input.spellcheck = false;
+    input.setAttribute("aria-label", "Search GIPHY");
     searchWrap.appendChild(input);
     overlaysRoot.append(backdrop, sheet);
     backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
@@ -1730,7 +1875,7 @@
       const n = el("div", "gh-gif-note");
       n.textContent = "GIFs need a free GIPHY API key once: developers.giphy.com \u2192 Create an App \u2192 API. Paste it here:";
       const input = document.createElement("input");
-      input.className = "gh-gif-keyinput"; input.placeholder = "GIPHY API key"; input.autocapitalize = "off"; input.autocomplete = "off"; input.spellcheck = false;
+      input.className = "gh-gif-keyinput"; input.placeholder = "GIPHY API key"; input.setAttribute("aria-label", "GIPHY API key"); input.autocapitalize = "off"; input.autocomplete = "off"; input.spellcheck = false;
       input.style.cssText = "display:block;width:calc(100% - 32px);margin:12px 16px;padding:12px 14px;border-radius:12px;border:0;background:rgba(255,255,255,.08);color:inherit;font:16px -apple-system,system-ui,sans-serif";
       const save = el("button", "gh-gif-keysave");
       save.textContent = "Save";
@@ -1759,7 +1904,9 @@
     s.body.appendChild(grid);
   }
   function gifTileEl(ctx, g, s) {
-    const tile = el("div", "gh-gif-tile");
+    const tile = el("div", "gh-gif-tile gh-press");
+    tile.setAttribute("role", "button");
+    tile.setAttribute("aria-label", "Send GIF");
     tile.style.aspectRatio = `${g.w} / ${g.h}`;
     const img = el("img");
     giphyPreviewUrl(g.id).then((r) => { if (r && r.dataUrl) img.src = r.dataUrl; });
@@ -1800,15 +1947,17 @@
       <button class="gh-newchat-create" disabled>Chat</button>
     `;
     sheet.querySelector('[data-act="close"]').appendChild(icon("close"));
+    sheet.querySelector('[data-act="close"]').setAttribute("aria-label", "Close");
     const searchWrap = sheet.querySelector(".gh-newchat-search .gh-search");
     searchWrap.appendChild(icon("search", 16));
     const input = el("input");
     input.placeholder = "To:"; input.autocapitalize = "off"; input.autocomplete = "off"; input.spellcheck = false;
+    input.setAttribute("aria-label", "Search friends");
     searchWrap.appendChild(input);
     overlaysRoot.append(backdrop, sheet);
     backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
     const s = { backdrop, sheet, input, list: sheet.querySelector(".gh-friend-list"), createBtn: sheet.querySelector(".gh-newchat-create"), picked: new Map(), seq: 0 };
-    sheet.querySelector('[data-act="close"]').addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
+    sheet.querySelector('[data-act="close"]').addEventListener("click", () => { haptic("light"); closeSheetGeneric(backdrop, sheet); });
     let t;
     input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => runFriendSearch(ctx, s), 200); });
     s.createBtn.addEventListener("click", async () => {
@@ -1874,12 +2023,13 @@
       <div class="gh-viewer-hint">Tap to advance · hold to pause · swipe down to close</div>
     `;
     wrap.querySelector(".gh-viewer-close").appendChild(icon("close", 20));
+    wrap.querySelector(".gh-viewer-close").setAttribute("aria-label", "Close");
     const v = {
       el: wrap, bars: wrap.querySelector(".gh-viewer-bars"), media: wrap.querySelector(".gh-viewer-media"),
       nameEl: wrap.querySelector(".gh-viewer-top-name"), avatarSlot: wrap.querySelector(".gh-viewer-top"),
       items: [], idx: 0, timer: null, startedAt: 0, elapsedAtPause: 0, paused: false, single: false,
     };
-    wrap.querySelector(".gh-viewer-close").addEventListener("click", () => closeViewer(ctx));
+    wrap.querySelector(".gh-viewer-close").addEventListener("click", () => { haptic("light"); closeViewer(ctx); });
     wrap.querySelector('[data-z="prev"]').addEventListener("click", () => viewerStep(ctx, -1));
     wrap.querySelector('[data-z="next"]').addEventListener("click", () => viewerStep(ctx, 1));
 
@@ -2021,8 +2171,12 @@
       </div>
     `;
     wrap.querySelector('[data-act="close"]').appendChild(icon("close"));
+    wrap.querySelector('[data-act="close"]').setAttribute("aria-label", "Close camera");
     wrap.querySelector('[data-act="flip"]').appendChild(icon("flip"));
+    wrap.querySelector('[data-act="flip"]').setAttribute("aria-label", "Flip camera");
     wrap.querySelector('[data-act="preview-close"]').appendChild(icon("back"));
+    wrap.querySelector('[data-act="preview-close"]').setAttribute("aria-label", "Back to camera");
+    wrap.querySelector(".gh-shutter").setAttribute("aria-label", "Take photo (hold for video)");
 
     const c = {
       el: wrap,
@@ -2032,9 +2186,9 @@
       sendToList: wrap.querySelector(".gh-send-to-list"),
       stream: null, video: null, facing: "user", recording: false, recorder: null, chunks: [], capturedBlob: null, picked: new Set(),
     };
-    wrap.querySelector('[data-act="close"]').addEventListener("click", () => closeCamera(ctx));
+    wrap.querySelector('[data-act="close"]').addEventListener("click", () => { haptic("light"); closeCamera(ctx); });
     wrap.querySelector('[data-act="flip"]').addEventListener("click", () => flipCamera(ctx));
-    wrap.querySelector('[data-act="preview-close"]').addEventListener("click", () => { c.previewScreen.dataset.open = "0"; startCameraStream(ctx); });
+    wrap.querySelector('[data-act="preview-close"]').addEventListener("click", () => { haptic("light"); c.previewScreen.dataset.open = "0"; startCameraStream(ctx); });
     wrap.querySelector('[data-act="send"]').addEventListener("click", () => sendSnapNow(ctx));
 
     let pressTimer = null;

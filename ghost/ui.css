@@ -135,7 +135,8 @@ input, textarea {
 :host([data-reduce-motion]) .gh-press,
 :host([data-reduce-motion]) .gh-msg-pop,
 :host([data-reduce-motion]) .gh-composer-send,
-:host([data-reduce-motion]) .gh-composer-mic {
+:host([data-reduce-motion]) .gh-composer-mic,
+:host([data-reduce-motion]) .gh-search-cancel {
   transition-duration: 0.001s !important;
   animation-duration: 0.001s !important;
 }
@@ -239,8 +240,9 @@ input, textarea {
   color: var(--gh-accent);
   flex: none;
 }
-.gh-icon-btn:active { background: rgba(255, 255, 255, 0.08); }
+.gh-icon-btn:active { background: rgba(255, 255, 255, 0.08); transform: scale(0.92); }
 .gh-icon-btn svg { width: 23px; height: 23px; }
+.gh-icon-btn { transition: transform 0.15s var(--gh-spring), background 0.15s ease; }
 
 /* ---------------------------------------------------------------------------------------------------
    HOME: large-title header that collapses on scroll, sticky search, stories rail, chat rows, tab bar.
@@ -319,8 +321,12 @@ input, textarea {
   z-index: 3;
   background: var(--gh-bg-list);
   padding: 8px 12px 8px;
+  display: flex;
+  align-items: center;
 }
 .gh-search {
+  flex: 1;
+  min-width: 0;
   height: 36px;
   border-radius: 11px;
   background: var(--gh-bg-input);
@@ -329,7 +335,22 @@ input, textarea {
   gap: 7px;
   padding: 0 10px;
   color: var(--gh-text-secondary);
+  transition: border-radius 0.2s ease;
 }
+/* iOS search-bar Cancel button: hidden (zero width) until the field is active, then slides in */
+.gh-search-cancel {
+  flex: none;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--gh-accent);
+  font-size: 16px;
+  min-height: 36px;
+  transition: max-width 0.22s var(--gh-spring), opacity 0.15s ease, margin 0.22s var(--gh-spring);
+}
+.gh-search-sticky[data-active="1"] .gh-search-cancel { max-width: 70px; opacity: 1; margin-left: 8px; }
+.gh-search-cancel:active { opacity: 0.5; }
 .gh-search svg { width: 16px; height: 16px; flex: none; opacity: 0.85; }
 .gh-search input {
   flex: 1;
@@ -525,14 +546,18 @@ input, textarea {
 .gh-tab-btn svg { width: 25px; height: 25px; }
 .gh-tab-btn span { font-size: 10.5px; font-weight: 500; }
 .gh-tab-btn[data-active="1"] { color: var(--gh-accent); }
-.gh-tab-btn:active { opacity: 0.6; }
+.gh-tab-btn:active { opacity: 0.6; transform: scale(0.94); }
+.gh-tab-btn { transition: transform 0.15s var(--gh-spring), opacity 0.15s ease, color 0.15s ease; }
 
 /* ---------------------------------------------------------------------------------------------------
    CONVERSATION: frosted header (back + badge, centered name/status, avatar right), wallpaper, bubbles.
 --------------------------------------------------------------------------------------------------- */
-.gh-conv-header .gh-header-title { display: flex; flex-direction: column; gap: 0; text-align: center; align-items: center; }
-.gh-conv-title-row { display: flex; align-items: center; justify-content: center; gap: 4px; }
-.gh-conv-name { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-conv-header .gh-header-title { display: flex; flex-direction: column; gap: 0; text-align: center; align-items: center; min-width: 0; }
+/* min-width: 0 at every level of this centered flex chain: without it a long name can't shrink below its own
+   content width, so instead of truncating it just overflows the header (pushes the avatar off, or wraps under
+   the frosted bar) - the classic flex/ellipsis footgun. */
+.gh-conv-title-row { display: flex; align-items: center; justify-content: center; gap: 4px; min-width: 0; max-width: 100%; }
+.gh-conv-name { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 100%; }
 .gh-conv-sub { font-size: 12.5px; color: var(--gh-text-secondary); font-weight: 400; }
 .gh-conv-sub[data-typing="1"] { color: var(--gh-accent); }
 .gh-conv-header-avatar { flex: none; margin-left: 2px; }
@@ -565,16 +590,46 @@ input, textarea {
   background-position: 0 0, 0 0, 0 0, 20px 26px;
   background-repeat: no-repeat, no-repeat, repeat, repeat;
 }
+/* Sticky like Telegram's own date rail: each separator is a flex item in the (column, scrolling) .gh-messages
+   list, so plain `position: sticky` is enough to make it cling to the top of the viewport while its day's
+   messages scroll past, then get pushed off by the next one — no JS needed, and nothing to keep in sync. */
 .gh-day-sep {
   align-self: center;
   font-size: 12.5px;
   font-weight: 500;
   color: var(--gh-text-secondary);
-  background: rgba(30, 44, 58, 0.72);
+  background: rgba(30, 44, 58, 0.86);
   padding: 5px 12px;
   border-radius: 12px;
   margin: 14px 0 10px;
+  position: sticky;
+  top: 6px;
+  z-index: 2;
 }
+.gh-unread-sep {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 2px 8px;
+  color: var(--gh-accent);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.gh-unread-sep::before, .gh-unread-sep::after { content: ""; flex: 1; height: 1px; background: rgba(62, 136, 247, 0.35); }
+.gh-chat-empty {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--gh-text-tertiary);
+  font-size: 14px;
+  padding: 40px;
+}
+.gh-chat-empty svg { opacity: 0.5; }
 .gh-load-older {
   align-self: center;
   color: var(--gh-text-tertiary);
@@ -601,6 +656,7 @@ input, textarea {
 .gh-group-meta { display: none; margin: 0 2px 3px; }
 .gh-messages[data-group="1"] .gh-group[data-me="0"][data-first="1"] .gh-group-meta {
   display: block; font-size: 13px; font-weight: 600; color: var(--gh-accent);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
 }
 .gh-group-time { display: none; } /* redundant with the per-bubble time+ticks rendered at bottom-right */
 
@@ -706,10 +762,12 @@ input, textarea {
   font-size: 13px;
   color: rgba(255,255,255,0.85);
   max-width: 100%;
+  min-width: 0;
   position: relative;
   border-radius: 4px;
   overflow: hidden;
 }
+.gh-reply-quote span { min-width: 0; }
 .gh-reply-quote::before {
   content: "";
   position: absolute;
@@ -781,7 +839,9 @@ input, textarea {
   width: 34px; height: 34px; border-radius: 50%;
   background: rgba(255,255,255,0.18);
   display: flex; align-items: center; justify-content: center; flex: none;
+  transition: transform 0.15s var(--gh-spring);
 }
+.gh-audio-play:active, .gh-audio-speed:active { transform: scale(0.9); opacity: 0.75; }
 .gh-group[data-me="0"] .gh-audio-play { background: var(--gh-bg-panel-2); color: var(--gh-accent); }
 .gh-audio-wave { flex: 1; height: 22px; display: flex; align-items: center; gap: 2px; }
 .gh-audio-wave span { width: 2.5px; border-radius: 2px; background: currentColor; opacity: 0.55; }
@@ -891,7 +951,9 @@ input, textarea {
   color: var(--gh-accent);
   flex: none;
 }
-.gh-composer-btn:active { background: rgba(255,255,255,0.08); }
+.gh-composer-btn:active { background: rgba(255,255,255,0.08); transform: scale(0.92); }
+.gh-composer-btn { transition: transform 0.15s var(--gh-spring), background 0.15s ease; }
+.gh-composer-emoji-btn:active { opacity: 0.5; }
 .gh-composer-btn svg { width: 24px; height: 24px; }
 .gh-composer-field {
   flex: 1;
@@ -964,7 +1026,7 @@ input, textarea {
 .gh-reply-bar:not([data-show="1"]) { padding-top: 0; padding-bottom: 0; border-top-width: 0; }
 .gh-reply-bar-line { width: 3px; align-self: stretch; background: var(--gh-accent); border-radius: 2px; }
 .gh-reply-bar-body { flex: 1; min-width: 0; }
-.gh-reply-bar-name { font-size: 12.5px; font-weight: 600; color: var(--gh-accent); }
+.gh-reply-bar-name { font-size: 12.5px; font-weight: 600; color: var(--gh-accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-reply-bar-text { font-size: 13px; color: var(--gh-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-reply-bar-close { width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--gh-text-secondary); flex: none; }
 
@@ -1057,7 +1119,7 @@ input, textarea {
 .gh-friend-row { display: flex; align-items: center; gap: 12px; padding: 8px 16px; }
 .gh-friend-row:active { background: rgba(255,255,255,0.06); }
 .gh-friend-row .gh-avatar { width: 44px; height: 44px; }
-.gh-friend-name { flex: 1; font-size: 16px; font-weight: 500; }
+.gh-friend-name { flex: 1; min-width: 0; font-size: 16px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-friend-check {
   width: 22px; height: 22px; border-radius: 50%;
   border: 1.5px solid var(--gh-text-tertiary);
@@ -1178,6 +1240,7 @@ input, textarea {
   transition: transform 0.15s ease, background 0.15s ease;
 }
 .gh-shutter[data-recording="1"] { background: var(--gh-danger); border-radius: 22px; transform: scale(0.7); }
+.gh-shutter:active:not([data-recording="1"]) { transform: scale(0.9); }
 .gh-camera-preview-screen {
   position: absolute; inset: 0; background: #000; z-index: 21;
   display: none; flex-direction: column;

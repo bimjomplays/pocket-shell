@@ -236,7 +236,8 @@
     const id = firstString(raw.userId, raw.id, raw.participantId, raw.friendUserId);
     if (!id) return null;
     const username = firstString(raw.userName, raw.username, raw.mutable_username);
-    const name = firstString(raw.displayName, username, raw.name) || username || id;
+    // userDisplayName: state.friendStories.stories[key].userMetadata's own name field (device sample 2026-09-27).
+    const name = firstString(raw.displayName, raw.userDisplayName, username, raw.name) || username || id;
     const avatarId = firstString(raw.bitmojiAvatarId, raw.avatarId);
     const selfieId = firstString(raw.bitmojiSelfieId, raw.selfieId);
     return {
@@ -311,6 +312,115 @@
     const d = contentDecoder();
     return d && messageContent ? safe("decode", () => d(messageContent), null) : null;
   }
+
+  // The actual media fetch+decrypt+unzip pipeline Snapchat's own chat/snap/story players call once they have a
+  // {mediaMetadata, mediaReference} pair (module search, device 2026-09-27: the metric/log strings
+  // "media_resolve_missing_source" and "No content object and no localCacheKey" are UNIQUE to this one function -
+  // verified live: found in module 46592, export "V"). It does the AES decrypt (mediaMetadata.encryptionInfo),
+  // fetches mediaReference.contentObject/resolvedUrl/localCacheKey, and unzips media+overlay bundles, returning
+  // dataUrls (blob: URLs whose Blob already carries the RIGHT sniffed MIME type - device-verified below) - so we
+  // call it directly instead of reimplementing any crypto/network/unzip ourselves, exactly as the task asked.
+  let mediaResolverFn;
+  function mediaResolver() {
+    if (mediaResolverFn !== undefined) return mediaResolverFn;
+    mediaResolverFn = null;
+    safe("media-resolver", () => {
+      const factories = webpackRequire && webpackRequire.m;
+      if (!factories) return;
+      for (const id of Object.keys(factories)) {
+        const src = String(factories[id]);
+        if (!src.includes("media_resolve_missing_source") || !src.includes("No content object and no localCacheKey")) continue;
+        const exp = webpackRequire(id);
+        for (const k of Object.keys(exp)) {
+          const fn = safe("media-resolver-export", () => exp[k], null);
+          if (typeof fn === "function") { mediaResolverFn = fn; trail("media-resolver", "found in module " + id + " export " + k); return; }
+        }
+      }
+      trail("media-resolver", "not found", "error");
+    });
+    return mediaResolverFn;
+  }
+
+  // Snapchat's own field-rename from a raw wire mediaReference (messageContent.remoteMediaReferences[].mediaReferences[],
+  // device sample 2026-09-26: mediaReferenceKey/contentObject/mediaListId/mediaType) to the {mediaListId,
+  // contentObject, localCacheKey, mediaType} shape the resolver above reads (module search "mediaReferenceKey":
+  // `function O(e){return d.cP.fromPartial({mediaListId:e.mediaListId.toString(),contentObject:e.contentObject,
+  // localCacheKey:e.mediaReferenceKey,mediaType:e.mediaType})}`). Reimplemented here (not called from the bundle)
+  // because it's a pure field rename with no crypto/protobuf-default behaviour the resolver actually depends on -
+  // device-verified: the resolver only reads resolvedUrl/contentObject/localCacheKey off the object we hand it.
+  function mediaReferenceFromRaw(ref) {
+    if (!ref) return null;
+    return {
+      mediaListId: ref.mediaListId != null ? String(ref.mediaListId) : "0",
+      contentObject: ref.contentObject,
+      localCacheKey: ref.mediaReferenceKey,
+      mediaType: ref.mediaType,
+    };
+  }
+
+  // Mirrors Snapchat's own snapdoc -> mediaInfos builder (module search "snapdoc_media_missing_list_id"): for each
+  // playback layer, match its mediaId.mediaListId against this message's remoteMediaReferences entry (by listId,
+  // else the first available - same fallback the bundle uses), pairing it with the layer's own encryptionInfo/
+  // dimensions/zipped/hasSound. We skip the bundle's own enum translation for `mediaMetadata.type` (protobuf
+  // MediaType -> internal MediaType) since - verified by reading the resolver - that field only affects the
+  // COSMETIC `mediaLayerType` label it returns, never which bytes get fetched/decrypted; we determine image vs.
+  // video vs. audio ourselves from the resolved Blob's sniffed MIME type instead (device-verified below).
+  function mediaInfosFromSnapdoc(snapdoc, remoteMediaRef) {
+    const refs = ((remoteMediaRef && remoteMediaRef.mediaReferences) || []).map(mediaReferenceFromRaw).filter(Boolean);
+    const layers = (snapdoc && snapdoc.playback && snapdoc.playback.playbackLayers) || [];
+    const out = [];
+    for (const layer of layers) {
+      const media = layer && layer.layer && layer.layer.$case === "media" ? layer.layer.media : null;
+      if (!media) continue;
+      const listId = media.mediaId && media.mediaId.mediaListId != null ? String(media.mediaId.mediaListId) : undefined;
+      const ref = (listId !== undefined && refs.find((r) => r.mediaListId === listId)) || refs[0];
+      if (!ref) continue;
+      out.push({
+        mediaMetadata: {
+          encryptionInfo: media.encryptionInfoV2 || media.encryptionInfoV1,
+          dimensions: media.dimensions,
+          hasSound: !!((snapdoc.playback.playbackCharacteristics && snapdoc.playback.playbackCharacteristics.hasSound) || media.hasSound),
+          zipped: !!media.zipped,
+        },
+        mediaReference: ref,
+      });
+    }
+    // Fallback (no playback-layer metadata, or this build's snapdoc shape changed): resolve the plain first
+    // reference the same way Snapchat's own single-media path (voice notes / saved snaps, TW.gw) does.
+    if (!out.length && refs[0]) out.push({ mediaMetadata: { zipped: false }, mediaReference: refs[0] });
+    return out;
+  }
+
+  // Runs one or more {mediaMetadata, mediaReference} pairs through the real resolver and normalises the result to
+  // MediaRef[] (API.md). `hintType` is used when we already know the kind from the message (voice notes are always
+  // audio); otherwise the type is read off the resolved Blob's own MIME (device-verified: the resolver's dataUrl is
+  // `URL.createObjectURL(new Blob([bytes], {type: <sniffed from magic bytes>}))`, so a real chat photo/video comes
+  // back already correctly labelled "image/..." or "video/..." without us touching any enum).
+  async function resolveMediaInfos(mediaInfos, hintType, context) {
+    const V = mediaResolver();
+    if (!V || !mediaInfos || !mediaInfos.length) return [];
+    const out = [];
+    for (const mi of mediaInfos) {
+      let layers;
+      try { layers = await V(mi, context || "ghost"); } catch (e) { trail("load-media", e, "error"); continue; }
+      for (const layer of layers || []) {
+        if (!layer || !layer.dataUrl) continue;
+        let type = hintType;
+        if (!type) {
+          try {
+            const blob = await fetch(layer.dataUrl).then((r) => r.blob());
+            if (blob.type.startsWith("video")) type = "video";
+            else if (blob.type.startsWith("image")) type = "image";
+            else if (blob.type.startsWith("audio")) type = "audio";
+          } catch (e) { trail("sniff-media", e, "error"); }
+          if (!type) type = layer.mediaLayerType === "VideoLayer" ? "video" : "image";
+        }
+        out.push({ type, url: layer.dataUrl, width: layer.width || undefined, height: layer.height || undefined, durationSec: undefined });
+      }
+    }
+    return out;
+  }
+
   const CASE_KIND = { text: "text", snapReply: "text", storyReply: "text", botResponse: "text", chatMedia: "chat-media", externalMedia: "chat-media",
     externalMediaMessageContent: "chat-media", snapdoc: "snap", snap: "snap", snapMessageContent: "snap", tinySnap: "snap", note: "audio", voiceNote: "audio",
     sticker: "sticker", creativeToolItem: "gif", share: "unknown", storyShare: "unknown", spotlightShare: "unknown", url: "text" };
@@ -679,6 +789,30 @@
     });
   }, 150);
 
+  // Typing indicator, best-effort / LOW CONFIDENCE: state.presence.activeConversationInfo (a Map, device-verified
+  // 2026-09-27) is presumably conversationId-ish-keyed the same way broadcastTypingActivity/onActiveConversationInfoUpdated
+  // suggest, but it was EMPTY on the device this pass (no one was actively typing while testing), so the per-entry
+  // field names below are duck-typed guesses, never asserted - see BRIDGE_NOTES.md "typing". Emits nothing rather
+  // than a wrong shape; a future device test with someone actually typing should confirm/correct the field names.
+  const lastTypingRef = new Map();
+  function checkTyping() {
+    const info = (state() || {}).presence && (state() || {}).presence.activeConversationInfo;
+    if (!info || typeof info.entries !== "function") return;
+    for (const [key, val] of info.entries()) {
+      if (!val || typeof val !== "object") continue;
+      const cid = idOf(key) || idOf(val.conversationId);
+      if (!cid || !openConversations.has(cid)) continue;
+      const candidates = [val.typingUserIds, val.typing, val.typingParticipants, val.usersTyping, val.typingUsers];
+      let typingIds = null;
+      for (const c of candidates) if (Array.isArray(c)) { typingIds = c.map(idOf).filter(Boolean); break; }
+      if (!typingIds) continue;
+      const sig = cid + ":" + typingIds.slice().sort().join(",");
+      if (lastTypingRef.get(cid) === sig) continue;
+      lastTypingRef.set(cid, sig);
+      post({ ghost: "event", type: "typing", data: { conversationId: cid, userIds: typingIds } });
+    }
+  }
+
   function meUser() {
     const id = meId();
     if (id) return personFor(id);
@@ -708,6 +842,7 @@
       }
       emitConversations();
       for (const id of openConversations) emitMessagesFor(id);
+      safe("typing", checkTyping);
     }), null);
     emitConversations();
     post({ ghost: "event", type: "ready", data: { loggedIn: loggedIn(), me: meUser() } });
@@ -894,30 +1029,90 @@
       // Verified (main.js, search "getSnapManager().onSnapInteraction"): opening/replaying a snap in
       // Snapchat's own lightbox calls onSnapInteraction(VIEWING_INITIATED, ...) then (VIEWING_FINISHED,
       // ...) through these same store actions - this is the actual "mark viewed" mechanism, not a
-      // separate flag we set ourselves.
+      // separate flag we set ourselves. UNCHANGED from before this pass.
       if (typeof m.startedViewingSnap === "function") await m.startedViewingSnap(convIdObj(conversationId), realKey(conversationEntry(conversationId) && conversationEntry(conversationId).messages, messageId));
       if (typeof m.finishedViewingSnap === "function") await m.finishedViewingSnap(convIdObj(conversationId), realKey(conversationEntry(conversationId) && conversationEntry(conversationId).messages, messageId));
       const entry = conversationEntry(conversationId);
       const raw = entry && entry.messages && typeof entry.messages.get === "function" && findRaw(entry.messages, messageId);
-      // No verified path from a message object to a fetchable snap media URL/blob while reading the
-      // bundle (the real UI decrypts/streams it through the snap manager's own binary path) - reported
-      // as an empty media list rather than guessed at. See BRIDGE_NOTES.md "openSnap".
-      void raw;
-      return { media: [] };
+      // Real media, reusing the exact same snapdoc/remoteMediaReferences/resolver pipeline as loadMedia() below
+      // (module search "snap_viewing_resolving_snap_doc": a plain Snap's decoded content is
+      // {$case:"snapdoc", snapdoc:<the same playback/playbackLayers shape as chat media>}). Device-verified
+      // end-to-end against a real friend's story photo (same resolver, see BRIDGE_NOTES.md); NOT exercised here
+      // against a real Snap message per the task's "don't open an unopened snap while testing" rule.
+      let media = [];
+      if (raw) {
+        media = await safe("open-snap-media", async () => {
+          const decoded = decodeContent(raw.messageContent);
+          const c = decoded && decoded.content;
+          const kase = c && c.$case;
+          const snapdoc = kase === "snapdoc" ? c.snapdoc : c && c[kase] && c[kase].snapdoc;
+          const rmr = raw.messageContent && raw.messageContent.remoteMediaReferences && raw.messageContent.remoteMediaReferences[0];
+          if (!snapdoc || !rmr) return [];
+          return resolveMediaInfos(mediaInfosFromSnapdoc(snapdoc, rmr), undefined, "ghost_snap");
+        }, Promise.resolve([]));
+      }
+      return { media };
     },
 
     listStories() {
-      // LOW CONFIDENCE / best-effort: no dedicated story manager or store slice was located while
-      // reading the bundle (getStoryManager()/getSpotlightManager() etc. don't exist here - only
-      // getConversationManager/getFeedManager/getSnapManager do). Returns [] rather than guessing at a
-      // shape. See BRIDGE_NOTES.md "listStories".
+      // state.friendStories.stories (Map friendIdObj -> {snaps, userMetadata, ...}) - device-verified 2026-09-27
+      // (debugShape showed this slice; not visible while reading the bundle offline, hence the earlier "not
+      // found" note in BRIDGE_NOTES.md). watchState (Map friendIdObj -> {[snapId]: {viewTimestampMs, ...}}) is
+      // what Snapchat's own setFriendStorySnapWatchState/playStory write to when a story is actually watched.
       requireStore();
-      return [];
+      const fs = (state() || {}).friendStories;
+      if (!fs || typeof fs.stories.entries !== "function") return [];
+      const out = [];
+      safe("list-stories", () => {
+        for (const [key, story] of fs.stories.entries()) {
+          const snaps = (story && story.snaps) || [];
+          if (!snaps.length) continue;
+          const uid = idOf(key);
+          if (uid && key && typeof key === "object" && key.id) idObjs.set(uid, key);
+          const user = safe("story-user", () => (story.userMetadata && toUser(story.userMetadata)) || personFor(uid), null) || { id: uid || "unknown", name: "Unknown" };
+          let latestTs = 0;
+          for (const sn of snaps) latestTs = Math.max(latestTs, toNum(sn.creationTimestampMs), toNum(sn.sourceCreationTimestamp), toNum(sn.displayTimestampMs));
+          const watch = (fs.watchState.get(key)) || {};
+          const viewed = snaps.every((sn) => {
+            const w = watch[sn.rawSnapId] || watch[sn.snapClientId] || watch[sn.originalSnapId];
+            return !!(w && toNum(w.viewTimestampMs) > 0);
+          });
+          out.push({ user, count: snaps.length, latestTs, viewed });
+        }
+      });
+      return out.sort((a, b) => b.latestTs - a.latestTs);
     },
 
-    async openStory() {
+    async openStory(userId) {
       requireStore();
-      return { items: [] };
+      const fs = (state() || {}).friendStories;
+      if (!fs || typeof fs.stories.get !== "function") return { items: [] };
+      let key = idObjs.get(userId) || userId;
+      let story = fs.stories.get(key);
+      if (!story) { // Map may be keyed by an {id,str} object identity we don't hold yet: scan by uuid string
+        for (const k of fs.stories.keys()) if (idOf(k) === userId) { key = k; story = fs.stories.get(k); break; }
+      }
+      if (!story) return { items: [] };
+      let bundle = safe("story-playback", () => fs.playbackData.get(key), null);
+      if (!bundle && typeof fs.updatePlaybackData === "function") {
+        // Verified (main.js, search "updatePlaybackData:async()=>"): takes NO arguments, builds `playbackData`
+        // purely from `stories`+`watchState` already in memory (plus resolving each story's conversationId) -
+        // this is NOT a "mark viewed" write (that's setFriendStorySnapWatchState/playStory, untouched here).
+        await safe("update-playback", () => fs.updatePlaybackData(), undefined);
+        bundle = safe("story-playback", () => fs.playbackData.get(key), null);
+      }
+      const items = (bundle && bundle.bundle && bundle.bundle.items) || [];
+      const media = [];
+      for (const item of items) {
+        const infos = (item && item.mediaLayers) || []; // already {mediaMetadata,mediaReference} pairs - device-verified
+        for (const m of await resolveMediaInfos(infos, undefined, "ghost_story")) media.push(m);
+      }
+      // NOT marking watched: the real write (setFriendStorySnapWatchState) needs a snapOwnerId {highBits,lowBits}
+      // shape we could not pin down safely without risking a malformed write to the account - see BRIDGE_NOTES.md
+      // "openStory". Fetching the media itself does not mark it seen (device-verified: playbackData for several
+      // friends was already populated before this session touched anything, i.e. Snapchat itself preloads it for
+      // the story rail's thumbnails without counting as a view).
+      return { items: media };
     },
 
     async newConversation(userIds) {
@@ -929,12 +1124,60 @@
       return { conversationId: conversationId || null };
     },
 
-    searchFriends() {
-      // LOW CONFIDENCE / best-effort: no dedicated "friends list" slice or search action was pinned down
-      // (only per-conversation participant lists and per-message sender ids were verified). Returns []
-      // rather than guessing. See BRIDGE_NOTES.md "searchFriends".
+    searchFriends(query) {
+      // state.user.mutuallyConfirmedFriendIds (Array<{id,str}>) - device-verified 2026-09-27 (debugShape showed
+      // it directly; BRIDGE_NOTES.md's earlier pass hadn't located it offline). Resolved through the same
+      // publicUser()/personFor() path listConversations already uses.
       requireStore();
-      return [];
+      const ids = ((state() || {}).user || {}).mutuallyConfirmedFriendIds || [];
+      const q = (query || "").trim().toLowerCase();
+      const out = [];
+      for (const idObj of ids) {
+        const id = idOf(idObj);
+        if (!id) continue;
+        if (idObj && typeof idObj === "object" && idObj.id) idObjs.set(id, idObj);
+        const user = personFor(id);
+        if (!user || user.name === "Unknown") continue;
+        if (!q || (user.name && user.name.toLowerCase().includes(q)) || (user.username && user.username.toLowerCase().includes(q))) out.push(user);
+        if (out.length >= 50) break;
+      }
+      return out;
+    },
+
+    // NEW METHOD (not in the original API.md) - the UI must call this when a chat-media/gif/voice-note message
+    // bubble scrolls into view (or on demand for a specific message), then render the returned MediaRef[] the
+    // same way an already-populated `media` field is rendered. `openConversation`/`loadOlder`/the `messages`
+    // event never populate `media` for these kinds themselves (loading every photo/video/voice-note in a long
+    // chat eagerly would be slow and would fetch+decrypt media nobody scrolled to) - `text`/reactions/etc. are
+    // still delivered eagerly as before.
+    async loadMedia(conversationId, messageId) {
+      requireStore();
+      const entry = conversationEntry(conversationId);
+      const raw = entry && entry.messages && findRaw(entry.messages, messageId);
+      if (!raw) throw new Error("message not loaded locally, open the conversation first");
+      const mc = raw.messageContent || {};
+      const decoded = decodeContent(mc);
+      const c = decoded && decoded.content;
+      const kase = c && c.$case;
+      if (kase === "externalMedia" || kase === "chatMedia" || kase === "externalMediaMessageContent") {
+        const snapdocs = (c.externalMedia && c.externalMedia.snapdoc) || [];
+        const rmrs = mc.remoteMediaReferences || [];
+        const media = [];
+        for (let i = 0; i < snapdocs.length; i++) {
+          const infos = mediaInfosFromSnapdoc(snapdocs[i], rmrs[i]);
+          for (const m of await resolveMediaInfos(infos, undefined, "ghost_chat_media")) media.push(m);
+        }
+        return { media };
+      }
+      if (kase === "note" || kase === "voiceNote") {
+        const audioMeta = c.note && c.note.$case === "audio" && c.note.audio && c.note.audio.note;
+        const rmr = mc.remoteMediaReferences && mc.remoteMediaReferences[0];
+        const ref = rmr && mediaReferenceFromRaw(rmr.mediaReferences && rmr.mediaReferences[0]);
+        if (!audioMeta || !ref) return { media: [] };
+        const info = { mediaMetadata: { encryptionInfo: audioMeta.encryptionInfo, dimensions: audioMeta.dimensions, hasSound: audioMeta.hasSound, zipped: !!audioMeta.zipped }, mediaReference: ref };
+        return { media: await resolveMediaInfos([info], "audio", "ghost_voice_note") };
+      }
+      return { media: [] };
     },
 
     debugShape() {
