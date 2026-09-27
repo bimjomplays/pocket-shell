@@ -5,6 +5,7 @@ import AVFoundation
 import Vision
 import CoreImage
 import Photos
+import UserNotifications
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -97,13 +98,21 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     }()
     /// Ghost's privacy shield (Settings > Chats): covers the app while it's in the app switcher or the screen is
     /// being recorded / mirrored. (iOS gives apps no way to block a plain screenshot.)
+    // willResignActive fires while applicationState is still .active (so reading the state there never showed
+    // the shield - the 2026-09-27 bug); the notification itself says where we're going.
+    private var shieldGoingInactive = false
+    @objc private func shieldResign() { shieldGoingInactive = true; updateShield() }
+    @objc private func shieldActive() { shieldGoingInactive = false; updateShield() }
     @objc private func updateShield() {
         let on = SettingsStore.shared.bool("privacyShield")
-        let inactive = UIApplication.shared.applicationState != .active
+        let inactive = shieldGoingInactive || UIApplication.shared.applicationState != .active
         let captured = view.window?.windowScene?.screen.isCaptured ?? UIScreen.main.isCaptured
         let show = on && (inactive || captured)
         if show {
-            if shield.superview == nil { shield.frame = view.bounds; shield.autoresizingMask = [.flexibleWidth, .flexibleHeight]; view.addSubview(shield) }
+            // on the window (above the tab bar, launch picture and any sheet), not just this view
+            let host: UIView = view.window ?? view
+            if shield.superview !== host { shield.removeFromSuperview(); shield.frame = host.bounds; shield.autoresizingMask = [.flexibleWidth, .flexibleHeight]; host.addSubview(shield) }
+            host.bringSubviewToFront(shield)
         } else {
             shield.removeFromSuperview()
         }
@@ -241,9 +250,11 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         NotificationCenter.default.addObserver(self, selector: #selector(saveLaunchPicture),
                                                name: UIApplication.willResignActiveNotification, object: nil)
         if Self.ghostMode { // privacy shield: nothing readable in the app switcher or in a screen recording
-            NotificationCenter.default.addObserver(self, selector: #selector(updateShield),
+            NotificationCenter.default.addObserver(self, selector: #selector(shieldResign),
                                                    name: UIApplication.willResignActiveNotification, object: nil)
-            NotificationCenter.default.addObserver(self, selector: #selector(updateShield),
+            NotificationCenter.default.addObserver(self, selector: #selector(shieldResign),
+                                                   name: UIApplication.didEnterBackgroundNotification, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(shieldActive),
                                                    name: UIApplication.didBecomeActiveNotification, object: nil)
             NotificationCenter.default.addObserver(self, selector: #selector(updateShield),
                                                    name: UIScreen.capturedDidChangeNotification, object: nil)
@@ -681,6 +692,40 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             }.resume()
         case "trail":
             trail(body["text"] as? String ?? "")
+            replyHandler(true, nil)
+        case "streakReminders": // Ghost's Streak Keeper: reminders at each streak time
+            // plain values only: these go into UserNotifications' (Sendable) completion handlers
+            let items: [(id: String, hour: Int, minute: Int, name: String, skipToday: Bool)] = (body["items"] as? [[String: Any]] ?? []).compactMap { (item: [String: Any]) -> (id: String, hour: Int, minute: Int, name: String, skipToday: Bool)? in
+                guard let id = item["id"] as? String else { return nil }
+                return (id, (item["hour"] as? NSNumber)?.intValue ?? 12, (item["minute"] as? NSNumber)?.intValue ?? 0,
+                        item["name"] as? String ?? "your friend", (item["skipToday"] as? Bool) ?? false)
+            }
+            let center = UNUserNotificationCenter.current()
+            center.getPendingNotificationRequests { reqs in
+                center.removePendingNotificationRequests(withIdentifiers: reqs.map(\.identifier).filter { $0.hasPrefix("ghost-streak-") })
+                guard !items.isEmpty else { return }
+                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    guard granted else { return }
+                    // one-off reminders for the next 7 days (not a repeating one, so a day whose streak already
+                    // went out gets no nag); Ghost re-plans these every time it runs
+                    let cal = Calendar.current, now = Date()
+                    for item in items {
+                        let id = item.id, hour = item.hour, minute = item.minute, skipToday = item.skipToday
+                        for offset in 0..<7 {
+                            if offset == 0 && skipToday { continue }
+                            guard let day = cal.date(byAdding: .day, value: offset, to: now),
+                                  let fire = cal.date(bySettingHour: hour, minute: minute, second: 0, of: day), fire > now else { continue }
+                            let content = UNMutableNotificationContent()
+                            content.title = "Streak time 🔥"
+                            content.body = "Open Ghost to send your streak to \(item.name)"
+                            content.sound = .default
+                            let when = cal.dateComponents([.year, .month, .day, .hour, .minute], from: fire)
+                            center.add(UNNotificationRequest(identifier: "ghost-streak-\(id)-\(offset)", content: content,
+                                                             trigger: UNCalendarNotificationTrigger(dateMatching: when, repeats: false)))
+                        }
+                    }
+                }
+            }
             replyHandler(true, nil)
         case "saveToPhotos":
             guard let b64 = body["data"] as? String, let data = Data(base64Encoded: b64) else { return replyHandler(nil, "no data") }

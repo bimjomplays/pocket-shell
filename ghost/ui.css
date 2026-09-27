@@ -60,7 +60,8 @@
   --gh-radius-lg: 20px;
   --gh-radius-md: 17px;
   --gh-radius-sm: 9px;
-  --gh-safe-t: var(--ghost-safe-t, env(safe-area-inset-top, 0px)); /* the app draws Ghost full-screen and sends these */
+  --gh-safe-t0: var(--ghost-safe-t, env(safe-area-inset-top, 0px)); /* the app draws Ghost full-screen and sends these */
+  --gh-safe-t: var(--gh-safe-t0); /* + room for the green call bar while it shows (below) */
   --gh-safe-b: var(--ghost-safe-b, env(safe-area-inset-bottom, 0px));
   --gh-safe-l: env(safe-area-inset-left, 0px);
   --gh-safe-r: env(safe-area-inset-right, 0px);
@@ -1575,6 +1576,9 @@ input, textarea {
   opacity: 0; pointer-events: none; transform: scale(1.04); transition: opacity 0.28s ease, transform 0.32s var(--gh-spring);
 }
 .gh-call[data-open="1"] { opacity: 1; pointer-events: auto; transform: none; }
+/* minimized: fully out of hit-testing. iOS was still letting the (invisible) call videos' layers eat pans, so the
+   chat list and chats wouldn't scroll during a call. */
+.gh-call:not([data-open="1"]) { visibility: hidden; transition: opacity 0.28s ease, transform 0.32s var(--gh-spring), visibility 0s linear 0.3s; }
 .gh-call-bg { position: absolute; inset: 0; filter: saturate(1.2); }
 .gh-call-bg::after { content: ""; position: absolute; inset: 0; background: radial-gradient(circle at 50% 110%, rgba(0,0,0,0.65), transparent 60%); }
 .gh-call-remote { position: absolute; inset: 0; display: grid; grid-template-columns: 1fr; gap: 2px; background: #000; opacity: 0; transition: opacity 0.3s ease; }
@@ -1622,10 +1626,12 @@ input, textarea {
 .gh-call-accept .gh-call-btn-ic { background: #34c759; color: #fff; }
 .gh-call-incoming .gh-call-btn-ic { width: 68px; height: 68px; }
 .gh-call[data-mode="outgoing"] [data-act="flip"], .gh-call[data-video="0"] [data-act="flip"] { opacity: 0.45; }
+/* while the bar shows, everything moves down under it (it used to cover the headers' buttons) */
+:host([data-callbar="1"]) { --gh-safe-t: calc(var(--gh-safe-t0) + 46px); }
 .gh-call-bar {
-  position: absolute; left: 10px; right: 10px; top: calc(var(--gh-safe-t) + 4px); z-index: 35; height: 38px; border-radius: 19px;
+  position: absolute; left: 10px; right: 10px; top: calc(var(--gh-safe-t0) + 4px); z-index: 35; height: 38px; border-radius: 19px;
   display: flex; align-items: center; gap: 8px; padding: 0 14px; background: #34c759; color: #fff; font-weight: 600; font-size: 14px;
-  transform: translateY(calc(-100% - var(--gh-safe-t) - 30px)); visibility: hidden;
+  transform: translateY(calc(-100% - var(--gh-safe-t0) - 30px)); visibility: hidden;
   transition: transform 0.3s var(--gh-spring), visibility 0s linear 0.3s; box-shadow: 0 6px 20px rgba(0,0,0,0.35);
 }
 .gh-call-bar[data-show="1"] { transform: none; visibility: visible; transition: transform 0.3s var(--gh-spring), visibility 0s; }
@@ -1692,3 +1698,28 @@ input, textarea {
 .gh-saved-who { font-size: 12.5px; color: var(--gh-text-secondary); }
 .gh-saved-text { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-chat-sheet > * { flex-shrink: 0; }
+
+/* ---- friends (Settings > Friends) --------------------------------------------------------------------------- */
+.gh-friends-search {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 0 12px; height: 38px; border-radius: 12px;
+  background: var(--gh-bg-input, var(--gh-bg-panel-2)); color: var(--gh-text-secondary);
+}
+.gh-friends-search input { flex: 1; min-width: 0; height: 100%; background: none; border: 0; outline: none; color: var(--gh-text); font-size: 16px; }
+.gh-friend-row .gh-avatar { width: 40px !important; height: 40px !important; flex-shrink: 0; }
+.gh-friend-row + .gh-friend-row::before { left: 66px; }
+.gh-friend-text { display: flex; flex-direction: column; gap: 1px; }
+.gh-friend-name { font-weight: 600; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-friend-user { font-size: 13px; color: var(--gh-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-friend-btn {
+  flex-shrink: 0; height: 30px; padding: 0 14px; border-radius: 15px; background: var(--gh-accent); color: #fff;
+  font-weight: 600; font-size: 14px; transition: opacity 0.2s ease;
+}
+.gh-friend-btn-ghost { background: var(--gh-bg-panel-2); color: var(--gh-text); }
+.gh-friend-btn:disabled { background: var(--gh-bg-panel-2); color: var(--gh-text-secondary); opacity: 0.9; }
+.gh-friend-wait { color: var(--gh-text-secondary); font-size: 15px; }
+/* streak keeper time picker (chat sheet) */
+.gh-streak-time { cursor: pointer; }
+.gh-streak-input {
+  background: var(--gh-bg-panel-2); color: var(--gh-text); border: 0; border-radius: 8px; padding: 5px 10px; font-size: 16px;
+  font-variant-numeric: tabular-nums; -webkit-appearance: none; appearance: none;
+}

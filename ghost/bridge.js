@@ -1316,6 +1316,95 @@
     return (messaging().conversations || {})[conversationId];
   }
 
+
+  // Friend tools. Snapchat Web's own Add Friends page keeps its gRPC client (FriendAction service) and its search
+  // request builders module-private (main.js, search 'dweb_add_friend' / 'SECTION_TYPE_ADD_FRIENDS'), so these build
+  // the same protobuf requests by hand and send them through Snapchat's EXPORTED transports:
+  //  - gRPC unary: the module with "API_ERROR_GRPC_7_16" exports `()=>unary` (auth + token refresh included)
+  //  - search: POST https://web.snapchat.com/search/search with the "default-authed-fetch" fetch
+  // Field numbers copied from the bundle's encoders (2026-09-27). Device-checked: search returns users, and
+  // IgnoreFriends answered {successes:[friendId]} through this path.
+  let friendTransportCache;
+  function friendTransport() {
+    if (friendTransportCache) return friendTransportCache;
+    const factories = webpackRequire && webpackRequire.m;
+    if (!factories) throw new Error("Snapchat isn't loaded yet");
+    let unaryFactory = null, authedFetch = null;
+    for (const id of Object.keys(factories)) {
+      const src = String(factories[id]);
+      if (!unaryFactory && src.includes("API_ERROR_GRPC_7_16") && src.includes(".refreshToken(")) {
+        const exp = safe("friend-unary", () => webpackRequire(id), null) || {};
+        for (const k of Object.keys(exp)) { const v = safe("friend-unary-get", () => exp[k], null); if (typeof v === "function" && String(v).includes("API_ERROR_GRPC_7_16")) unaryFactory = v; }
+      }
+      if (!authedFetch && src.includes('name:"default-authed-fetch"')) {
+        const local = (/([\w$]+)=\(0,[\w$]+\.[\w$]+\)\(\{name:"default-authed-fetch"/.exec(src) || [])[1];
+        const key = local && localExport(src, local);
+        const exp = key && safe("friend-fetch", () => webpackRequire(id), null);
+        if (exp && typeof exp[key] === "function") authedFetch = exp[key];
+      }
+      if (unaryFactory && authedFetch) break;
+    }
+    if (!unaryFactory || !authedFetch) { trail("friends", "transport missing " + (!unaryFactory ? "unary " : "") + (!authedFetch ? "fetch" : ""), "error"); throw new Error("friend tools aren't available in this Snapchat version"); }
+    friendTransportCache = { unary: unaryFactory(), fetch: authedFetch };
+    return friendTransportCache;
+  }
+  // minimal protobuf writer/reader (only what these messages use)
+  const pbEnc = new TextEncoder(), pbDec = new TextDecoder();
+  function pbVarint(out, n) { n = Number(n); while (n > 127) { out.push((n & 127) | 128); n = Math.floor(n / 128); } out.push(n); }
+  function pbBytes(out, field, bytes) { pbVarint(out, (field << 3) | 2); pbVarint(out, bytes.length); for (const b of bytes) out.push(b); }
+  function pbString(out, field, str) { pbBytes(out, field, pbEnc.encode(String(str))); }
+  function pbInt(out, field, n) { pbVarint(out, field << 3); pbVarint(out, n); }
+  // Snapchat's UUID message: highBits/lowBits as fixed64 = the two big-endian halves, written little-endian
+  function pbUuid(uuid) {
+    const b = String(uuid).replace(/-/g, "").match(/../g).map((x) => parseInt(x, 16));
+    return [9, ...b.slice(0, 8).reverse(), 17, ...b.slice(8).reverse()];
+  }
+  function pbRead(bytes) { // -> Map(field -> [values]) ; values are Uint8Array for length-delimited, numbers for varints
+    const out = new Map(); let i = 0;
+    const varint = () => { let r = 0, m = 1, b; do { b = bytes[i++]; r += (b & 127) * m; m *= 128; } while (b & 128 && i < bytes.length); return r; };
+    while (i < bytes.length) {
+      const tag = varint(), field = Math.floor(tag / 8), wt = tag & 7; let v;
+      if (wt === 0) v = varint();
+      else if (wt === 2) { const len = varint(); v = bytes.subarray(i, i + len); i += len; }
+      else if (wt === 1) { v = bytes.subarray(i, i + 8); i += 8; }
+      else if (wt === 5) { v = bytes.subarray(i, i + 4); i += 4; }
+      else break;
+      if (!out.has(field)) out.set(field, []);
+      out.get(field).push(v);
+    }
+    return out;
+  }
+  const pbStr = (m, f) => { const v = m.get(f); return v && v[0] instanceof Uint8Array ? pbDec.decode(v[0]) : ""; };
+  async function friendAction(method, body) {
+    const { unary } = friendTransport();
+    const desc = { methodName: method, service: { serviceName: "snapchat.friending.server.FriendAction" }, requestStream: false, responseStream: false,
+      requestType: { serializeBinary() { return new Uint8Array(body); } },
+      responseType: { deserializeBinary(b) { const m = pbRead(b); const r = { successes: (m.get(1) || []).length, failures: (m.get(2) || []).map((x) => (pbRead(x).get(2) || [0])[0]) }; r.toObject = () => r; return r; } } };
+    let res;
+    try { res = await unary(desc, {}); } catch (e) { throw new Error("Snapchat refused it (" + errText(e) + ")"); }
+    if (!res.successes) {
+      const reason = res.failures[0];
+      // FriendActionFailureReason (main.js 'ERROR_FRIEND_NOT_FOUND'): shown to the user in plain words
+      const words = { 1: "Please try again", 2: "Couldn't find that user", 3: "You're not friends", 5: "Snapchat's servers are busy - try again", 7: "Not allowed", 13: "Too many adds - wait a bit", 14: "Too many adds today", 15: "Too many adds lately" };
+      throw new Error(words[reason] || "Snapchat couldn't do that (" + (reason || "no reason") + ")");
+    }
+    safe("friends-sync", () => { const u = state() && state().user; if (u && typeof u.syncFriends === "function") u.syncFriends().then(() => emitConversations(), () => {}); });
+    return true;
+  }
+  function friendParams(field, userIds, extra) { // repeated params {1: friendId, ...extra(id)}
+    const out = [];
+    for (const id of userIds) { const p = []; pbBytes(p, 1, pbUuid(id)); if (extra) extra(p, id); pbBytes(out, field, p); }
+    return out;
+  }
+  function friendStatusOf(id) {
+    const u = (state() || {}).user || {};
+    const has = (list) => Array.isArray(list) && list.some((x) => idOf(x) === id);
+    if (has(u.mutuallyConfirmedFriendIds)) return "friend";
+    if (has(u.outgoingFriendRequestIds)) return "requested";
+    const inc = u.incomingFriendRequests;
+    if (inc && typeof inc.values === "function") for (const r of inc.values()) if (idOf(r.user_id) === id && r.type === 1 && !r.ignored_link) return "added-me";
+    return "none";
+  }
   const methods = {
     status() {
       return { loggedIn: loggedIn(), me: meUser(), storeFound: !!store, version: VERSION };
@@ -1869,6 +1958,61 @@
       return { conversationId: conversationId || null };
     },
 
+    // --- friends (see friendTransport) ---
+    async findUsers(query) {
+      requireStore();
+      const q = String(query || "").trim();
+      if (q.length < 3) return [];
+      const { fetch: authed } = friendTransport();
+      const opts = []; pbBytes(opts, 5, [2 /* SECTION_TYPE_ADD_FRIENDS */]); pbInt(opts, 7, 20);
+      const body = []; pbString(body, 1, q); pbInt(body, 2, 21 /* ORIGIN_DWEB */); pbBytes(body, 3, opts); pbString(body, 6, crypto.randomUUID());
+      const r = await authed("https://web.snapchat.com/search/search", { method: "POST", body: new Uint8Array(body) });
+      if (!r.ok) throw new Error("search failed (" + r.status + ")");
+      const users = [];
+      for (const section of pbRead(new Uint8Array(await r.arrayBuffer())).get(1) || []) {
+        const sec = pbRead(section);
+        for (const result of sec.get(3) || []) {
+          const res = pbRead(result);
+          const raw = (res.get(2) || [])[0]; // result.user (SearchUser: 1 id, 2 displayName, 3 username, 13 mutableUsername, 6 bitmojiUserInfo)
+          if (!raw) continue;
+          const u = pbRead(raw), id = pbStr(u, 1);
+          if (!id || users.some((x) => x.id === id)) continue;
+          let avatarId, selfieId;
+          const bm = (u.get(6) || [])[0];
+          if (bm) { const b = pbRead(bm); avatarId = pbStr(b, 1) || undefined; selfieId = pbStr(b, 2) || undefined; }
+          users.push({ id, name: pbStr(u, 2) || pbStr(u, 13) || pbStr(u, 3), username: pbStr(u, 13) || pbStr(u, 3), bitmojiUrl: bitmojiUrl(avatarId, selfieId), friendStatus: friendStatusOf(id) });
+        }
+      }
+      return users;
+    },
+    friendRequests() {
+      requireStore();
+      const inc = ((state() || {}).user || {}).incomingFriendRequests;
+      const out = [];
+      // the same filter as Snapchat's "Added Me" list: PENDING and not ignored
+      if (inc && typeof inc.values === "function") for (const r of inc.values()) {
+        if (!r || r.type !== 1 || r.ignored_link) continue;
+        const id = idOf(r.user_id); if (!id) continue;
+        if (r.user_id && r.user_id.id) idObjs.set(id, r.user_id);
+        out.push({ id, name: firstString(r.display, r.mutable_username) || "Snapchatter", username: r.mutable_username, bitmojiUrl: bitmojiUrl(r.bitmoji_avatar_id, r.bitmoji_selfie_id), source: r.add_source || "", ts: Number(r.ts) || 0 });
+      }
+      return out.sort((a, b) => b.ts - a.ts);
+    },
+    async addFriend(userId) {
+      requireStore();
+      const source = friendStatusOf(userId) === "added-me" ? 4 /* ADDED_BY_ADDED_ME_BACK */ : 2 /* ADDED_BY_USERNAME */;
+      const body = []; pbString(body, 1, "dweb_add_friend");
+      body.push(...friendParams(2, [userId], (p) => pbInt(p, 2, source)));
+      return friendAction("AddFriends", body);
+    },
+    async ignoreFriend(userId) { requireStore(); return friendAction("IgnoreFriends", friendParams(1, [userId])); },
+    async removeFriend(userId) { requireStore(); return friendAction("RemoveFriends", friendParams(1, [userId])); },
+    async blockFriend(userId) { requireStore(); return friendAction("BlockFriends", friendParams(1, [userId])); },
+    // Snapchat's own friend nickname (synced to the phone app too); "" puts their own name back
+    async setNickname(userId, name) {
+      requireStore();
+      return friendAction("ChangeDisplayNameForFriends", friendParams(1, [userId], (p) => pbString(p, 2, String(name || "").trim())));
+    },
     searchFriends(query) {
       // state.user.mutuallyConfirmedFriendIds (Array<{id,str}>) - device-verified 2026-09-27 (debugShape showed
       // it directly; BRIDGE_NOTES.md's earlier pass hadn't located it offline). Resolved through the same

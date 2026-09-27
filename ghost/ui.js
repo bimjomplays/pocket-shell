@@ -53,6 +53,9 @@
   // ---- inline icons (all authored here — trusted strings only, never mixed with user data) ------------
   const ICONS = {
     back: '<path d="M15 18l-6-6 6-6"/>',
+    addFriend: '<circle cx="10" cy="8" r="4"/><path d="M3 20c.8-3.6 3.6-6 7-6s6.2 2.4 7 6"/><path d="M19 8v6M16 11h6"/>',
+    person: '<circle cx="12" cy="8" r="4"/><path d="M4.5 20c.8-3.6 3.9-6 7.5-6s6.7 2.4 7.5 6"/>',
+    flame: '<path d="M12 3c1 3.5 5 5.5 5 10a5 5 0 01-10 0c0-2 1-3.5 2-4.5.3 1.6 1.2 2.5 2 2.5-.6-2.8 0-5.5 1-8z"/>',
     pin: '<path d="M9 4h6l-1 6 3 3H7l3-3-1-6z"/><path d="M12 13v7"/>',
     eyeOff: '<path d="M3 3l18 18"/><path d="M10.6 5.1A9.8 9.8 0 0112 5c5 0 9 4.5 10 7-.4 1-1.2 2.3-2.4 3.5M6.3 6.3C4.3 7.6 2.9 9.6 2 12c1 2.5 5 7 10 7 1.8 0 3.4-.5 4.8-1.3"/><path d="M9.9 9.9a3 3 0 004.2 4.2"/>',
     download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>',
@@ -228,6 +231,13 @@
     replaySnap: (id, msgId) => bridge.call("replaySnap", [id, msgId], 45000),
     newConversation: (userIds) => bridge.call("newConversation", [userIds]),
     searchFriends: (q) => bridge.call("searchFriends", [q]),
+    findUsers: (q) => bridge.call("findUsers", [q]),
+    friendRequests: () => bridge.call("friendRequests"),
+    addFriend: (id) => bridge.call("addFriend", [id]),
+    ignoreFriend: (id) => bridge.call("ignoreFriend", [id]),
+    removeFriend: (id) => bridge.call("removeFriend", [id]),
+    blockFriend: (id) => bridge.call("blockFriend", [id]),
+    setNickname: (id, name) => bridge.call("setNickname", [id, name]),
     debugShape: () => bridge.call("debugShape"),
     loadMedia: (convId, msgId) => bridge.call("loadMedia", [convId, msgId]),
     markStoryViewed: (userId, item) => bridge.call("markStoryViewed", [userId, item]),
@@ -471,6 +481,9 @@
         try { await loadInitialData(ctx); } catch (e) { uiTrail("first load failed: " + (e && e.message || e)); }
       }
       state.homeReady = true;
+      state.ready = true;
+      startStreakKeeper(ctx);
+      api.friendRequests().then((r) => { ctx.friendReqCount = (r || []).length; }).catch(() => {});
       ctx.revealHome = () => { boot.classList.add("gh-boot-fade"); markReady(true); };
       if (state.listShown) ctx.revealHome();
       // whatever happens with the list, never keep the loading screen longer than 5s (device: it hung forever)
@@ -1233,7 +1246,13 @@
       conv.sendBtn.dataset.show = hasText ? "1" : "0";
       conv.micBtn.dataset.hide = hasText ? "1" : "0";
     });
-    screen.querySelector('[data-act="send"]').addEventListener("click", () => sendCurrentText(ctx));
+    // Send without closing the keyboard: a tap on a <button> moves focus to it (blurring the textarea = keyboard
+    // down). Handling the tap on touchend with preventDefault stops iOS from making the mouse events/focus change;
+    // click stays for non-touch input.
+    const sendBtnEl = screen.querySelector('[data-act="send"]');
+    sendBtnEl.addEventListener("touchend", (e) => { e.preventDefault(); conv.sendTouchAt = nowMs(); sendCurrentText(ctx); });
+    sendBtnEl.addEventListener("mousedown", (e) => e.preventDefault());
+    sendBtnEl.addEventListener("click", () => { if (nowMs() - (conv.sendTouchAt || 0) > 600) sendCurrentText(ctx); });
     conv.textarea.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && pref("sendOnReturn") && !e.isComposing) { e.preventDefault(); sendCurrentText(ctx); }
     });
@@ -2192,6 +2211,7 @@
     conv.micBtn.dataset.hide = "0";
     const replyToMessageId = conv.replyTo ? conv.replyTo.id : undefined;
     setReplyTo(ctx, null);
+    conv.atBottom = true; scrollConvToBottom(ctx, false);
     try { await api.sendText(convId, text, replyToMessageId ? { replyToMessageId } : {}); }
     catch (e) { ctx.showToast("Couldn't send that message"); }
   }
@@ -2490,7 +2510,7 @@
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true,
     doubleTapCamera: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
-    wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {}, pinnedChats: [], hiddenChats: [],
+    wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {}, pinnedChats: [], hiddenChats: [], streakKeeper: {},
   };
   let prefs = Object.assign({}, PREF_DEFAULTS);
   function pref(k) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : PREF_DEFAULTS[k]; }
@@ -2645,8 +2665,126 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
+  const SETTINGS_TITLES = { friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
   const SETTINGS_PAGES = {
+    // Friends: search anyone by username and add them, answer friend requests, and manage the people you have
+    // (nickname / remove / block). Bridge: findUsers, friendRequests, addFriend, ignoreFriend, removeFriend,
+    // blockFriend, setNickname - Snapchat's own FriendAction service, so it all shows up in the real app too.
+    friends(ctx, body) {
+      const bar = el("div", "gh-friends-search");
+      const input = el("input"); input.type = "search"; input.placeholder = "Search username or name"; input.autocomplete = "off"; input.setAttribute("autocapitalize", "off");
+      bar.append(icon("search", 17), input);
+      body.appendChild(bar);
+      const reqBox = el("div"), findBox = el("div"), mineBox = el("div");
+      body.append(reqBox, findBox, mineBox);
+      const statusLabel = { friend: "Friends", requested: "Requested", "added-me": "Accept", none: "Add" };
+      const personRow = (g, u, actions) => {
+        const row = el("div", "gh-set-row gh-friend-row");
+        row.appendChild(makeAvatar(u, 40));
+        const col = el("div", "gh-set-label gh-friend-text");
+        const n = el("div", "gh-friend-name"); n.textContent = u.name || u.username || "Snapchatter";
+        const un = el("div", "gh-friend-user"); un.textContent = [u.username ? "@" + u.username : "", u.source || ""].filter(Boolean).join(" \u00b7 ");
+        col.append(n, un); row.appendChild(col);
+        for (const a of actions) {
+          const b = el("button", "gh-friend-btn gh-press" + (a.ghost ? " gh-friend-btn-ghost" : ""));
+          b.textContent = a.label; b.disabled = !!a.disabled;
+          b.addEventListener("click", async (e) => {
+            e.stopPropagation(); haptic("light"); b.disabled = true;
+            try { await a.run(); } catch (err) { ctx.showToast(String(err && err.message || err || "Couldn't do that")); b.disabled = false; }
+          });
+          row.appendChild(b);
+        }
+        g.appendChild(row);
+        return row;
+      };
+      const paintRequests = async () => {
+        reqBox.innerHTML = "";
+        const reqs = await api.friendRequests().catch(() => []);
+        ctx.friendReqCount = reqs.length;
+        if (!reqs.length) return;
+        const g = setGroup(reqBox, "Added Me");
+        for (const u of reqs) {
+          personRow(g, u, [
+            { label: "Accept", run: async () => { await api.addFriend(u.id); ctx.showToast("You and " + (u.name || "them") + " are friends now"); paintRequests(); } },
+            { label: "Ignore", ghost: true, run: async () => { await api.ignoreFriend(u.id); paintRequests(); } },
+          ]);
+        }
+      };
+      const friendsCache = { list: null };
+      const paintMine = async (q) => {
+        if (!friendsCache.list) friendsCache.list = await api.searchFriends("").catch(() => []);
+        mineBox.innerHTML = "";
+        const ql = (q || "").toLowerCase();
+        const list = (friendsCache.list || []).filter((u) => !ql || (u.name || "").toLowerCase().includes(ql) || (u.username || "").toLowerCase().includes(ql)).slice(0, 80);
+        if (!list.length) return;
+        const g = setGroup(mineBox, "My Friends");
+        for (const u of list) {
+          const row = personRow(g, u, []);
+          row.classList.add("gh-press"); row.appendChild(icon("back", 16, "gh-set-chev"));
+          row.addEventListener("click", () => { haptic("light"); ctx.settings.friendTarget = u; pushSettingsPage(ctx, "friend"); });
+        }
+      };
+      let seq = 0, timer = null;
+      const sent = new Map(); // added from here: Snapchat's lists take a moment to catch up
+      const paintFind = async (q) => {
+        const mine = ++seq;
+        findBox.innerHTML = "";
+        if (q.length < 3) { if (q) { const f = el("div", "gh-set-group-foot"); f.textContent = "Type at least 3 letters to search everyone on Snapchat."; findBox.appendChild(f); } return; }
+        const g = setGroup(findBox, "Add Friends");
+        const wait = el("div", "gh-set-row gh-friend-wait"); wait.textContent = "Searching…"; g.appendChild(wait);
+        let users = [];
+        try { users = await api.findUsers(q); } catch (e) { if (mine === seq) wait.textContent = "Couldn't search - " + (e && e.message || "try again"); return; }
+        if (mine !== seq) return;
+        wait.remove();
+        if (!users.length) { const n = el("div", "gh-set-row gh-friend-wait"); n.textContent = "No one found"; g.appendChild(n); return; }
+        for (const u of users) {
+          const st = sent.get(u.id) || u.friendStatus || "none";
+          personRow(g, u, [{ label: statusLabel[st], disabled: st === "friend" || st === "requested", run: async () => {
+            await api.addFriend(u.id);
+            sent.set(u.id, st === "added-me" ? "friend" : "requested");
+            ctx.showToast(st === "added-me" ? "Friend added" : "Friend request sent");
+            paintFind(input.value.trim());
+          } }]);
+        }
+      };
+      input.addEventListener("input", () => {
+        const q = input.value.trim();
+        paintMine(q);
+        clearTimeout(timer); timer = setTimeout(() => paintFind(q), 350);
+      });
+      paintRequests(); paintMine("");
+    },
+    friend(ctx, body) {
+      const u = ctx.settings.friendTarget;
+      if (!u) return;
+      const prof = el("div", "gh-set-profile");
+      prof.appendChild(makeAvatar(u, 84));
+      const nm = el("div", "gh-set-profile-name"); nm.textContent = u.name || "Friend";
+      const un = el("div", "gh-set-profile-user"); un.textContent = u.username ? "@" + u.username : "";
+      prof.append(nm, un); body.appendChild(prof);
+      let g = setGroup(body, null, "A nickname changes their name for you only - here and in the Snapchat app. Leave it empty to use their own name.");
+      setRow(g, { icon: "edit", tint: "#3e88f7", label: "Edit Nickname", onClick: async () => {
+        const v = await promptSheet(ctx, "Nickname for " + (u.username ? "@" + u.username : u.name), u.name);
+        if (v == null) return;
+        try { await api.setNickname(u.id, v); u.name = v || u.username || u.name; nm.textContent = u.name; ctx.showToast(v ? "Nickname saved" : "Nickname removed"); }
+        catch (e) { ctx.showToast(String(e && e.message || "Couldn't change it")); }
+      } });
+      setRow(g, { icon: "newMsg", tint: "#23a55a", label: "Chat", onClick: async () => {
+        try {
+          const res = await api.newConversation([u.id]);
+          if (res && res.conversationId) { closeSettings(ctx); if (!ctx.state.convById.has(res.conversationId)) await api.listConversations().then((cs) => applyConversations(ctx, cs || [])); openConversationScreen(ctx, res.conversationId); }
+        } catch (e) { ctx.showToast("Couldn't open that chat"); }
+      } });
+      g = setGroup(body);
+      setRow(g, { label: "Remove Friend", danger: true, onClick: async () => {
+        if (!(await confirmSheet(ctx, "Remove " + (u.name || "this friend") + " from your friends?", "Remove"))) return;
+        try { await api.removeFriend(u.id); ctx.showToast("Removed"); popSettingsPage(ctx); } catch (e) { ctx.showToast(String(e && e.message || "Couldn't remove")); }
+      } });
+      setRow(g, { label: "Block", danger: true, onClick: async () => {
+        if (!(await confirmSheet(ctx, "Block " + (u.name || "them") + "? They won't be able to contact you.", "Block"))) return;
+        try { await api.blockFriend(u.id); ctx.showToast("Blocked"); popSettingsPage(ctx); } catch (e) { ctx.showToast(String(e && e.message || "Couldn't block")); }
+      } });
+    },
     main(ctx, body) {
       const me = ctx.state.me || {};
       const prof = el("div", "gh-set-profile");
@@ -2656,6 +2794,8 @@
       prof.append(nm, un);
       body.appendChild(prof);
       let g = setGroup(body);
+      setRow(g, { icon: "addFriend", tint: "linear-gradient(135deg,#23a55a,#1fb8c4)", label: "Friends", value: ctx.friendReqCount ? String(ctx.friendReqCount) : "", onClick: () => pushSettingsPage(ctx, "friends") });
+      g = setGroup(body);
       setRow(g, { icon: "palette", tint: "linear-gradient(135deg,#ff5c9e,#9b59f6)", label: "Appearance", value: (THEMES[pref("theme")] || THEMES.night).name, onClick: () => pushSettingsPage(ctx, "appearance") });
       setRow(g, { icon: "newMsg", tint: "#3e88f7", label: "Chats", onClick: () => pushSettingsPage(ctx, "chats") });
       setRow(g, { icon: "lock", tint: "#8e8e93", label: "Privacy", onClick: () => pushSettingsPage(ctx, "privacy") });
@@ -2983,6 +3123,73 @@
     backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
     return { backdrop, sheet };
   }
+  // ---- Streak Keeper -----------------------------------------------------------------------------------
+  // pref streakKeeper = { convId: {on, time: "HH:MM", last: "YYYY-MM-DD"} }. Checked every 30 s while Ghost runs and
+  // whenever it comes back to the front: once it's past the time and today's hasn't gone, one black snap goes to all
+  // the due chats together. `last` is only written after Snapchat accepted it.
+  function todayKey(d) { d = d || new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+  function fmtTimeOfDay(hhmm) {
+    const [h, m] = String(hhmm || "12:00").split(":").map(Number);
+    const d = new Date(); d.setHours(h || 0, m || 0, 0, 0);
+    try { return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (e) { return hhmm; }
+  }
+  let blackSnapBlob = null;
+  function blackSnap() {
+    if (blackSnapBlob) return Promise.resolve(blackSnapBlob);
+    return new Promise((res, rej) => {
+      const c = document.createElement("canvas"); c.width = 1080; c.height = 1920;
+      const g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
+      c.toBlob((b) => { if (b) { blackSnapBlob = b; res(b); } else rej(new Error("no image")); }, "image/jpeg", 0.9);
+    });
+  }
+  let streakBusy = false;
+  async function runStreakKeeper(ctx) {
+    if (streakBusy || !ctx.state.ready) return;
+    const all = pref("streakKeeper") || {};
+    const now = new Date(), today = todayKey(now), mins = now.getHours() * 60 + now.getMinutes();
+    const due = Object.entries(all).filter(([id, c]) => {
+      if (!c || !c.on || c.last === today) return false;
+      const [h, m] = String(c.time || "12:00").split(":").map(Number);
+      return mins >= (h || 0) * 60 + (m || 0);
+    }).map(([id]) => id);
+    if (!due.length) return;
+    // a failed try (e.g. a timeout after Snapchat already took it) is retried at most 3 times a day, 10 min apart,
+    // so a flaky send can't turn into a stream of black snaps
+    const tries = ctx.streakTries && ctx.streakTries.day === today ? ctx.streakTries : (ctx.streakTries = { day: today, n: 0, at: 0 });
+    if (tries.n >= 3 || Date.now() - tries.at < 600000) return;
+    tries.n++; tries.at = Date.now();
+    streakBusy = true;
+    try {
+      const blob = await blackSnap();
+      await api.sendSnap(due, blob, { kind: "image", width: 1080, height: 1920 });
+      const next = Object.assign({}, pref("streakKeeper") || {});
+      for (const id of due) if (next[id]) next[id] = Object.assign({}, next[id], { last: today });
+      setPref(ctx, "streakKeeper", next);
+      scheduleStreakReminders(ctx);
+      ctx.streakTries = null;
+      gtrail("streak keeper sent to " + due.length);
+    } catch (e) {
+      gtrail("streak keeper failed " + (e && e.message || e));
+    } finally { streakBusy = false; }
+  }
+  function startStreakKeeper(ctx) {
+    if (ctx.streakTimer) return;
+    ctx.streakTimer = setInterval(() => runStreakKeeper(ctx), 30000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) setTimeout(() => runStreakKeeper(ctx), 1500); });
+    setTimeout(() => runStreakKeeper(ctx), 4000);
+    scheduleStreakReminders(ctx);
+  }
+  // a local notification at each streak time, for when iOS has frozen Ghost (the app asks the native side)
+  function scheduleStreakReminders(ctx) {
+    const all = pref("streakKeeper") || {};
+    const items = Object.entries(all).filter(([, c]) => c && c.on).map(([id, c]) => {
+      const [h, m] = String(c.time || "12:00").split(":").map(Number);
+      const cd = ctx.state.convById.get(id);
+      return { id, hour: h || 0, minute: m || 0, name: (cd && cd.title) || "your friend", skipToday: c.last === todayKey() };
+    });
+    try { window.webkit.messageHandlers.dg.postMessage({ op: "streakReminders", items }).catch(() => {}); } catch (e) {}
+  }
+
   async function openChatSheet(ctx) {
     const convId = ctx.state.currentConvId;
     const cd = convId && ctx.state.convById.get(convId);
@@ -3008,6 +3215,48 @@
       } });
       if (customAvatarUrls.has(avKey)) setRow(pg, { label: cd.isGroup ? "Use Bitmojis" : "Use Their Bitmoji", danger: true, onClick: async () => { await clearCustomAvatar(ctx, avKey); closeSheetGeneric(s.backdrop, s.sheet); } });
       const pf = el("div", "gh-set-group-foot"); pf.textContent = "Only you see this - it doesn't change anything on Snapchat."; s.sheet.appendChild(pf);
+    }
+    // their nickname (Snapchat's own friend nickname - synced with the phone app)
+    const other = !cd.isGroup && cd.participants && cd.participants[0];
+    if (other) {
+      const ng0 = el("div", "gh-set-group"); ng0.style.marginTop = "14px"; s.sheet.appendChild(ng0);
+      setRow(ng0, { icon: "edit", tint: "#3e88f7", label: "Edit Nickname", value: "", onClick: async () => {
+        const v = await promptSheet(ctx, "Nickname for " + (other.username ? "@" + other.username : cd.title || "them"), cd.title || other.name);
+        if (v == null) return;
+        try { await api.setNickname(other.id, v); cd.title = v || other.username || cd.title; nm.textContent = cd.title; updateConvHeader(ctx, cd); ctx.showToast(v ? "Nickname saved" : "Nickname removed"); }
+        catch (e) { ctx.showToast(String(e && e.message || "Couldn't change it")); }
+      } });
+    }
+    // Streak Keeper: a black snap to this chat at the same time every day
+    {
+      const sk = el("div", "gh-set-group-title"); sk.textContent = "Streak Keeper"; s.sheet.appendChild(sk);
+      const sg = el("div", "gh-set-group"); s.sheet.appendChild(sg);
+      const cur = () => (pref("streakKeeper") || {})[convId] || null;
+      const save = (patch) => {
+        const all = Object.assign({}, pref("streakKeeper") || {});
+        const next = Object.assign({ on: false, time: "12:00", last: "" }, all[convId] || {}, patch);
+        if (!next.on) delete all[convId]; else all[convId] = next;
+        setPref(ctx, "streakKeeper", all);
+        scheduleStreakReminders(ctx);
+        paintSk();
+      };
+      const timeRow = el("label", "gh-set-row gh-streak-time");
+      const tl = el("span", "gh-set-label"); tl.textContent = "Send Every Day At";
+      const ti = el("input"); ti.type = "time"; ti.className = "gh-streak-input";
+      timeRow.append(tl, ti);
+      ti.addEventListener("change", () => { if (ti.value) save({ on: true, time: ti.value }); });
+      setRow(sg, { icon: "flame", tint: "linear-gradient(135deg,#ff9f2e,#ff5c3a)", label: "Keep Streak", toggle: { get: () => !!(cur() && cur().on), set: (v) => save({ on: v }) } });
+      sg.appendChild(timeRow);
+      const skFoot = el("div", "gh-set-group-foot"); s.sheet.appendChild(skFoot);
+      const paintSk = () => {
+        const c = cur();
+        ti.value = (c && c.time) || "12:00";
+        timeRow.style.display = c && c.on ? "" : "none";
+        skFoot.textContent = c && c.on
+          ? "Sends a black snap at " + fmtTimeOfDay(c.time) + " every day. " + (c.last === todayKey() ? "Today's is sent. " : "") + "Ghost has to be open or in the background then - if it was closed, it sends as soon as you open it, and a reminder pops up at that time."
+          : "Sends a plain black snap at the same time every day so you never lose the streak.";
+      };
+      paintSk();
     }
     // chat settings: notifications, when chats delete, saved messages; group tools
     const st = await api.chatSettings(convId).catch(() => ({}));
@@ -3261,6 +3510,7 @@
     const bar = ctx.callBar, k = ctx.state.activeCall, c = ctx.callScreen;
     const show = !!k && c.el.dataset.open !== "1";
     bar.dataset.show = show ? "1" : "0";
+    if (show !== ctx.host.hasAttribute("data-callbar")) { if (show) ctx.host.setAttribute("data-callbar", "1"); else ctx.host.removeAttribute("data-callbar"); }
     if (show) {
       const since = c.liveSince.get(k.conversationId);
       bar.querySelector(".gh-call-bar-text").textContent = callPeer(ctx, k).name + " · " + (since ? fmtCallTime(Date.now() - since) : "Calling…");
