@@ -231,6 +231,7 @@
     createGroup: (users, t) => bridge.call("createGroup", [users, t], 30000),
     replaySnap: (id, msgId) => bridge.call("replaySnap", [id, msgId], 45000),
     newConversation: (userIds) => bridge.call("newConversation", [userIds]),
+    chatColors: (convId) => bridge.call("chatColors", [convId]),
     searchFriends: (q) => bridge.call("searchFriends", [q]),
     findUsers: (q) => bridge.call("findUsers", [q]),
     friendRequests: () => bridge.call("friendRequests"),
@@ -579,15 +580,20 @@
     document.addEventListener("visibilitychange", () => syncPresence(ctx));
     // double-tap a chat row: the first tap already opened the chat, so the second one lands on the chat screen
     // sliding in - catch it here (capture phase, before anything in the chat reacts) and open the camera for them
-    root.addEventListener("click", (e) => {
+    // On the phone iOS often never turns that quick second tap into a click (it's still busy with the first one /
+    // the screen sliding in), so the second tap is caught on touchend too - whichever comes first wins.
+    const secondTap = (e) => {
       const rt = ctx.state.rowTap;
-      if (!rt || nowMs() - rt.t > 330 || !pref("doubleTapCamera")) return;
+      if (!rt || nowMs() - rt.t > 420 || !pref("doubleTapCamera")) return;
       // only a second tap on the same row, or on the chat screen that row just opened - never another row/tab
       if (!(rt.row.contains(e.target) || (e.target.closest && e.target.closest(".gh-screen") === ctx.conv.screen))) { ctx.state.rowTap = null; return; }
       ctx.state.rowTap = null;
-      e.stopPropagation(); e.preventDefault();
+      e.stopPropagation(); if (e.cancelable) e.preventDefault();
+      haptic("light");
       openCamera(ctx, { to: rt.id });
-    }, true);
+    };
+    root.addEventListener("touchend", (e) => { if (e.changedTouches && e.changedTouches.length === 1) secondTap(e); }, true);
+    root.addEventListener("click", secondTap, true);
     try { if (typeof window.dgOnSettings === "function") window.dgOnSettings(() => syncPresence(ctx)); } catch (e) {}
   }
 
@@ -1050,9 +1056,12 @@
     const cancelHold = () => clearTimeout(holdT);
     rowEl.addEventListener("touchmove", cancelHold, { passive: true });
     rowEl.addEventListener("touchend", cancelHold, { passive: true });
+    // the first tap's moment is its touchend (the click can arrive ~100 ms later on the phone)
+    rowEl.addEventListener("touchend", () => { if (!held) ctx.state.rowTapTouch = nowMs(); }, { passive: true });
     rowEl.addEventListener("click", (e) => { if (held) { held = false; e.stopImmediatePropagation(); } }, true);
     rowEl.addEventListener("click", () => {
-      ctx.state.rowTap = { id: conv.id, t: nowMs(), row: rowEl }; // a 2nd tap lands on the chat screen - see the root listener
+      const t0 = ctx.state.rowTapTouch && nowMs() - ctx.state.rowTapTouch < 400 ? ctx.state.rowTapTouch : nowMs();
+      ctx.state.rowTap = { id: conv.id, t: t0, row: rowEl }; // a 2nd tap lands on the chat screen - see the root listener
       openConversationScreen(ctx, conv.id);
     });
     const row = { el: rowEl, id: conv.id };
@@ -1386,6 +1395,7 @@
   async function openConversationScreen(ctx, conversationId) {
     haptic("light");
     closeChatSearch(ctx);
+    loadChatColors(ctx, conversationId);
     ctx.conv.peekId = null;
     applyChatWallpaper(ctx, conversationId);
     ctx.state.currentConvId = conversationId;
@@ -1537,6 +1547,7 @@
       const meta = el("div", "gh-group-meta");
       const nm = el("span", "gh-group-name");
       nm.textContent = isMe ? "You" : (g.from && g.from.name) || "Unknown";
+      const pc = !isMe && personColor(ctx, g.from && g.from.id); if (pc) nm.style.color = pc;
       const tm = el("span", "gh-group-time");
       tm.textContent = fmtClock(g.items[0].ts);
       meta.append(nm, tm);
@@ -1635,29 +1646,95 @@
     q.append(b, document.createTextNode(" "), s);
     return q;
   }
+  // ---- group colours: each person's name (and @mention of them) in their own colour ------------------------
+  // Snapchat's own colour for them in that group when it has one (bridge chatColors), else a steady pick by id.
+  const NAME_COLORS = ["#ff6b6b", "#ffa94d", "#ffd43b", "#69db7c", "#38d9a9", "#4dabf7", "#748ffc", "#b197fc", "#f783ac", "#63e6be", "#ffc078", "#a9e34b"];
+  const colorsByConv = new Map();
+  function loadChatColors(ctx, convId) {
+    const cd = ctx.state.convById.get(convId);
+    if (!cd || !cd.isGroup || colorsByConv.has(convId)) return;
+    colorsByConv.set(convId, {});
+    api.chatColors(convId).then((c) => {
+      if (!c || !Object.keys(c).length) return;
+      colorsByConv.set(convId, c);
+      if (ctx.state.currentConvId === convId && ctx.conv) paintWindow(ctx, ctx.conv);
+    }).catch(() => {});
+  }
+  function personColor(ctx, userId) {
+    const convId = ctx.state.currentConvId;
+    const cd = convId && ctx.state.convById.get(convId);
+    if (!cd || !cd.isGroup || !userId) return null;
+    const own = (colorsByConv.get(convId) || {})[userId];
+    if (own) return `color-mix(in srgb, ${own} 78%, #fff)`; // Snapchat's colours are made for a white chat: lift them
+    let h = 0; for (const ch of String(userId)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return NAME_COLORS[h % NAME_COLORS.length];
+  }
+  function mentionColor(ctx, handle) {
+    const convId = ctx.state.currentConvId;
+    const cd = convId && ctx.state.convById.get(convId);
+    const h = String(handle || "").replace(/^@/, "").toLowerCase();
+    if (!cd || !cd.isGroup || !h) return null;
+    const me = ctx.state.me || {};
+    if (me.username && me.username.toLowerCase() === h) return null; // you: the normal accent
+    const p = (cd.participants || []).find((x) => (x.username || "").toLowerCase() === h);
+    return p ? personColor(ctx, p.id) : null;
+  }
+
   function reactionsEl(ctx, m) {
     const wrap = el("div", "gh-reactions");
     const meId = ctx.state.me && ctx.state.me.id;
+    const cd = ctx.state.convById.get(ctx.state.currentConvId);
+    const group = !!(cd && cd.isGroup);
     const counts = new Map();
     for (const r of m.reactions) {
       const key = r.emoji;
-      if (!counts.has(key)) counts.set(key, { count: 0, mine: false });
+      if (!counts.has(key)) counts.set(key, { count: 0, mine: false, who: [] });
       const c = counts.get(key);
       c.count++;
+      c.who.push(r.from || {});
       if (meId && r.from && r.from.id === meId) c.mine = true;
     }
     for (const [emoji, c] of counts) {
       const pill = el("div", "gh-reaction-pill gh-press");
       pill.dataset.mine = c.mine ? "1" : "0";
-      pill.textContent = emoji + " " + c.count;
+      pill.appendChild(document.createTextNode(emoji + " "));
+      if (group && c.count <= 3) { // Telegram-style: the faces of who reacted, else the count
+        const faces = el("span", "gh-reaction-faces");
+        for (const u of c.who) faces.appendChild(makeAvatar(u, 18));
+        pill.appendChild(faces);
+      } else pill.appendChild(document.createTextNode(String(c.count)));
       pill.addEventListener("click", () => {
         haptic("light");
-        const convId = ctx.state.currentConvId;
-        api.react(convId, m.id, c.mine ? null : emoji).catch(() => {});
+        // in a group, tapping shows who reacted (with your own react/unreact there); 1:1 just toggles yours
+        if (group) { openReactorsSheet(ctx, m); return; }
+        api.react(ctx.state.currentConvId, m.id, c.mine ? null : emoji).catch(() => {});
       });
       wrap.appendChild(pill);
     }
     return wrap;
+  }
+  function openReactorsSheet(ctx, m) {
+    const s = ctx.chatSheet;
+    const meId = ctx.state.me && ctx.state.me.id;
+    const convId = ctx.state.currentConvId;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const t = el("div", "gh-set-group-title"); t.textContent = m.reactions.length + (m.reactions.length === 1 ? " Reaction" : " Reactions"); s.sheet.appendChild(t);
+    const g = el("div", "gh-set-group"); s.sheet.appendChild(g);
+    const list = m.reactions.slice().sort((a, b) => ((b.from && b.from.id === meId) ? 1 : 0) - ((a.from && a.from.id === meId) ? 1 : 0));
+    for (const r of list) {
+      const mine = r.from && r.from.id === meId;
+      const row = el(mine ? "button" : "div", "gh-set-row gh-reactor-row" + (mine ? " gh-press" : ""));
+      row.appendChild(makeAvatar(mine ? (ctx.state.me || r.from) : r.from, 34));
+      const nm = el("span", "gh-set-label"); nm.textContent = mine ? "You" : (r.from && r.from.name) || "Someone";
+      const col = !mine && personColor(ctx, r.from && r.from.id); if (col) nm.style.color = col;
+      if (mine) { const sub = el("div", "gh-reactor-sub"); sub.textContent = "Tap to remove"; nm.appendChild(sub); }
+      const em = el("span", "gh-reactor-emoji"); em.textContent = r.emoji;
+      row.append(nm, em);
+      if (mine) row.addEventListener("click", () => { haptic("light"); closeSheetGeneric(s.backdrop, s.sheet); api.react(convId, m.id, null).catch(() => {}); });
+      g.appendChild(row);
+    }
+    openSheetGeneric(s.backdrop, s.sheet);
   }
 
   // Message text: @mentions in the accent colour (like Snapchat), tappable links, and the chat-search match marked.
@@ -1675,7 +1752,7 @@
     };
     for (const part of String(text || "").split(/((?:^|(?<=\s))@[\w.\-]+|https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]'])/i)) {
       if (!part) continue;
-      if (/^@[\w.\-]+$/.test(part)) { const sp = el("span", "gh-mention"); sp.textContent = part; b.appendChild(sp); }
+      if (/^@[\w.\-]+$/.test(part)) { const sp = el("span", "gh-mention"); sp.textContent = part; const mc = ctx && mentionColor(ctx, part); if (mc) sp.style.color = mc; b.appendChild(sp); }
       else if (/^https?:\/\//i.test(part)) {
         const a = el("span", "gh-link"); a.textContent = part;
         a.addEventListener("click", (e) => { e.stopPropagation(); openLink(part); });
@@ -4183,7 +4260,7 @@
       if (s.query && (s.tab === "recent" || s.tab === "favs")) s.tab = "gifs"; // typing in Recent/Favorites searches GIFs
       renderStickers(ctx, s);
     }, s.tab === "gifs" ? 300 : 200); });
-    s.body.addEventListener("scroll", () => { if (s.tab !== "gifs" && s.body.scrollTop + s.body.clientHeight > s.body.scrollHeight - 400) moreStickers(ctx, s); }, { passive: true });
+    s.body.addEventListener("scroll", () => { if (s.tab === "solo" && s.body.scrollTop + s.body.clientHeight > s.body.scrollHeight - 400) moreStickers(ctx, s); }, { passive: true });
     return s;
   }
   function stickerPeople(ctx) {
@@ -4209,7 +4286,9 @@
     renderStickers(ctx, s);
   }
   async function renderStickers(ctx, s) {
+    const rseq = s.rseq = (s.rseq || 0) + 1; // a newer render (tab switch, typing) wins; an older one stops
     await loadFavSets();
+    if (rseq !== s.rseq) return;
     for (const [name, b] of Object.entries(s.tabs)) b.dataset.on = s.tab === name ? "1" : "0";
     s.body.innerHTML = "";
     s.body.scrollTop = 0;
@@ -4227,7 +4306,7 @@
     let list = [];
     {
       let cat;
-      try { cat = await loadStickerCatalog(); }
+      try { cat = await loadStickerCatalog(); if (rseq !== s.rseq) return; }
       catch (e) { gtrail("sticker catalog failed " + (e && e.message || e)); s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Couldn't load stickers" })); return; }
       const duo = s.tab === "duo";
       list = (duo ? cat.duo : cat.solo).map((x) => [x[0], x[1], duo]);
@@ -4297,6 +4376,7 @@
   // Recent = Bitmoji stickers + GIFs you sent; Favorites = stickers friends sent you, Bitmoji and GIFs you held to
   // favorite. Newest first (older entries without a time keep their own order).
   async function renderMixed(ctx, s, which) {
+    const rseq = s.rseq;
     const stamp = (list) => list.map((x, i) => Object.assign({}, x, { _t: x.t || (x.id && /^f[0-9a-z]+$/.test(x.id) ? parseInt(x.id.slice(1), 36) : 0) || -i }));
     let items;
     if (which === "recent") {
@@ -4307,7 +4387,7 @@
                ...stamp(await storage.get("ghostBitmojiFavs", [])).map((x) => ({ kind: "bitmoji", x })),
                ...stamp(await storage.get("ghostGifFavs", [])).map((x) => ({ kind: "gif", x }))];
     }
-    if (s.tab !== which) return;
+    if (s.tab !== which || rseq !== s.rseq) return;
     items.sort((a, b) => b.x._t - a.x._t);
     s.body.innerHTML = "";
     if (!items.length) {

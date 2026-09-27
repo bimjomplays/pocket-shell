@@ -1443,7 +1443,7 @@ input, textarea {
 .gh-mention-ai { width: 32px; height: 32px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; color: #fff; background: linear-gradient(135deg, #7d5fff, var(--gh-accent)); }
 .gh-mention-name { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-mention-user { font-size: 13px; color: var(--gh-text-secondary); white-space: nowrap; }
-.gh-mention { color: var(--gh-accent); font-weight: 600; }
+.gh-mention { color: var(--gh-accent); font-weight: 800; }
 .gh-group[data-me="1"] .gh-mention { color: #bfe0ff; }
 
 /* ---- Appearance prefs (Settings) ----------------------------------------------------------------------- */
@@ -1840,7 +1840,10 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 /* animated GIF tiles: the looping MP4 sits over the still preview */
 .gh-gif-tile video, .gh-sticker-gif video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 .gh-gif-tile img { height: 100%; object-fit: cover; }
-.gh-sticker-tile { position: relative; overflow: hidden; }
+/* NOT overflow:hidden here: that let WebKit shrink the square grid tiles to 0 px tall, so the Bitmoji tab stacked
+   every sticker on top of each other and kept loading more (device 2026-09-27). GIF media rounds its own corners. */
+.gh-sticker-tile { position: relative; }
+.gh-sticker-gif video { border-radius: 10px; }
 /* Discord-style favourite star, top-left of every sticker/GIF */
 .gh-fav-star {
   position: absolute; top: 4px; left: 4px; z-index: 2; width: 24px; height: 24px; border-radius: 50%;
@@ -1850,3 +1853,11 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-fav-star:active { transform: scale(0.85); }
 .gh-fav-star[data-on="1"] { background: rgba(0,0,0,0.55); color: #ffcc33; }
 .gh-fav-star[data-on="1"] svg path, .gh-fav-star[data-on="1"] svg polygon { fill: currentColor; }
+
+/* who reacted (groups): little faces in the pill, and the list sheet */
+.gh-reaction-faces { display: inline-flex; vertical-align: middle; margin-left: 1px; }
+.gh-reaction-faces .gh-avatar { width: 18px !important; height: 18px !important; border: 1.5px solid var(--gh-bg-panel); box-sizing: content-box; }
+.gh-reaction-faces .gh-avatar + .gh-avatar { margin-left: -6px; }
+.gh-reactor-row .gh-avatar { width: 34px !important; height: 34px !important; }
+.gh-reactor-emoji { font-size: 22px; }
+.gh-reactor-sub { font-size: 12.5px; color: var(--gh-text-secondary); font-weight: 400; }

@@ -1958,6 +1958,18 @@
       return { conversationId: conversationId || null };
     },
 
+    // Snapchat's own per-person colours in a group ({participantId, color: 0xRRGGBB int}, device 2026-09-27) -
+    // the same colours the Snapchat app uses for names there. -> { userId: "#rrggbb" }
+    chatColors(conversationId) {
+      requireStore();
+      const entry = conversationEntry(conversationId);
+      const out = {};
+      for (const p of (entry && entry.conversation && entry.conversation.participants) || []) {
+        const id = idOf(p), c = p && Number(p.color);
+        if (id && Number.isFinite(c) && c > 0) out[id] = "#" + c.toString(16).padStart(6, "0");
+      }
+      return out;
+    },
     // --- friends (see friendTransport) ---
     async findUsers(query) {
       requireStore();
