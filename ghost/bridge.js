@@ -1326,11 +1326,8 @@
       const media = [];
       perItem.forEach((list, i) => { for (const m of list) { m.item = i; media.push(m); } });
       lastStory = { userId, key, items, conversationId: (bundle && (bundle.conversationId || (bundle.bundle && bundle.bundle.bundleMetadata && bundle.bundle.bundleMetadata.conversationId))) };
-      // NOT marking watched: the real write (setFriendStorySnapWatchState) needs a snapOwnerId {highBits,lowBits}
-      // shape we could not pin down safely without risking a malformed write to the account - see BRIDGE_NOTES.md
-      // "openStory". Fetching the media itself does not mark it seen (device-verified: playbackData for several
-      // friends was already populated before this session touched anything, i.e. Snapchat itself preloads it for
-      // the story rail's thumbnails without counting as a view).
+      // Opening only fetches the media (Snapchat preloads it for thumbnails too); a snap counts as watched when the
+      // viewer actually shows it - see markStoryViewed.
       return { items: media };
     },
 
@@ -1411,10 +1408,13 @@
           snapExpirationTimeMs: Number(meta.expirationTimestampMs), snapCreationTimeMs: Number(meta.creationTimestampMs), wasRewatched: rewatch }]);
         Promise.resolve(h.send(...receipts)).catch((e) => trail("story-receipt", e, "error"));
       }
-      if (typeof fs.setFriendStorySnapWatchState === "function") {
+      // only mark it watched here if the receipt could actually go out (else the ring would lie)
+      if (h && me && typeof fs.setFriendStorySnapWatchState === "function") {
         safe("story-watch-set", () => fs.setFriendStorySnapWatchState(posterKey, meta.snapId, {
           snapId: meta.snapId, readReceiptState: { wasSaved: false, wasScreenshotted: false, wasScreenrecorded: false, wasRewatched: rewatch },
-          snapOwnerId: (() => { const t = new BigUint64Array(uuidObj(userId).id.slice().reverse().buffer); return { lowBits: t[0].toString(), highBits: t[1].toString() }; })(),
+          // Snapchat's own conversion (main.js module 74918 "NA": new BigUint64Array(idObj.id.slice().reverse().buffer)
+          // -> {lowBits, highBits}), applied to the poster's own id object from the stories Map
+          snapOwnerId: (() => { const bytes = (posterKey && posterKey.id instanceof Uint8Array) ? posterKey.id : uuidObj(userId).id; const t = new BigUint64Array(bytes.slice().reverse().buffer); return { lowBits: t[0].toString(), highBits: t[1].toString() }; })(),
           expirationTimestampMs: String(meta.expirationTimestampMs), storyType: 1 /* USER */, viewTimestampMs: String(now) }));
       }
       return { ok: !!h };

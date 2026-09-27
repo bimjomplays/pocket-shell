@@ -2232,7 +2232,7 @@
     flag("data-no-times", !pref("showTimes"));
     // the app's own background (seen for a moment while the keyboard moves) follows the theme
     try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST theme " + pref("theme") + "/" + pref("accent") }).catch(() => {}); } catch (e) {}
-    api.setReadReceipts(!!pref("readReceipts")).catch(() => {});
+    if (ctx.lastRR !== !!pref("readReceipts")) { ctx.lastRR = !!pref("readReceipts"); api.setReadReceipts(ctx.lastRR).catch(() => {}); }
   }
 
   function nativeSetting(key, def) { try { return typeof window.dgSetting === "function" ? window.dgSetting(key, def) : def; } catch (e) { return def; } }
@@ -2272,8 +2272,10 @@
     SETTINGS_PAGES[name](ctx, body, page);
     s.el.appendChild(page);
     s.stack.push({ name, page });
-    if (prev) { requestAnimationFrame(() => { prev.page.dataset.under = "1"; page.dataset.in = "1"; }); page.dataset.in = "0"; }
-    else page.dataset.in = "1";
+    page.dataset.in = "0";
+    requestAnimationFrame(() => requestAnimationFrame(() => { if (prev) prev.page.dataset.under = "1"; page.dataset.in = "1"; }));
+    // values shown on this page (e.g. the theme name) are rebuilt when you come back to it
+    s.stack[s.stack.length - 1].refresh = () => { body.innerHTML = ""; SETTINGS_PAGES[name](ctx, body, page); };
     // swipe from the left edge to go back, like every iOS screen
     let x0 = null, dx = 0;
     page.addEventListener("touchstart", (e) => { const t = e.touches[0]; x0 = t.clientX < 28 ? t.clientX : null; dx = 0; }, { passive: true });
