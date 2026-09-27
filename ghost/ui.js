@@ -500,6 +500,7 @@
     // exposed for the test harness / debugging only
     host.__ghost = ctx;
     ctx.makeAvatar = makeAvatar; // (test harness)
+    ctx._wallTest = async (file, fit) => { await saveWallPhoto("chat:" + ctx.state.currentConvId, file); setChatWall(ctx, ctx.state.currentConvId, { kind: "photo", dim: 0.2, fit }); }; // (test harness)
     document.addEventListener("visibilitychange", () => syncPresence(ctx));
     // double-tap a chat row: the first tap already opened the chat, so the second one lands on the chat screen
     // sliding in - catch it here (capture phase, before anything in the chat reacts) and open the camera for them
@@ -777,19 +778,18 @@
     }
   }
   async function saveCustomAvatar(ctx, key, file) {
-    const url = URL.createObjectURL(file);
+    const d = await decodePhoto(file);
     try {
-      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
-      const side = Math.min(img.naturalWidth, img.naturalHeight), out = 480;
+      const side = Math.min(d.w, d.h), out = 480;
       const c = document.createElement("canvas"); c.width = out; c.height = out;
-      c.getContext("2d").drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, out, out);
+      c.getContext("2d").drawImage(d.src, (d.w - side) / 2, (d.h - side) / 2, side, side, 0, 0, out, out);
       const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.88));
       if (!blob) throw new Error("bad photo");
       await wallDB.put("avatar:" + key, blob);
       const old = customAvatarUrls.get(key); if (old) URL.revokeObjectURL(old);
       customAvatarUrls.set(key, URL.createObjectURL(blob));
       setPref(ctx, "customAvatars", Object.assign({}, pref("customAvatars") || {}, { [key]: true }));
-    } finally { URL.revokeObjectURL(url); }
+    } finally { if (d.url) URL.revokeObjectURL(d.url); if (d.src && d.src.close) d.src.close(); }
     refreshAvatars(ctx);
   }
   async function clearCustomAvatar(ctx, key) {
@@ -2284,7 +2284,7 @@
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true,
     doubleTapCamera: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
-    wallDim: 0.25, chatWalls: {}, customAvatars: {},
+    wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {},
   };
   let prefs = Object.assign({}, PREF_DEFAULTS);
   function pref(k) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : PREF_DEFAULTS[k]; }
@@ -2519,7 +2519,10 @@
           setSlider(dg, { min: 0, max: 0.7, step: 0.05, minLabel: "☀︎", maxLabel: "☾", get: () => pref("wallDim"), set: (v) => setPref(ctx, "wallDim", v) });
           const change = el("div", "gh-set-group");
           setRow(change, { label: "Change Photo…", onClick: async () => { const f = await pickPhoto(); if (!f) return; try { await saveWallPhoto("default", f); applyPrefs(ctx); paintWalls(); } catch (e) { ctx.showToast("Couldn't use that photo"); } } });
-          dimHost.append(cap, dg, change);
+          const fcap = el("div", "gh-set-group-title"); fcap.textContent = "Photo Size";
+          const fg = el("div", "gh-set-group");
+          setChoice(fg, [["fill", "Fill Screen (zoom)"], ["fit", "Whole Photo (black bars)"]], () => pref("wallFit"), (v) => setPref(ctx, "wallFit", v));
+          dimHost.append(cap, dg, fcap, fg, change);
         }
       };
       g.appendChild(walls);
@@ -2594,15 +2597,18 @@
     open() {
       if (this.db) return this.db;
       this.db = new Promise((res, rej) => {
-        const r = indexedDB.open("ghost-walls", 1);
+        let r;
+        try { r = indexedDB.open("ghost-walls", 1); } catch (e) { rej(e); return; }
         r.onupgradeneeded = () => r.result.createObjectStore("walls");
         r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
       });
       return this.db;
     },
-    async get(k) { const db = await this.open(); return new Promise((res) => { const q = db.transaction("walls").objectStore("walls").get(k); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); }); },
-    async put(k, v) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction("walls", "readwrite"); t.objectStore("walls").put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
-    async del(k) { const db = await this.open(); return new Promise((res) => { const t = db.transaction("walls", "readwrite"); t.objectStore("walls").delete(k); t.oncomplete = res; t.onerror = res; }); },
+    mem: new Map(), // fallback if IndexedDB isn't available (the photo then lasts until Ghost restarts)
+    async idb() { try { return await this.open(); } catch (e) { this.db = Promise.reject(e); this.db.catch(() => {}); return null; } },
+    async get(k) { const db = await this.idb(); if (!db) return this.mem.get(k) || null; return new Promise((res) => { const q = db.transaction("walls").objectStore("walls").get(k); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); }); },
+    async put(k, v) { const db = await this.idb(); if (!db) { this.mem.set(k, v); return; } return new Promise((res, rej) => { const t = db.transaction("walls", "readwrite"); t.objectStore("walls").put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+    async del(k) { const db = await this.idb(); if (!db) { this.mem.delete(k); return; } return new Promise((res) => { const t = db.transaction("walls", "readwrite"); t.objectStore("walls").delete(k); t.oncomplete = res; t.onerror = res; }); },
   };
   const wallUrls = new Map(); // idb key -> object URL
   async function wallUrl(key) {
@@ -2612,26 +2618,45 @@
     wallUrls.set(key, url);
     return url;
   }
-  async function saveWallPhoto(key, file) {
+  // Decode any photo the picker hands us (big camera shots, panoramas, screenshots): createImageBitmap first
+  // (handles EXIF rotation and huge images without an <img>), then a plain <img> as the fallback.
+  async function decodePhoto(file) {
+    if (typeof createImageBitmap === "function") {
+      try { const b = await createImageBitmap(file, { imageOrientation: "from-image" }); return { src: b, w: b.width, h: b.height }; } catch (e) { gtrail("bitmap decode failed " + (e && e.message)); }
+    }
     const url = URL.createObjectURL(file);
     try {
-      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
-      const max = 1600, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("unreadable image")); i.src = url; });
+      if (img.decode) await img.decode().catch(() => {});
+      return { src: img, w: img.naturalWidth, h: img.naturalHeight, url };
+    } catch (e) { URL.revokeObjectURL(url); throw e; }
+  }
+  async function saveWallPhoto(key, file) {
+    const d = await decodePhoto(file);
+    try {
+      const max = 1600, k = Math.min(1, max / Math.max(d.w, d.h));
       const c = document.createElement("canvas");
-      c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
-      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      c.width = Math.max(1, Math.round(d.w * k)); c.height = Math.max(1, Math.round(d.h * k));
+      c.getContext("2d").drawImage(d.src, 0, 0, c.width, c.height);
       const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.86));
       if (!blob) throw new Error("couldn't read that photo");
       await wallDB.put(key, blob);
       const old = wallUrls.get(key); if (old) URL.revokeObjectURL(old);
       wallUrls.delete(key);
-    } finally { URL.revokeObjectURL(url); }
+    } catch (e) { gtrail("wallpaper save failed " + (e && e.message)); throw e; }
+    finally { if (d.url) URL.revokeObjectURL(d.url); if (d.src && d.src.close) d.src.close(); }
   }
   function pickPhoto() {
     return new Promise((res) => {
       const input = document.createElement("input");
       input.type = "file"; input.accept = "image/*";
-      input.addEventListener("change", () => res((input.files && input.files[0]) || null), { once: true });
+      input.style.cssText = "position:fixed;left:-9999px;opacity:0";
+      // (a detached input doesn't always report the pick on iOS; Snapchat's own <body> is hidden, so it goes in Ghost's root)
+      const hostRoot = document.getElementById("ghost-app-root");
+      ((hostRoot && hostRoot.shadowRoot) || document.documentElement).appendChild(input);
+      const done = (f) => { input.remove(); res(f); };
+      input.addEventListener("change", () => done((input.files && input.files[0]) || null), { once: true });
+      input.addEventListener("cancel", () => done(null), { once: true });
       input.click();
     });
   }
@@ -2640,7 +2665,7 @@
     const own = convId && (pref("chatWalls") || {})[convId];
     if (own) return Object.assign({ own: true, key: "chat:" + convId }, own);
     const d = pref("wallpaper");
-    return d === "photo" ? { kind: "photo", key: "default", dim: pref("wallDim") } : { kind: "preset", name: d };
+    return d === "photo" ? { kind: "photo", key: "default", dim: pref("wallDim"), fit: pref("wallFit") } : { kind: "preset", name: d };
   }
   async function applyChatWallpaper(ctx, convId) {
     const m = ctx.conv && ctx.conv.messages;
@@ -2652,8 +2677,13 @@
       if (m._wallToken !== token) return;
       if (url) {
         const dim = Math.max(0, Math.min(0.8, w.dim != null ? w.dim : pref("wallDim")));
+        const fit = (w.fit || pref("wallFit")) === "fit";
         m.style.backgroundImage = `linear-gradient(rgba(0,0,0,${dim}), rgba(0,0,0,${dim})), url("${url}")`;
-        m.style.backgroundSize = "cover"; m.style.backgroundPosition = "center";
+        // Fill = zoom to cover the whole chat; Fit = the whole photo, black bars where it doesn't reach
+        m.style.backgroundSize = fit ? "100% 100%, contain" : "cover";
+        m.style.backgroundRepeat = "no-repeat";
+        m.style.backgroundPosition = "center";
+        m.style.backgroundColor = fit ? "#000" : "";
         return;
       }
     }
@@ -2662,7 +2692,7 @@
       m.style.backgroundImage = p.css === "none" ? "none" : p.css; m.style.backgroundSize = p.size; m.style.backgroundPosition = p.pos;
       return;
     }
-    m.style.backgroundImage = ""; m.style.backgroundSize = ""; m.style.backgroundPosition = ""; // the default preset (CSS vars)
+    m.style.backgroundImage = ""; m.style.backgroundSize = ""; m.style.backgroundPosition = ""; m.style.backgroundRepeat = ""; m.style.backgroundColor = ""; // the default preset (CSS vars)
   }
   function setChatWall(ctx, convId, value) {
     const all = Object.assign({}, pref("chatWalls") || {});
@@ -2740,7 +2770,10 @@
         const g = el("div", "gh-set-group");
         setSlider(g, { min: 0, max: 0.7, step: 0.05, minLabel: "☀︎", maxLabel: "☾", get: () => own.dim != null ? own.dim : 0.25, set: (v) => { own.dim = v; setChatWall(ctx, convId, Object.assign({}, own, { dim: v })); } });
         const cap = el("div", "gh-set-group-title"); cap.textContent = "Darken Photo";
-        dimRow.append(cap, g);
+        const fcap = el("div", "gh-set-group-title"); fcap.textContent = "Photo Size";
+        const fg = el("div", "gh-set-group");
+        setChoice(fg, [["fill", "Fill Screen (zoom)"], ["fit", "Whole Photo (black bars)"]], () => own.fit || "fill", (v) => { own.fit = v; setChatWall(ctx, convId, Object.assign({}, own, { fit: v })); });
+        dimRow.append(cap, g, fcap, fg);
       }
     };
     await paint();
