@@ -24,6 +24,9 @@
   window.__ghostUIBooted = true;
 
   const cssText = typeof GHOST_CSS !== "undefined" ? GHOST_CSS : "";
+  // errors inside this world reach the app's log only as "Script error." - record the real message + stack
+  addEventListener("error", (e) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST ui crash " + (e.error && (e.error.message + " | " + String(e.error.stack || "").split("\n").slice(0, 3).join(" < ")) || e.message) }).catch(() => {}); } catch (x) {} });
+  addEventListener("unhandledrejection", (e) => { try { const r = e.reason; window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST ui rejection " + (r && (r.message + " | " + String(r.stack || "").split("\n").slice(0, 3).join(" < ")) || r) }).catch(() => {}); } catch (x) {} });
   const gtrail = (text) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST gif " + String(text).slice(0, 300) }).catch(() => {}); } catch (e) {} };
 
   // =====================================================================================================
@@ -407,12 +410,23 @@
       state.homeReady = true;
       ctx.revealHome = () => { boot.classList.add("gh-boot-fade"); markReady(true); };
       if (state.listShown) ctx.revealHome();
+      // whatever happens with the list, never keep the loading screen longer than 5s (device: it hung forever)
+      setTimeout(() => {
+        if (boot.classList.contains("gh-boot-fade")) return;
+        uiTrail("loading screen forced away after 5s (list shown: " + !!state.listShown + ")");
+        state.listShown = true;
+        try { if (state.pendingList) applyConversations(ctx, state.pendingList); } catch (e) { uiTrail("list render failed: " + e.message + " | " + String(e.stack || "").split("\n")[0]); }
+        ctx.revealHome();
+      }, 5000);
     }
     // Until logged in, keep asking (a `ready` from the page world can be missed, and login finishes after load).
     setInterval(() => { if (!state.loggedIn) api.status().then(handleReady).catch(() => {}); }, 1500);
 
     bridge.on("ready", handleReady);
-    bridge.on("conversations", (data) => { applyConversations(ctx, (data && data.conversations) || []); });
+    bridge.on("conversations", (data) => {
+      try { applyConversations(ctx, (data && data.conversations) || []); }
+      catch (e) { uiTrail("list render failed: " + e.message + " | " + String(e.stack || "").split("\n").slice(0, 3).join(" < ")); }
+    });
     bridge.on("messages", (data) => { applyMessages(ctx, data); });
     bridge.on("typing", (data) => { applyTyping(ctx, data); });
     // bridge progress notes and internal failures go to the phone's log (trail.txt), not on screen
