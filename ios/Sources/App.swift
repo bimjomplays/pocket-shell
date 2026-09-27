@@ -79,6 +79,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var loaded = false
     private var lastShowBar: Bool?
     private var keyboardOverlap: CGFloat = 0
+    private var lastGhostSafe = ""
     // edge swipe = back; off in an open chat, where gestures.js drags the chat itself (interactive, like the app)
     private weak var edgeBack: UIScreenEdgePanGestureRecognizer?
     // smoothness: 120Hz while touching, and a picture of the last chat list shown at launch
@@ -334,9 +335,22 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         tabBar.frame = CGRect(x: 0, y: view.bounds.height - (showBar ? barTotal : 0),
                               width: view.bounds.width, height: barTotal)
         tabBar.alpha = showBar ? 1 : 0
-        let area = CGRect(x: 0, y: insets.top, width: view.bounds.width,
-                          height: (showBar ? tabBar.frame.minY
-                                           : view.bounds.height - max(insets.bottom, keyboardOverlap)) - insets.top)
+        // Ghost draws edge to edge (under the clock and the home indicator, like a real app) and pads its own
+        // header/composer by the safe-area sizes it's given below; the Snapchat-look app keeps the inset area.
+        let fullBleed = Self.ghostMode && inApp
+        let area = fullBleed
+            ? CGRect(x: 0, y: 0, width: view.bounds.width, height: view.bounds.height - keyboardOverlap)
+            : CGRect(x: 0, y: insets.top, width: view.bounds.width,
+                     height: (showBar ? tabBar.frame.minY
+                                      : view.bounds.height - max(insets.bottom, keyboardOverlap)) - insets.top)
+        if fullBleed {
+            let safe = "\(Int(insets.top)),\(keyboardOverlap > 0 ? 0 : Int(insets.bottom))"
+            if safe != lastGhostSafe {
+                lastGhostSafe = safe
+                let parts = safe.split(separator: ",")
+                webView.evaluateJavaScript("document.documentElement.style.setProperty('--ghost-safe-t','\(parts[0])px');document.documentElement.style.setProperty('--ghost-safe-b','\(parts[1])px')", completionHandler: nil)
+            }
+        }
         let scale = inApp ? Self.appScale : min(1, area.width / Self.loginWidth)
         webView.transform = .identity
         webView.bounds = CGRect(x: 0, y: 0, width: area.width / scale, height: area.height / scale)
@@ -516,6 +530,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// Backup for the same problem: a few seconds after Snapchat Web loads, glass.js should have switched
     /// to the one-pane phone layout (html.dg-list / dg-chat). If it hasn't, reload once.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        lastGhostSafe = "" // a new page lost the safe-area sizes: send them again on the next layout
+        view.setNeedsLayout()
         guard inApp else { return }
         for delay in [0.2, 0.9] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in

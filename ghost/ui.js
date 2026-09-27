@@ -53,6 +53,10 @@
   // ---- inline icons (all authored here — trusted strings only, never mixed with user data) ------------
   const ICONS = {
     back: '<path d="M15 18l-6-6 6-6"/>',
+    palette: '<path d="M12 3a9 9 0 100 18c1.1 0 1.7-.9 1.4-1.9-.3-.9.2-1.9 1.2-1.9H17a4 4 0 004-4c0-5.6-4-10.2-9-10.2z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7" r="1.2"/><circle cx="15" cy="7.5" r="1.2"/>',
+    database: '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/>',
+    vibrate: '<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M3 9v6M21 9v6"/>',
+    motion: '<path d="M4 12h9M4 7h13M4 17h6"/><circle cx="18" cy="16" r="3"/>',
     close: '<path d="M18 6L6 18M6 6l12 12"/>',
     chevronDown: '<path d="M6 9l6 6 6-6"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
@@ -205,9 +209,11 @@
     searchFriends: (q) => bridge.call("searchFriends", [q]),
     debugShape: () => bridge.call("debugShape"),
     loadMedia: (convId, msgId) => bridge.call("loadMedia", [convId, msgId]),
+    markStoryViewed: (userId, item) => bridge.call("markStoryViewed", [userId, item]),
     storyThumb: (userId) => bridge.call("storyThumb", [userId], 30000),
     replyToStory: (userId, item, text) => bridge.call("replyToStory", [userId, item, text], 30000),
     setPresence: (convId) => bridge.call("setPresence", [convId]),
+    setReadReceipts: (on) => bridge.call("setReadReceipts", [on]),
   };
 
   // =====================================================================================================
@@ -304,13 +310,7 @@
     blue: ["#3e88f7", "#2f74e0"], yellow: ["#f0b232", "#c9911c"], purple: ["#9b59f6", "#7c3fd1"],
     green: ["#23a55a", "#1a7f45"], pink: ["#ff5c9e", "#d63f80"],
   };
-  function applyAccent(host) {
-    let key = "blue";
-    try { if (typeof window.dgSetting === "function") key = window.dgSetting("accent", "blue"); } catch (e) {}
-    const pair = ACCENTS[key] || ACCENTS.blue;
-    host.style.setProperty("--gh-accent", pair[0]);
-    host.style.setProperty("--gh-accent-hover", pair[1]);
-  }
+  function applyAccent(host) { /* colours now come from Ghost's own Appearance settings (applyPrefs) */ }
   function applyReduceMotion(host) {
     let on = false;
     try { if (typeof window.dgSetting === "function") on = !!window.dgSetting("reduceMotion", false); } catch (e) {}
@@ -402,6 +402,9 @@
     root.appendChild(ctx.viewer.el);
     ctx.camera = buildCamera(ctx);
     root.appendChild(ctx.camera.el);
+    ctx.settings = buildSettings(ctx);
+    root.appendChild(ctx.settings.el);
+    loadPrefs(ctx);
 
     initNavGesture(ctx);
 
@@ -500,7 +503,7 @@
     // sliding in - catch it here (capture phase, before anything in the chat reacts) and open the camera for them
     root.addEventListener("click", (e) => {
       const rt = ctx.state.rowTap;
-      if (!rt || nowMs() - rt.t > 330) return;
+      if (!rt || nowMs() - rt.t > 330 || !pref("doubleTapCamera")) return;
       // only a second tap on the same row, or on the chat screen that row just opened - never another row/tab
       if (!(rt.row.contains(e.target) || (e.target.closest && e.target.closest(".gh-screen") === ctx.conv.screen))) { ctx.state.rowTap = null; return; }
       ctx.state.rowTap = null;
@@ -675,7 +678,7 @@
       haptic();
       for (const t of [tabChats, tabStories, tabSettings]) t.dataset.active = "0";
       tabSettings.dataset.active = "1";
-      try { if (typeof window.dgOpenSettings === "function") window.dgOpenSettings(); } catch (e) {}
+      openSettings(ctx);
       setTimeout(() => { tabSettings.dataset.active = "0"; tabChats.dataset.active = "1"; }, 400);
     });
     tabChats.addEventListener("click", () => {
@@ -760,7 +763,7 @@
     img.alt = "";
     img.loading = "lazy";
     const fallback = placeholderAvatarUrl(user);
-    const pic = user && (user.avatarUrl || user.bitmojiUrl);
+    const pic = user && (user.avatarUrl || (pref("avatars") !== "initials" ? user.bitmojiUrl : null));
     if (pic && !brokenAvatars.has(pic)) {
       // Bitmoji head (transparent webp) on the same Telegram gradient the letter avatar would use, so it
       // reads as part of this app rather than Snapchat's white circles. Letters if the image won't load.
@@ -1058,6 +1061,9 @@
       conv.micBtn.dataset.hide = hasText ? "1" : "0";
     });
     screen.querySelector('[data-act="send"]').addEventListener("click", () => sendCurrentText(ctx));
+    conv.textarea.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey && pref("sendOnReturn") && !e.isComposing) { e.preventDefault(); sendCurrentText(ctx); }
+    });
     conv.micBtn.addEventListener("click", () => { haptic(); ctx.showToast("Voice messages need a device"); });
     screen.querySelector('[data-act="attach"]').addEventListener("click", () => openAttachSheet(ctx));
     conv.fileInput.addEventListener("change", () => {
@@ -1428,7 +1434,9 @@
           try {
             const bytes = await gmBytes(giphyMedia(gid, "200w.mp4"));
             const v = el("video");
-            v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true;
+            v.muted = true; v.loop = true; v.playsInline = true;
+            if (pref("autoplayGifs")) v.autoplay = true;
+            else { v.preload = "metadata"; v.addEventListener("click", (e) => { e.stopPropagation(); if (v.paused) v.play().catch(() => {}); else v.pause(); }); }
             v.setAttribute("playsinline", ""); v.setAttribute("muted", "");
             v.src = URL.createObjectURL(new Blob([bytes], { type: "video/mp4" }));
             v.addEventListener("loadeddata", () => { if (img) img.remove(); v.play().catch(() => {}); }, { once: true });
@@ -1514,6 +1522,7 @@
     b.dataset.sound = m.snapSound ? "1" : "0";
     b.dataset.me = isMe ? "1" : "0";
     const mark = el("span", "gh-snap-mark");
+    if (isMe) mark.innerHTML = '<svg viewBox="0 0 14 16" width="13" height="15"><path d="M1.5 1.5 L12.5 8 L1.5 14.5 Z" stroke-width="2" stroke-linejoin="round"/></svg>'; // sent = arrow, like Snapchat
     const label = el("span", "gh-snap-label");
     const paint = () => {
       b.dataset.opened = m.opened ? "1" : "0";
@@ -2005,7 +2014,7 @@
   const REACTION_EMOJIS = ["❤️", "😂", "😮", "😢", "😡", "👍"];
   function buildActionSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
-    const sheet = el("div", "gh-sheet gh-action-sheet");
+    const sheet = el("div", "gh-sheet gh-action-sheet"); sheet.style.display = "none";
     sheet.innerHTML = `
       <div class="gh-sheet-grip"></div>
       <div class="gh-react-row"></div>
@@ -2104,7 +2113,7 @@
   // =====================================================================================================
   function buildAttachSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
-    const sheet = el("div", "gh-sheet gh-attach-sheet");
+    const sheet = el("div", "gh-sheet gh-attach-sheet"); sheet.style.display = "none";
     sheet.innerHTML = `
       <div class="gh-sheet-grip"></div>
       <div class="gh-action-list">
@@ -2149,6 +2158,310 @@
   // GIF sheet
   // =====================================================================================================
   // =====================================================================================================
+  // Ghost Settings: its own Telegram-style screen (the native sheet is still under Advanced). Looks: themes,
+  // accent, chat wallpaper, text size, bubble shape/style, list density, avatars; Chats; Privacy; Stickers & GIFs;
+  // Storage. Ghost-only prefs live in GM storage ("ghostPrefs"); the few the app itself also reads (haptics,
+  // reduce motion, show me in chats, voice-note speed, GIF rating) stay native settings.
+  // =====================================================================================================
+  const THEMES = {
+    night:    { name: "Night",    app: "#0e161f", list: "#17212b", header: "rgba(21,30,39,0.96)", panel: "#1c2733", panel2: "#24313f", input: "#253340", in1: "#1c2936", in2: "#18232e", sub: "#8b98a5", ter: "#64707c", pill: "rgb(30,44,58)" },
+    midnight: { name: "Midnight", app: "#000000", list: "#000000", header: "rgba(10,10,12,0.96)", panel: "#121214", panel2: "#1c1c1f", input: "#1c1c1f", in1: "#1f1f22", in2: "#1a1a1d", sub: "#8e8e93", ter: "#636366", pill: "rgb(28,28,31)" },
+    ocean:    { name: "Ocean",    app: "#071a24", list: "#0c2330", header: "rgba(11,32,44,0.96)", panel: "#11303f", panel2: "#173b4c", input: "#183c4d", in1: "#123344", in2: "#0f2b3a", sub: "#86a6b5", ter: "#5e7d8b", pill: "rgb(17,48,63)" },
+    forest:   { name: "Forest",   app: "#0b1712", list: "#12211a", header: "rgba(17,31,24,0.96)", panel: "#182b22", panel2: "#20372c", input: "#21382d", in1: "#1a2f25", in2: "#16291f", sub: "#8fa89a", ter: "#667d71", pill: "rgb(24,43,34)" },
+    grape:    { name: "Grape",    app: "#130e1f", list: "#1b1529", header: "rgba(26,20,40,0.96)", panel: "#231b36", panel2: "#2d2443", input: "#2e2545", in1: "#261e39", in2: "#211a32", sub: "#a197b8", ter: "#776e8e", pill: "rgb(35,27,54)" },
+    ember:    { name: "Ember",    app: "#1a0f0c", list: "#231612", header: "rgba(35,22,18,0.96)", panel: "#2e1d18", panel2: "#3a261f", input: "#3b2720", in1: "#31201a", in2: "#2a1b16", sub: "#b39a90", ter: "#86706a", pill: "rgb(46,29,24)" },
+    graphite: { name: "Graphite", app: "#141517", list: "#1c1d20", header: "rgba(28,29,32,0.96)", panel: "#25262a", panel2: "#2e3035", input: "#2f3136", in1: "#27292d", in2: "#222428", sub: "#9a9ca3", ter: "#71737a", pill: "rgb(37,38,42)" },
+  };
+  const ACCENT_SET = {
+    blue:   ["#3e88f7", "#2f74e0", "#3a6a94", "#2b5278"],
+    purple: ["#9b59f6", "#7c3fd1", "#6a4a9e", "#523a7e"],
+    pink:   ["#ff5c9e", "#d63f80", "#9a4870", "#7a3659"],
+    red:    ["#f2555a", "#cf3d42", "#94474a", "#743538"],
+    orange: ["#ff9433", "#e07a1c", "#9a6433", "#7a4d24"],
+    yellow: ["#f0b232", "#c9911c", "#8f7432", "#705a24"],
+    green:  ["#23a55a", "#1a7f45", "#2f7a52", "#235f3f"],
+    teal:   ["#1fb8c4", "#14939d", "#2b7880", "#205d63"],
+  };
+  const WALLPAPERS = {
+    aurora: { name: "Aurora", css: "radial-gradient(ellipse 120% 70% at 15% -5%, color-mix(in srgb, var(--gh-accent) 16%, transparent), transparent 55%), radial-gradient(ellipse 120% 70% at 100% 100%, rgba(93,74,173,0.14), transparent 55%), radial-gradient(circle, rgba(255,255,255,0.05) 1.4px, transparent 1.6px), radial-gradient(circle, rgba(255,255,255,0.035) 1.1px, transparent 1.3px)", size: "auto, auto, 64px 64px, 40px 40px", pos: "0 0, 0 0, 0 0, 20px 26px" },
+    plain:  { name: "Plain", css: "none", size: "auto", pos: "0 0" },
+    dots:   { name: "Dots", css: "radial-gradient(circle, rgba(255,255,255,0.07) 1.3px, transparent 1.5px)", size: "22px 22px", pos: "0 0" },
+    glow:   { name: "Glow", css: "radial-gradient(ellipse 90% 60% at 50% 110%, color-mix(in srgb, var(--gh-accent) 30%, transparent), transparent 70%), radial-gradient(ellipse 80% 50% at 50% -10%, color-mix(in srgb, var(--gh-accent) 14%, transparent), transparent 70%)", size: "auto, auto", pos: "0 0, 0 0" },
+    sunset: { name: "Sunset", css: "linear-gradient(170deg, rgba(255,120,90,0.16), transparent 45%, rgba(155,89,246,0.16))", size: "auto", pos: "0 0" },
+    nebula: { name: "Nebula", css: "radial-gradient(circle at 20% 30%, rgba(155,89,246,0.22), transparent 40%), radial-gradient(circle at 80% 20%, rgba(31,184,196,0.16), transparent 40%), radial-gradient(circle at 60% 85%, rgba(255,92,158,0.16), transparent 45%), radial-gradient(circle, rgba(255,255,255,0.08) 0.9px, transparent 1.1px)", size: "auto, auto, auto, 30px 30px", pos: "0 0, 0 0, 0 0, 7px 11px" },
+    grid:   { name: "Grid", css: "linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px)", size: "28px 28px, 28px 28px", pos: "0 0, 0 0" },
+  };
+  const PREF_DEFAULTS = {
+    theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
+    compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true,
+    doubleTapCamera: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
+  };
+  let prefs = Object.assign({}, PREF_DEFAULTS);
+  function pref(k) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : PREF_DEFAULTS[k]; }
+  async function loadPrefs(ctx) {
+    try { prefs = Object.assign({}, PREF_DEFAULTS, await storage.get("ghostPrefs", {})); } catch (e) {}
+    // older builds kept the accent as a native setting: carry it over once
+    try { const legacy = typeof window.dgSetting === "function" && window.dgSetting("accent", null); if (legacy && ACCENT_SET[legacy] && !(await storage.get("ghostPrefs", null))) prefs.accent = legacy; } catch (e) {}
+    applyPrefs(ctx);
+  }
+  function setPref(ctx, k, v) {
+    prefs[k] = v;
+    storage.set("ghostPrefs", prefs);
+    applyPrefs(ctx);
+  }
+  function applyPrefs(ctx) {
+    const host = ctx.host;
+    if (!host) return;
+    const t = THEMES[pref("theme")] || THEMES.night;
+    const a = ACCENT_SET[pref("accent")] || ACCENT_SET.blue;
+    const w = WALLPAPERS[pref("wallpaper")] || WALLPAPERS.aurora;
+    const set = (k, v) => host.style.setProperty(k, v);
+    set("--gh-bg-app", t.app); set("--gh-bg-list", t.list); set("--gh-bg-header", t.header);
+    set("--gh-bg-panel", t.panel); set("--gh-bg-panel-2", t.panel2); set("--gh-bg-input", t.input);
+    set("--gh-bubble-in-1", t.in1); set("--gh-bubble-in-2", t.in2);
+    set("--gh-text-secondary", t.sub); set("--gh-text-tertiary", t.ter); set("--gh-pill-bg", t.pill);
+    set("--gh-accent", a[0]); set("--gh-accent-hover", a[1]); set("--gh-bubble-out-1", a[2]); set("--gh-bubble-out-2", a[3]);
+    set("--gh-wall-image", w.css); set("--gh-wall-size", w.size); set("--gh-wall-pos", w.pos);
+    set("--gh-text-scale", String(pref("textScale")));
+    set("--gh-radius-md", pref("bubbleRadius") + "px");
+    const flag = (name, on) => { if (on) host.setAttribute(name, ""); else host.removeAttribute(name); };
+    flag("data-flat-bubbles", pref("bubbleStyle") === "flat");
+    flag("data-compact", !!pref("compactList"));
+    flag("data-no-stories", !pref("showStoriesRail"));
+    flag("data-hide-previews", !!pref("hidePreviews"));
+    flag("data-no-times", !pref("showTimes"));
+    // the app's own background (seen for a moment while the keyboard moves) follows the theme
+    try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST theme " + pref("theme") + "/" + pref("accent") }).catch(() => {}); } catch (e) {}
+    api.setReadReceipts(!!pref("readReceipts")).catch(() => {});
+  }
+
+  function nativeSetting(key, def) { try { return typeof window.dgSetting === "function" ? window.dgSetting(key, def) : def; } catch (e) { return def; } }
+  function setNativeSetting(key, v) { try { if (typeof window.dgSetSetting === "function") window.dgSetSetting(key, v); } catch (e) {} }
+
+  function buildSettings(ctx) {
+    const wrap = el("div", "gh-settings");
+    const s = { el: wrap, stack: [] };
+    wrap.addEventListener("click", (e) => e.stopPropagation());
+    return s;
+  }
+  function openSettings(ctx) {
+    haptic();
+    const s = ctx.settings;
+    s.el.innerHTML = "";
+    s.stack = [];
+    s.el.dataset.open = "1";
+    pushSettingsPage(ctx, "main");
+  }
+  function closeSettings(ctx) {
+    const s = ctx.settings;
+    s.el.dataset.open = "0";
+    setTimeout(() => { if (s.el.dataset.open !== "1") s.el.innerHTML = ""; }, 320);
+  }
+  function pushSettingsPage(ctx, name) {
+    const s = ctx.settings;
+    const page = el("div", "gh-set-page");
+    const prev = s.stack[s.stack.length - 1];
+    const head = el("div", "gh-set-head");
+    const back = el("button", "gh-set-back gh-hit");
+    back.append(icon("back", 22), Object.assign(el("span"), { textContent: prev ? SETTINGS_TITLES[prev.name] : "Chats" }));
+    back.addEventListener("click", () => { haptic("light"); popSettingsPage(ctx); });
+    const title = el("div", "gh-set-title"); title.textContent = SETTINGS_TITLES[name];
+    head.append(back, title, el("div", "gh-set-head-spacer"));
+    const body = el("div", "gh-set-body gh-scroll");
+    page.append(head, body);
+    SETTINGS_PAGES[name](ctx, body, page);
+    s.el.appendChild(page);
+    s.stack.push({ name, page });
+    if (prev) { requestAnimationFrame(() => { prev.page.dataset.under = "1"; page.dataset.in = "1"; }); page.dataset.in = "0"; }
+    else page.dataset.in = "1";
+    // swipe from the left edge to go back, like every iOS screen
+    let x0 = null, dx = 0;
+    page.addEventListener("touchstart", (e) => { const t = e.touches[0]; x0 = t.clientX < 28 ? t.clientX : null; dx = 0; }, { passive: true });
+    page.addEventListener("touchmove", (e) => { if (x0 == null) return; dx = Math.max(0, e.touches[0].clientX - x0); page.style.transition = "none"; page.style.transform = `translateX(${dx}px)`; }, { passive: true });
+    page.addEventListener("touchend", () => { if (x0 == null) return; page.style.transition = ""; page.style.transform = ""; if (dx > 90) popSettingsPage(ctx); x0 = null; }, { passive: true });
+  }
+  function popSettingsPage(ctx) {
+    const s = ctx.settings;
+    if (s.stack.length <= 1) { closeSettings(ctx); return; }
+    const top = s.stack.pop();
+    const prev = s.stack[s.stack.length - 1];
+    top.page.dataset.in = "0";
+    prev.page.dataset.under = "0";
+    if (prev.refresh) prev.refresh();
+    setTimeout(() => top.page.remove(), 320);
+  }
+
+  // ---- building blocks -------------------------------------------------------------------------------
+  function setGroup(body, title, footer) {
+    if (title) { const h = el("div", "gh-set-group-title"); h.textContent = title; body.appendChild(h); }
+    const g = el("div", "gh-set-group");
+    body.appendChild(g);
+    if (footer) { const f = el("div", "gh-set-group-foot"); f.textContent = footer; body.appendChild(f); }
+    return g;
+  }
+  function setRow(group, opts) {
+    const row = el(opts.onClick ? "button" : "div", "gh-set-row" + (opts.onClick ? " gh-press" : ""));
+    if (opts.icon) { const ic = el("span", "gh-set-icon"); ic.style.background = opts.tint || "var(--gh-accent)"; ic.appendChild(icon(opts.icon, 17)); row.appendChild(ic); }
+    const label = el("span", "gh-set-label"); label.textContent = opts.label; row.appendChild(label);
+    if (opts.value != null) { const v = el("span", "gh-set-value"); v.textContent = opts.value; row.appendChild(v); row._value = v; }
+    if (opts.toggle) {
+      const sw = el("span", "gh-switch"); sw.dataset.on = opts.toggle.get() ? "1" : "0"; row.appendChild(sw);
+      row.classList.add("gh-press");
+      row.addEventListener("click", () => { const on = sw.dataset.on !== "1"; sw.dataset.on = on ? "1" : "0"; haptic("light"); opts.toggle.set(on); });
+    }
+    if (opts.onClick) { row.appendChild(Object.assign(icon("back", 16, "gh-set-chev"))); row.addEventListener("click", () => { haptic("light"); opts.onClick(row); }); }
+    if (opts.danger) row.classList.add("gh-set-danger");
+    group.appendChild(row);
+    return row;
+  }
+  function setChoice(group, options, get, set) { // a checkmark list
+    const rows = [];
+    for (const [val, label] of options) {
+      const row = el("button", "gh-set-row gh-press");
+      const l = el("span", "gh-set-label"); l.textContent = label;
+      const ck = el("span", "gh-set-check"); ck.appendChild(icon("check", 18));
+      row.append(l, ck);
+      row.addEventListener("click", () => { haptic("light"); set(val); paint(); });
+      group.appendChild(row); rows.push([val, row]);
+    }
+    const paint = () => { for (const [val, row] of rows) row.dataset.on = String(get()) === String(val) ? "1" : "0"; };
+    paint();
+  }
+  function setSlider(group, opts) {
+    const row = el("div", "gh-set-row gh-set-slider-row");
+    const small = el("span", "gh-set-slider-cap"); small.textContent = opts.minLabel;
+    const input = el("input"); input.type = "range"; input.min = opts.min; input.max = opts.max; input.step = opts.step; input.value = opts.get();
+    input.className = "gh-set-slider";
+    const big = el("span", "gh-set-slider-cap gh-set-slider-cap-big"); big.textContent = opts.maxLabel;
+    input.addEventListener("input", () => { opts.set(Number(input.value)); });
+    input.addEventListener("change", () => haptic("light"));
+    row.append(small, input, big);
+    group.appendChild(row);
+  }
+  function previewChat(ctx) { // a tiny live chat that every appearance change repaints through the CSS vars
+    const box = el("div", "gh-set-preview");
+    box.innerHTML = `<div class="gh-set-prev-in">Did you see the new theme? 👀<span class="gh-set-prev-t">9:41</span></div>
+      <div class="gh-set-prev-out">It looks so clean ✨<span class="gh-set-prev-t">9:42 ✓✓</span></div>`;
+    return box;
+  }
+
+  const SETTINGS_TITLES = { main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
+  const SETTINGS_PAGES = {
+    main(ctx, body) {
+      const me = ctx.state.me || {};
+      const prof = el("div", "gh-set-profile");
+      prof.appendChild(makeAvatar(me, 84));
+      const nm = el("div", "gh-set-profile-name"); nm.textContent = me.name || "You";
+      const un = el("div", "gh-set-profile-user"); un.textContent = me.username ? "@" + me.username : "";
+      prof.append(nm, un);
+      body.appendChild(prof);
+      let g = setGroup(body);
+      setRow(g, { icon: "palette", tint: "linear-gradient(135deg,#ff5c9e,#9b59f6)", label: "Appearance", value: (THEMES[pref("theme")] || THEMES.night).name, onClick: () => pushSettingsPage(ctx, "appearance") });
+      setRow(g, { icon: "newMsg", tint: "#3e88f7", label: "Chats", onClick: () => pushSettingsPage(ctx, "chats") });
+      setRow(g, { icon: "lock", tint: "#8e8e93", label: "Privacy", onClick: () => pushSettingsPage(ctx, "privacy") });
+      setRow(g, { icon: "emoji", tint: "#f0b232", label: "Stickers & GIFs", onClick: () => pushSettingsPage(ctx, "media") });
+      setRow(g, { icon: "database", tint: "#23a55a", label: "Storage & Data", onClick: () => pushSettingsPage(ctx, "storage") });
+      g = setGroup(body);
+      setRow(g, { icon: "vibrate", tint: "#ff9433", label: "Haptics", toggle: { get: () => nativeSetting("haptics", true) !== false, set: (v) => setNativeSetting("haptics", v) } });
+      setRow(g, { icon: "motion", tint: "#1fb8c4", label: "Reduce Motion", toggle: { get: () => !!nativeSetting("reduceMotion", false), set: (v) => setNativeSetting("reduceMotion", v) } });
+      g = setGroup(body);
+      setRow(g, { icon: "settings", tint: "#636366", label: "Advanced", onClick: () => { try { window.dgOpenSettings && window.dgOpenSettings(); } catch (e) {} } });
+      setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "About Ghost", onClick: () => pushSettingsPage(ctx, "about") });
+    },
+    appearance(ctx, body, page) {
+      body.appendChild(previewChat(ctx));
+      let g = setGroup(body, "Theme");
+      const themes = el("div", "gh-set-cards");
+      for (const [key, t] of Object.entries(THEMES)) {
+        const card = el("button", "gh-set-theme gh-press");
+        card.style.setProperty("--c-app", t.app); card.style.setProperty("--c-in", t.in1); card.style.setProperty("--c-list", t.list);
+        card.innerHTML = `<span class="gh-set-theme-art"><i></i><b></b><i></i></span><span class="gh-set-theme-name"></span>`;
+        card.querySelector(".gh-set-theme-name").textContent = t.name;
+        card.dataset.on = pref("theme") === key ? "1" : "0";
+        card.addEventListener("click", () => { haptic("light"); setPref(ctx, "theme", key); for (const c of themes.children) c.dataset.on = "0"; card.dataset.on = "1"; });
+        themes.appendChild(card);
+      }
+      g.appendChild(themes);
+      g = setGroup(body, "Accent Color");
+      const sw = el("div", "gh-set-swatches");
+      for (const [key, a] of Object.entries(ACCENT_SET)) {
+        const b = el("button", "gh-set-swatch gh-press"); b.style.background = a[0]; b.setAttribute("aria-label", key);
+        b.dataset.on = pref("accent") === key ? "1" : "0";
+        b.addEventListener("click", () => { haptic("light"); setPref(ctx, "accent", key); for (const c of sw.children) c.dataset.on = "0"; b.dataset.on = "1"; });
+        sw.appendChild(b);
+      }
+      g.appendChild(sw);
+      g = setGroup(body, "Chat Wallpaper");
+      const walls = el("div", "gh-set-cards");
+      for (const [key, w] of Object.entries(WALLPAPERS)) {
+        const c = el("button", "gh-set-wall gh-press");
+        c.style.backgroundImage = w.css; c.style.backgroundSize = w.size; c.style.backgroundPosition = w.pos;
+        const n = el("span"); n.textContent = w.name; c.appendChild(n);
+        c.dataset.on = pref("wallpaper") === key ? "1" : "0";
+        c.addEventListener("click", () => { haptic("light"); setPref(ctx, "wallpaper", key); for (const x of walls.children) x.dataset.on = "0"; c.dataset.on = "1"; });
+        walls.appendChild(c);
+      }
+      g.appendChild(walls);
+      g = setGroup(body, "Message Text Size");
+      setSlider(g, { min: 0.85, max: 1.3, step: 0.05, minLabel: "A", maxLabel: "A", get: () => pref("textScale"), set: (v) => setPref(ctx, "textScale", v) });
+      g = setGroup(body, "Bubble Corners");
+      setSlider(g, { min: 6, max: 24, step: 1, minLabel: "▢", maxLabel: "◯", get: () => pref("bubbleRadius"), set: (v) => setPref(ctx, "bubbleRadius", v) });
+      g = setGroup(body, "Bubble Style");
+      setChoice(g, [["gradient", "Gradient"], ["flat", "Flat"]], () => pref("bubbleStyle"), (v) => setPref(ctx, "bubbleStyle", v));
+      g = setGroup(body, "Chat List");
+      setRow(g, { label: "Compact Rows", toggle: { get: () => !!pref("compactList"), set: (v) => setPref(ctx, "compactList", v) } });
+      setRow(g, { label: "Stories Row", toggle: { get: () => !!pref("showStoriesRail"), set: (v) => setPref(ctx, "showStoriesRail", v) } });
+      g = setGroup(body, "Profile Pictures", "Bitmoji shows each friend's Bitmoji; Initials uses coloured letters.");
+      setChoice(g, [["bitmoji", "Bitmoji"], ["initials", "Initials"]], () => pref("avatars"), (v) => { setPref(ctx, "avatars", v); refreshAllLists(ctx); });
+    },
+    chats(ctx, body) {
+      let g = setGroup(body, null, "Friends see your Bitmoji (as on a phone) at the bottom of the chat you have open.");
+      setRow(g, { label: "Show Me in Chats", toggle: { get: () => nativeSetting("showInChats", true) !== false, set: (v) => setNativeSetting("showInChats", v) } });
+      g = setGroup(body);
+      setRow(g, { label: "Double-Tap a Chat for Camera", toggle: { get: () => !!pref("doubleTapCamera"), set: (v) => setPref(ctx, "doubleTapCamera", v) } });
+      setRow(g, { label: "Send with Return Key", toggle: { get: () => !!pref("sendOnReturn"), set: (v) => setPref(ctx, "sendOnReturn", v) } });
+      setRow(g, { label: "Show Message Times", toggle: { get: () => !!pref("showTimes"), set: (v) => setPref(ctx, "showTimes", v) } });
+      g = setGroup(body, "Voice Messages");
+      setChoice(g, [["1", "Normal Speed"], ["1.5", "1.5×"], ["2", "2×"]], () => String(nativeSetting("voiceNoteSpeed", "1")), (v) => setNativeSetting("voiceNoteSpeed", v));
+    },
+    privacy(ctx, body) {
+      let g = setGroup(body, null, "Turn off to read chats without friends seeing \"Opened\". Snaps still count when you open them.");
+      setRow(g, { label: "Send Read Receipts", toggle: { get: () => !!pref("readReceipts"), set: (v) => setPref(ctx, "readReceipts", v) } });
+      g = setGroup(body, null, "Blurs message previews in the chat list until you open the chat.");
+      setRow(g, { label: "Hide Message Previews", toggle: { get: () => !!pref("hidePreviews"), set: (v) => setPref(ctx, "hidePreviews", v) } });
+      g = setGroup(body, null, "Your Bitmoji in chats you have open.");
+      setRow(g, { label: "Show Me in Chats", toggle: { get: () => nativeSetting("showInChats", true) !== false, set: (v) => setNativeSetting("showInChats", v) } });
+    },
+    media(ctx, body) {
+      let g = setGroup(body);
+      setRow(g, { label: "Autoplay GIFs", toggle: { get: () => !!pref("autoplayGifs"), set: (v) => setPref(ctx, "autoplayGifs", v) } });
+      g = setGroup(body, "GIF Content Rating");
+      setChoice(g, [["g", "G — everyone"], ["pg", "PG"], ["pg-13", "PG-13"], ["r", "R"]], () => nativeSetting("gifRating", "pg-13"), (v) => setNativeSetting("gifRating", v));
+      g = setGroup(body);
+      setRow(g, { label: "Clear Recent Stickers", danger: true, onClick: async () => { await storage.set("ghostStickerRecents", []); ctx.showToast("Recent stickers cleared"); } });
+      setRow(g, { label: "Clear Recent GIFs", danger: true, onClick: async () => { await storage.set("ghostGifRecents", []); ctx.showToast("Recent GIFs cleared"); } });
+    },
+    storage(ctx, body) {
+      let g = setGroup(body, null, "Downloaded photos, stickers and the sticker list are kept while Ghost is open. Clearing frees memory; they load again when needed.");
+      setRow(g, { label: "Clear Media Cache", onClick: () => { mediaCache.clear(); storyThumbs.clear(); ctx.showToast("Media cache cleared"); } });
+      setRow(g, { label: "Refresh Sticker List", onClick: async () => { stickerCatalog = null; await storage.set("ghostBitmojiCatalog", null); ctx.showToast("Sticker list will reload"); } });
+      g = setGroup(body);
+      setRow(g, { label: "Reset All Ghost Settings", danger: true, onClick: () => { prefs = Object.assign({}, PREF_DEFAULTS); storage.set("ghostPrefs", prefs); applyPrefs(ctx); ctx.showToast("Settings reset"); popSettingsPage(ctx); } });
+    },
+    about(ctx, body) {
+      const hero = el("div", "gh-set-about");
+      const logo = el("div", "gh-set-about-logo"); logo.appendChild(icon("ghost", 44));
+      const nm = el("div", "gh-set-about-name"); nm.textContent = "Ghost";
+      const v = el("div", "gh-set-about-ver"); v.textContent = "Messaging, reimagined.";
+      hero.append(logo, nm, v);
+      body.appendChild(hero);
+      const g = setGroup(body, null, "Ghost is a personal project. It runs Snapchat Web underneath and sends everything through Snapchat's own code.");
+      setRow(g, { label: "Reload", onClick: () => location.reload() });
+    },
+  };
+  function refreshAllLists(ctx) { try { renderHomeList(ctx); renderStories(ctx); } catch (e) {} }
+
+  // =====================================================================================================
   // Bitmoji stickers (the composer's smiley button). Catalog = Bitmoji's public sticker list (comic ids + tags, fetched
   // natively, cached a week); every sticker is drawn with YOUR Bitmoji (and, in a 1:1 chat, the friend's too) from
   // Snapchat's own render host, and sent as a real Bitmoji sticker message (bridge sendSticker).
@@ -2170,6 +2483,7 @@
   function buildStickerSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-gif-sheet gh-sticker-sheet");
+    sheet.style.display = "none"; // closed sheets are display:none (see closeSheetGeneric)
     sheet.innerHTML = `
       <div class="gh-sheet-grip"></div>
       <div class="gh-gif-search-row"><div class="gh-search"></div></div>
@@ -2280,6 +2594,7 @@
   function buildGifSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-gif-sheet");
+    sheet.style.display = "none";
     sheet.innerHTML = `
       <div class="gh-sheet-grip"></div>
       <div class="gh-gif-search-row"><div class="gh-search"></div></div>
@@ -2406,7 +2721,7 @@
   // =====================================================================================================
   function buildNewChatSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
-    const sheet = el("div", "gh-sheet", {});
+    const sheet = el("div", "gh-sheet", {}); sheet.style.display = "none";
     sheet.style.maxHeight = "88%";
     sheet.innerHTML = `
       <div class="gh-sheet-grip"></div>
@@ -2564,7 +2879,7 @@
   }
   function openViewerSequence(ctx, items, opts) {
     const v = ctx.viewer;
-    v.story = null;
+    if (!(opts && opts.keepStory)) v.story = null;
     v.single = false; v.items = items || []; v.idx = 0;
     v.el.dataset.open = "1"; v.bars.style.display = "flex"; v.avatarSlot.style.display = "flex";
     v.nameEl.textContent = (opts && opts.title) || "";
@@ -2592,8 +2907,9 @@
       const items = (res && res.items) || [];
       if (!items.length) { closeViewer(ctx); ctx.showToast("That story isn't available right now"); return; }
       story.viewed = true;
-      openViewerSequence(ctx, items, { title: story.user.name });
-      v.story = story;
+      v.marked = new Set();
+      v.story = story; // (set before the first paint so the first snap is counted too)
+      openViewerSequence(ctx, items, { title: story.user.name, keepStory: true });
       v.el.dataset.story = "1";
     }).catch((e) => { gtrail("story open failed " + (e && e.message || e)); closeViewer(ctx); ctx.showToast("Couldn't open that story"); });
   }
@@ -2618,6 +2934,11 @@
       img.src = ref.url || (ref.blob && URL.createObjectURL(ref.blob)) || "";
       v.media.appendChild(img);
       startViewerTimer(ctx, 5000);
+    }
+    // a story snap counts as watched once it's on screen (receipt to the friend + grey ring here), like Snapchat
+    if (v.story && ref.item != null) {
+      v.marked = v.marked || new Set();
+      if (!v.marked.has(ref.item)) { v.marked.add(ref.item); api.markStoryViewed(v.story.user.id, ref.item).then((r) => { if (r && r.ok === false) gtrail("story view " + r.reason); }).catch(() => {}); }
     }
     if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); } // snap caption/drawing
     if (!v.single) {
@@ -2701,6 +3022,7 @@
   function closeViewer(ctx) {
     const v = ctx.viewer;
     if (v.snap) { const sn = v.snap; v.snap = null; api.closeSnap(sn.convId, sn.msgId).catch(() => {}); if (sn.onClose) sn.onClose(); }
+    if (v.el.dataset.story === "1") setTimeout(() => refreshStories(ctx), 600); // ring goes grey right away
     v.el.dataset.story = "0";
     if (v.replyOpen) { v.replyOpen = false; v.el.dataset.reply = "0"; v.replyInput.blur(); }
     v.loadToken = (v.loadToken || 0) + 1;

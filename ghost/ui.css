@@ -60,8 +60,8 @@
   --gh-radius-lg: 20px;
   --gh-radius-md: 17px;
   --gh-radius-sm: 9px;
-  --gh-safe-t: env(safe-area-inset-top, 0px);
-  --gh-safe-b: env(safe-area-inset-bottom, 0px);
+  --gh-safe-t: var(--ghost-safe-t, env(safe-area-inset-top, 0px)); /* the app draws Ghost full-screen and sends these */
+  --gh-safe-b: var(--ghost-safe-b, env(safe-area-inset-bottom, 0px));
   --gh-safe-l: env(safe-area-inset-left, 0px);
   --gh-safe-r: env(safe-area-inset-right, 0px);
   --gh-spring: cubic-bezier(0.32, 0.72, 0, 1);
@@ -580,14 +580,14 @@ input, textarea {
   display: flex;
   flex-direction: column;
   position: relative;
-  background-color: #0e161f;
-  background-image:
+  background-color: var(--gh-bg-app);
+  background-image: var(--gh-wall-image,
     radial-gradient(ellipse 120% 70% at 15% -5%, rgba(62, 136, 247, 0.14), transparent 55%),
     radial-gradient(ellipse 120% 70% at 100% 100%, rgba(93, 74, 173, 0.12), transparent 55%),
     radial-gradient(circle, rgba(255,255,255,0.05) 1.4px, transparent 1.6px),
-    radial-gradient(circle, rgba(255,255,255,0.035) 1.1px, transparent 1.3px);
-  background-size: auto, auto, 64px 64px, 40px 40px;
-  background-position: 0 0, 0 0, 0 0, 20px 26px;
+    radial-gradient(circle, rgba(255,255,255,0.035) 1.1px, transparent 1.3px));
+  background-size: var(--gh-wall-size, auto, auto, 64px 64px, 40px 40px);
+  background-position: var(--gh-wall-pos, 0 0, 0 0, 0 0, 20px 26px);
   background-repeat: no-repeat, no-repeat, repeat, repeat;
 }
 /* Sticky like Telegram's own date rail: each separator is a flex item in the (column, scrolling) .gh-messages
@@ -690,7 +690,7 @@ input, textarea {
   background: linear-gradient(var(--gh-bubble-in-1), var(--gh-bubble-in-2));
   border-radius: var(--gh-radius-md);
   padding: 7px 9px 7px 11px;
-  font-size: 16.5px;
+  font-size: calc(16.5px * var(--gh-text-scale, 1));
   color: var(--gh-text);
   word-break: break-word;
   -webkit-user-select: text;
@@ -1408,7 +1408,7 @@ input, textarea {
 .gh-messages[data-group="1"] .gh-group[data-me="0"] { max-width: calc(80% + 40px); }
 .gh-group-col { max-width: 100%; }
 /* stacked sticky date pills: the newer one must fully hide the older one under it */
-.gh-day-sep { background-color: rgb(30, 44, 58) !important; min-width: 104px; text-align: center; box-sizing: border-box; }
+.gh-day-sep { background-color: var(--gh-pill-bg, rgb(30, 44, 58)) !important; min-width: 104px; text-align: center; box-sizing: border-box; }
 
 /* snaps, Snapchat-style: small coloured square + status, not a big block */
 .gh-snap-row {
@@ -1422,7 +1422,9 @@ input, textarea {
 .gh-snap-row[data-sound="1"] { --snap: #a05dcd; }
 .gh-snap-mark { width: 14px; height: 14px; border-radius: 3px; background: var(--snap); border: 2px solid var(--snap); box-sizing: border-box; flex: none; }
 .gh-snap-row[data-opened="1"] .gh-snap-mark { background: transparent; }
-.gh-snap-row[data-me="1"] .gh-snap-mark { clip-path: polygon(0 0, 100% 50%, 0 100%); border-radius: 0; width: 13px; height: 15px; } /* sent = arrow, like Snapchat */
+.gh-snap-row[data-me="1"] .gh-snap-mark { background: none; border: none; width: 13px; height: 15px; display: flex; }
+.gh-snap-mark svg path { fill: var(--snap); stroke: var(--snap); }
+.gh-snap-row[data-opened="1"] .gh-snap-mark svg path { fill: none; }
 .gh-snap-row[data-opened="1"] { color: var(--gh-text-secondary); font-weight: 500; }
 .gh-snap-row[data-opened="1"] .gh-snap-mark { border-color: var(--snap); }
 .gh-snap-time { font-size: 11.5px; font-weight: 400; color: var(--gh-text-tertiary); margin-left: 2px; }
@@ -1441,3 +1443,102 @@ input, textarea {
 .gh-mention-user { font-size: 13px; color: var(--gh-text-secondary); white-space: nowrap; }
 .gh-mention { color: var(--gh-accent); font-weight: 600; }
 .gh-group[data-me="1"] .gh-mention { color: #bfe0ff; }
+
+/* ---- Appearance prefs (Settings) ----------------------------------------------------------------------- */
+:host([data-flat-bubbles]) .gh-bubble { background: var(--gh-bubble-in-1); }
+:host([data-flat-bubbles]) .gh-group[data-me="1"] .gh-bubble { background: var(--gh-bubble-out-1); }
+:host([data-flat-bubbles]) .gh-group .gh-bubble.gh-sticker, :host([data-flat-bubbles]) .gh-group .gh-bubble.gh-gif-bubble { background: none; }
+:host([data-compact]) .gh-row { padding-top: 5px; padding-bottom: 5px; }
+:host([data-compact]) .gh-row .gh-avatar { width: 44px !important; height: 44px !important; }
+:host([data-no-stories]) .gh-stories { display: none; }
+:host([data-hide-previews]) .gh-row-preview { filter: blur(5px); opacity: 0.7; }
+:host([data-no-times]) .gh-bubble-meta { font-size: 0; }
+:host([data-no-times]) .gh-bubble-meta:not(:has(svg)) { display: none; }
+
+/* ---- Ghost Settings screen ------------------------------------------------------------------------------ */
+.gh-settings { position: absolute; inset: 0; z-index: 30; pointer-events: none; }
+.gh-settings[data-open="1"] { pointer-events: auto; }
+.gh-set-page {
+  position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--gh-bg-app);
+  transform: translateX(100%); transition: transform 0.32s var(--gh-spring), filter 0.32s ease;
+  box-shadow: -10px 0 30px rgba(0,0,0,0.35);
+}
+.gh-settings[data-open="1"] .gh-set-page[data-in="1"] { transform: none; }
+.gh-set-page[data-under="1"] { transform: translateX(-28%) !important; filter: brightness(0.7); }
+.gh-set-head {
+  flex: none; display: flex; align-items: center; justify-content: space-between;
+  padding: calc(var(--gh-safe-t) + 4px) 6px 6px; background: var(--gh-bg-header); border-bottom: 0.5px solid var(--gh-divider);
+}
+.gh-set-back { display: flex; align-items: center; gap: 0; color: var(--gh-accent); font-size: 17px; min-width: 90px; justify-content: flex-start; padding-right: 8px; }
+.gh-set-title { font-weight: 700; font-size: 17px; }
+.gh-set-head-spacer { min-width: 90px; }
+.gh-set-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 16px calc(var(--gh-safe-b) + 30px); }
+.gh-set-group-title { margin: 22px 16px 7px; font-size: 13px; color: var(--gh-text-secondary); text-transform: uppercase; letter-spacing: 0.02em; }
+.gh-set-group { background: var(--gh-bg-list); border-radius: 14px; overflow: hidden; margin-top: 14px; }
+.gh-set-group-title + .gh-set-group { margin-top: 0; }
+.gh-set-group-foot { margin: 7px 16px 0; font-size: 12.5px; color: var(--gh-text-tertiary); line-height: 1.35; }
+.gh-set-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; padding: 8px 14px;
+  text-align: left; position: relative; color: var(--gh-text); font-size: 16px; background: none;
+}
+.gh-set-row + .gh-set-row::before { content: ""; position: absolute; top: 0; right: 0; left: 14px; height: 0.5px; background: var(--gh-divider); }
+.gh-set-row:has(.gh-set-icon) + .gh-set-row::before { left: 56px; }
+.gh-set-row.gh-press:active { background: rgba(255,255,255,0.06); }
+.gh-set-icon { width: 30px; height: 30px; border-radius: 8px; flex: none; display: flex; align-items: center; justify-content: center; color: #fff; }
+.gh-set-label { flex: 1; min-width: 0; }
+.gh-set-value { color: var(--gh-text-secondary); font-size: 15px; }
+.gh-set-chev { transform: rotate(180deg); color: var(--gh-text-tertiary); flex: none; }
+.gh-set-danger .gh-set-label { color: var(--gh-danger); }
+.gh-set-check { color: var(--gh-accent); opacity: 0; transition: opacity 0.15s ease; }
+.gh-set-row[data-on="1"] .gh-set-check { opacity: 1; }
+.gh-switch { width: 51px; height: 31px; border-radius: 16px; background: rgba(120,120,128,0.36); position: relative; flex: none; transition: background 0.2s ease; }
+.gh-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.3); transition: transform 0.25s var(--gh-spring); }
+.gh-switch[data-on="1"] { background: #34c759; }
+.gh-switch[data-on="1"]::after { transform: translateX(20px); }
+.gh-set-profile { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 16px 0 6px; }
+.gh-set-profile .gh-avatar { width: 88px !important; height: 88px !important; margin-bottom: 8px; box-shadow: 0 8px 26px rgba(0,0,0,0.35); }
+.gh-set-profile-name { font-size: 22px; font-weight: 700; }
+.gh-set-profile-user { font-size: 15px; color: var(--gh-text-secondary); }
+.gh-set-preview {
+  margin-top: 10px; border-radius: 16px; padding: 16px 12px; display: flex; flex-direction: column; gap: 6px;
+  background-color: var(--gh-bg-app); background-image: var(--gh-wall-image); background-size: var(--gh-wall-size); background-position: var(--gh-wall-pos);
+  border: 0.5px solid var(--gh-divider);
+}
+.gh-set-prev-in, .gh-set-prev-out {
+  max-width: 78%; padding: 7px 11px; border-radius: var(--gh-radius-md); font-size: calc(16px * var(--gh-text-scale, 1)); position: relative;
+}
+.gh-set-prev-in { align-self: flex-start; background: linear-gradient(var(--gh-bubble-in-1), var(--gh-bubble-in-2)); }
+.gh-set-prev-out { align-self: flex-end; background: linear-gradient(var(--gh-bubble-out-1), var(--gh-bubble-out-2)); }
+:host([data-flat-bubbles]) .gh-set-prev-in { background: var(--gh-bubble-in-1); }
+:host([data-flat-bubbles]) .gh-set-prev-out { background: var(--gh-bubble-out-1); }
+.gh-set-prev-t { font-size: 11px; opacity: 0.6; margin-left: 8px; }
+.gh-set-cards { display: flex; gap: 10px; overflow-x: auto; padding: 12px; scrollbar-width: none; }
+.gh-set-cards::-webkit-scrollbar { display: none; }
+.gh-set-theme { flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 12.5px; color: var(--gh-text-secondary); }
+.gh-set-theme-art {
+  width: 74px; height: 96px; border-radius: 12px; background: var(--c-app); border: 2px solid transparent;
+  display: flex; flex-direction: column; justify-content: center; gap: 6px; padding: 10px 8px; box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.12);
+  transition: border-color 0.15s ease;
+}
+.gh-set-theme-art i { display: block; height: 12px; width: 70%; border-radius: 6px; background: var(--c-in); }
+.gh-set-theme-art b { display: block; height: 12px; width: 60%; border-radius: 6px; background: var(--gh-accent); align-self: flex-end; opacity: 0.85; }
+.gh-set-theme[data-on="1"] .gh-set-theme-art { border-color: var(--gh-accent); }
+.gh-set-theme[data-on="1"] { color: var(--gh-text); font-weight: 600; }
+.gh-set-swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; padding: 14px; }
+.gh-set-swatch { aspect-ratio: 1; border-radius: 50%; box-shadow: 0 0 0 0 var(--gh-bg-list); transition: box-shadow 0.15s ease, transform 0.15s ease; }
+.gh-set-swatch[data-on="1"] { box-shadow: 0 0 0 3px var(--gh-bg-list), 0 0 0 5px #fff; }
+.gh-set-wall {
+  flex: none; width: 74px; height: 110px; border-radius: 12px; background-color: var(--gh-bg-app); position: relative;
+  border: 2px solid transparent; box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.12); overflow: hidden;
+}
+.gh-set-wall span { position: absolute; left: 0; right: 0; bottom: 6px; text-align: center; font-size: 11.5px; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.6); }
+.gh-set-wall[data-on="1"] { border-color: var(--gh-accent); }
+.gh-set-slider-row { gap: 14px; }
+.gh-set-slider-cap { color: var(--gh-text-secondary); font-size: 13px; width: 16px; text-align: center; }
+.gh-set-slider-cap-big { font-size: 20px; }
+.gh-set-slider { flex: 1; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px; background: rgba(120,120,128,0.36); outline: none; }
+.gh-set-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 28px; height: 28px; border-radius: 50%; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
+.gh-set-about { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 26px 0 10px; }
+.gh-set-about-logo { width: 88px; height: 88px; border-radius: 22px; display: flex; align-items: center; justify-content: center; color: #fff; background: linear-gradient(135deg, #5865f2, var(--gh-accent)); box-shadow: 0 10px 30px color-mix(in srgb, var(--gh-accent) 40%, transparent); }
+.gh-set-about-name { font-size: 24px; font-weight: 800; margin-top: 8px; }
+.gh-set-about-ver { color: var(--gh-text-secondary); }

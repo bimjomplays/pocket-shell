@@ -384,6 +384,35 @@
     if (!sendHelperCache.codec || !sendHelperCache.proxy) trail("send-helpers", "missing " + Object.keys(sendHelperCache).filter((k) => !sendHelperCache[k]).join(","), "error");
     return sendHelperCache;
   }
+  // Story view receipts, as Snapchat's own story player sends them (main.js, search 'fus_media_load_start'):
+  //   receipts.send(...receipts.build(meIdObj, [{snapId, ownerUserId, shareCount: 0, viewTimeMs, snapExpirationTimeMs,
+  //                                               snapCreationTimeMs, wasRewatched}]))    -> the friend sees you viewed it
+  //   friendStories.setFriendStorySnapWatchState(posterIdObj, snapId, {...})                 -> the ring turns grey here
+  // Both helpers are module-private names, so they're found from the module's own source text.
+  let storyReceiptCache;
+  function localExport(src, localName) {
+    const m = new RegExp("[{,]([\\w$]+):\\(\\)=>" + localName.replace(/\$/g, "\\$") + "[,}]").exec(src);
+    return m && m[1];
+  }
+  function storyReceiptHelpers() {
+    if (storyReceiptCache !== undefined) return storyReceiptCache;
+    storyReceiptCache = null;
+    safe("story-receipts", () => {
+      const factories = webpackRequire && webpackRequire.m;
+      for (const id of Object.keys(factories || {})) {
+        const src = String(factories[id]);
+        if (!src.includes("read_receipts_batch_size")) continue;
+        const sendName = (/(?:const |,)([\w$]+)=\(0,[\w$]+\.[\w$]+\)\(\{func:async\(\.\.\.e\)=>\{[^]{0,120}read_receipts_batch_size/.exec(src) || [])[1];
+        const buildName = (/function ([\w$]+)\(e,t\)\{const n=\(0,[\w$]+\.[\w$]+\)\(e\),i=\[\];for\(const e of t\)i\.push\(\{snapId:e\.snapId,viewerUserId/.exec(src) || [])[1];
+        const exp = webpackRequire(id);
+        const send = sendName && exp[localExport(src, sendName)], build = buildName && exp[localExport(src, buildName)];
+        if (typeof send === "function" && typeof build === "function") { storyReceiptCache = { send, build }; return; }
+      }
+      trail("story-receipts", "helpers not found", "error");
+    });
+    return storyReceiptCache;
+  }
+  function uuidObj(str) { return { id: Uint8Array.from(String(str).replace(/-/g, "").match(/../g).map((x) => parseInt(x, 16))), str }; }
   let lastStory = null;
   let storyThumbFnCache;
   function storyThumbFn() {
@@ -893,8 +922,9 @@
   // used to send it once on open with the last Map key, before new messages had loaded - so friends' messages stayed
   // unread. Only for the chat on screen, and not while Ghost is in the background.
   const lastDisplayed = new Map();
+  let readReceiptsOn = true; // Settings > Privacy > Send Read Receipts
   function markDisplayed(conversationId) {
-    if (document.hidden || !openConversations.has(conversationId)) return;
+    if (!readReceiptsOn || document.hidden || !openConversations.has(conversationId)) return;
     const entry = conversationEntry(conversationId);
     const msgs = entry && entry.messages;
     if (!msgs || typeof msgs.values !== "function") return;
@@ -1295,7 +1325,7 @@
       const perItem = await Promise.all(items.map((item) => resolveMediaInfos((item && item.mediaLayers) || [], undefined, "ghost_story").catch(() => [])));
       const media = [];
       perItem.forEach((list, i) => { for (const m of list) { m.item = i; media.push(m); } });
-      lastStory = { userId, items, conversationId: (bundle && (bundle.conversationId || (bundle.bundle && bundle.bundle.bundleMetadata && bundle.bundle.bundleMetadata.conversationId))) };
+      lastStory = { userId, key, items, conversationId: (bundle && (bundle.conversationId || (bundle.bundle && bundle.bundle.bundleMetadata && bundle.bundle.bundleMetadata.conversationId))) };
       // NOT marking watched: the real write (setFriendStorySnapWatchState) needs a snapOwnerId {highBits,lowBits}
       // shape we could not pin down safely without risking a malformed write to the account - see BRIDGE_NOTES.md
       // "openStory". Fetching the media itself does not mark it seen (device-verified: playbackData for several
@@ -1362,6 +1392,34 @@
 
     // Thumbnail for the story rail, exactly like Snapchat's own rail (main.js module with
     // "friend_stories_sync_resolve_thumb_failure"): resolve story.thumbnail with context "friend_stories".
+    // mark one snap of the story last opened with openStory as watched (called by the viewer when it's shown)
+    async markStoryViewed(userId, itemIndex) {
+      requireStore();
+      if (!lastStory || lastStory.userId !== userId) return { ok: false, reason: "story not open" };
+      const item = lastStory.items[itemIndex || 0];
+      const meta = item && item.itemMetadata;
+      if (!meta || !meta.snapId) return { ok: false, reason: "no snap" };
+      const fs = state().friendStories;
+      const posterKey = lastStory.key;
+      const me = meId();
+      const now = Date.now();
+      const watch = safe("story-watch-get", () => fs.watchState.get(posterKey), null) || {};
+      const rewatch = !!watch[meta.snapId];
+      const h = storyReceiptHelpers();
+      if (h && me) {
+        const receipts = h.build(uuidObj(me), [{ snapId: meta.snapId, ownerUserId: uuidObj(userId), shareCount: 0, viewTimeMs: now,
+          snapExpirationTimeMs: Number(meta.expirationTimestampMs), snapCreationTimeMs: Number(meta.creationTimestampMs), wasRewatched: rewatch }]);
+        Promise.resolve(h.send(...receipts)).catch((e) => trail("story-receipt", e, "error"));
+      }
+      if (typeof fs.setFriendStorySnapWatchState === "function") {
+        safe("story-watch-set", () => fs.setFriendStorySnapWatchState(posterKey, meta.snapId, {
+          snapId: meta.snapId, readReceiptState: { wasSaved: false, wasScreenshotted: false, wasScreenrecorded: false, wasRewatched: rewatch },
+          snapOwnerId: (() => { const t = new BigUint64Array(uuidObj(userId).id.slice().reverse().buffer); return { lowBits: t[0].toString(), highBits: t[1].toString() }; })(),
+          expirationTimestampMs: String(meta.expirationTimestampMs), storyType: 1 /* USER */, viewTimestampMs: String(now) }));
+      }
+      return { ok: !!h };
+    },
+
     async storyThumb(userId) {
       requireStore();
       const fs = (state() || {}).friendStories;
@@ -1409,6 +1467,8 @@
     // event never populate `media` for these kinds themselves (loading every photo/video/voice-note in a long
     // chat eagerly would be slow and would fetch+decrypt media nobody scrolled to) - `text`/reactions/etc. are
     // still delivered eagerly as before.
+    setReadReceipts(on) { readReceiptsOn = on !== false; if (readReceiptsOn) for (const id of openConversations) safe("displayed", () => markDisplayed(id)); return true; },
+
     // setPresence(conversationId) = I'm looking at this chat; setPresence(null) = I left it / the app is hidden.
     async setPresence(conversationId) {
       requireStore();
