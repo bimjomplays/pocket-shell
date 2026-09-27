@@ -1429,3 +1429,15 @@ input, textarea {
 .gh-snap-row[data-loading="1"] .gh-snap-mark { animation: gh-pulse 0.8s ease-in-out infinite; }
 .gh-snap-row.gh-press:active { transform: scale(0.97); }
 .gh-viewer-overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 1; }
+
+/* @mention suggestions, above the message box */
+.gh-mention-box { display: none; flex: none; max-height: 220px; overflow-y: auto; background: var(--gh-bg-header); border-top: 0.5px solid var(--gh-divider); }
+.gh-mention-box[data-open="1"] { display: block; animation: gh-fadein 0.15s ease; }
+.gh-mention-row { display: flex; align-items: center; gap: 10px; padding: 7px 14px; }
+.gh-mention-row:active { background: rgba(255,255,255,0.06); }
+.gh-mention-row .gh-avatar { width: 32px !important; height: 32px !important; }
+.gh-mention-ai { width: 32px; height: 32px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; color: #fff; background: linear-gradient(135deg, #7d5fff, var(--gh-accent)); }
+.gh-mention-name { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-mention-user { font-size: 13px; color: var(--gh-text-secondary); white-space: nowrap; }
+.gh-mention { color: var(--gh-accent); font-weight: 600; }
+.gh-group[data-me="1"] .gh-mention { color: #bfe0ff; }

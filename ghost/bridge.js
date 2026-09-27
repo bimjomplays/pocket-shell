@@ -1125,7 +1125,11 @@
           AnalyticsMessageId: (quoted && quoted.messageAnalytics && quoted.messageAnalytics.analyticsMessageId) || "" };
       }
       const cid = convIdObj(conversationId);
-      await (replyOpts ? m.sendTextMessage(cid, text, replyOpts) : m.sendTextMessage(cid, text));
+      // "@myai": Snapchat parses @username mentions out of the text itself, but My AI only answers when the send is
+      // flagged as a bot mention - sendTextMessage's 4th argument (main.js 66836 ue: botMention: flag && /(^|\s)@myai(\s|$)/).
+      // Without it My AI replied "I was not able to parse your message".
+      const botMention = /(^|\s)@myai(\s|$)/i.test(text);
+      await m.sendTextMessage(cid, text, replyOpts, botMention);
       return {};
     },
 

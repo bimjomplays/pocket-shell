@@ -993,6 +993,7 @@
         </div>
         <button class="gh-reply-bar-close gh-hit"></button>
       </div>
+      <div class="gh-mention-box" role="listbox"></div>
       <div class="gh-composer">
         <button class="gh-composer-btn gh-hit" data-act="attach"></button>
         <div class="gh-composer-field">
@@ -1067,6 +1068,12 @@
     screen.querySelector(".gh-reply-bar-close").addEventListener("click", () => { haptic("light"); setReplyTo(ctx, null); });
     conv.jump.addEventListener("click", () => scrollConvToBottom(ctx, true));
     conv.messages.addEventListener("scroll", () => onConvScroll(ctx), { passive: true });
+    // @mentions: typing "@" + letters offers My AI and (in groups) the people in the chat; picking one inserts
+    // "@username " - Snapchat itself turns @username / @myai in the text into real mentions when it sends.
+    conv.mentionBox = screen.querySelector(".gh-mention-box");
+    conv.textarea.addEventListener("input", () => updateMentions(ctx));
+    conv.textarea.addEventListener("click", () => updateMentions(ctx));
+    conv.textarea.addEventListener("blur", () => setTimeout(() => hideMentions(ctx), 150));
     const touched = () => { conv.userTouched = true; };
     conv.messages.addEventListener("touchstart", touched, { passive: true });
     conv.messages.addEventListener("wheel", touched, { passive: true });
@@ -1140,6 +1147,7 @@
     conv.rendered.clear();
     conv.replyTo = null;
     conv.textarea.value = "";
+    hideMentions(ctx);
     conv.sendBtn.dataset.show = "0";
     conv.micBtn.dataset.hide = "0";
     setReplyTo(ctx, null);
@@ -1384,7 +1392,11 @@
       case "text": {
         const b = el("div", "gh-bubble");
         if (isLast) b.dataset.tail = "1";
-        b.appendChild(document.createTextNode(m.text || ""));
+        // @mentions in the accent colour, like Snapchat
+        for (const part of String(m.text || "").split(/((?:^|(?<=\s))@[\w.\-]+)/)) {
+          if (/^@[\w.\-]+$/.test(part)) { const sp = el("span", "gh-mention"); sp.textContent = part; b.appendChild(sp); }
+          else if (part) b.appendChild(document.createTextNode(part));
+        }
         b.appendChild(tickMetaEl(m, isMe));
         if (m.failed) b.dataset.failed = "1";
         return b;
@@ -1457,7 +1469,11 @@
       }
       default: {
         const b = el("div", "gh-bubble gh-unknown");
-        b.appendChild(document.createTextNode(m.text || ""));
+        // @mentions in the accent colour, like Snapchat
+        for (const part of String(m.text || "").split(/((?:^|(?<=\s))@[\w.\-]+)/)) {
+          if (/^@[\w.\-]+$/.test(part)) { const sp = el("span", "gh-mention"); sp.textContent = part; b.appendChild(sp); }
+          else if (part) b.appendChild(document.createTextNode(part));
+        }
         b.appendChild(tickMetaEl(m, isMe));
         return b;
       }
@@ -1731,6 +1747,50 @@
     if (entry) { conv.messages.classList.remove("gh-loading-skel"); renderMessageList(ctx, conv, entry, { initial: true }); }
     else { conv.messages.replaceChildren(conv.topSpacer, conv.bottomSpacer); conv.messages.classList.add("gh-loading-skel"); }
   }
+  function mentionQuery(ta) {
+    const upto = ta.value.slice(0, ta.selectionStart == null ? ta.value.length : ta.selectionStart);
+    const mm = /(^|\s)@([\w.\-]*)$/.exec(upto);
+    return mm ? { q: mm[2].toLowerCase(), start: upto.length - mm[2].length - 1, end: upto.length } : null;
+  }
+  function hideMentions(ctx) { const b = ctx.conv.mentionBox; if (b && b.dataset.open === "1") { b.dataset.open = "0"; b.innerHTML = ""; } }
+  function updateMentions(ctx) {
+    const conv = ctx.conv, box = conv.mentionBox;
+    const mq = mentionQuery(conv.textarea);
+    if (!mq) { hideMentions(ctx); return; }
+    const cd = ctx.state.convById.get(ctx.state.currentConvId) || {};
+    const meId = ctx.state.me && ctx.state.me.id;
+    const people = [{ id: "myai", name: "My AI", username: "myai", ai: true }];
+    if (cd.isGroup) for (const p of cd.participants || []) if (p && p.id !== meId && p.username) people.push(p);
+    const list = people.filter((p) => !mq.q || (p.username || "").toLowerCase().startsWith(mq.q) || (p.name || "").toLowerCase().split(/\s+/).some((w) => w.startsWith(mq.q))).slice(0, 6);
+    if (!list.length) { hideMentions(ctx); return; }
+    box.innerHTML = "";
+    for (const p of list) {
+      const row = el("div", "gh-mention-row gh-press");
+      row.setAttribute("role", "option");
+      if (p.ai) { const av = el("div", "gh-mention-ai"); av.appendChild(icon("ghost", 18)); row.appendChild(av); }
+      else row.appendChild(makeAvatar(p, 32));
+      const nm = el("div", "gh-mention-name"); nm.textContent = p.name || p.username;
+      const un = el("div", "gh-mention-user"); un.textContent = "@" + p.username;
+      row.append(nm, un);
+      // mousedown/touchstart so the textarea keeps focus (the keyboard stays up)
+      const pick = (e) => {
+        e.preventDefault();
+        haptic("light");
+        const ta = conv.textarea, cur = mentionQuery(ta);
+        if (!cur) return;
+        const ins = "@" + p.username + " ";
+        ta.value = ta.value.slice(0, cur.start) + ins + ta.value.slice(cur.end);
+        const pos = cur.start + ins.length;
+        ta.setSelectionRange(pos, pos);
+        ta.dispatchEvent(new Event("input"));
+        hideMentions(ctx);
+      };
+      row.addEventListener("touchstart", pick, { passive: false });
+      row.addEventListener("mousedown", pick);
+      box.appendChild(row);
+    }
+    box.dataset.open = "1";
+  }
   function pinnedToBottom(conv) { return !conv.userTouched && nowMs() < (conv.pinUntil || 0); }
   function handleWindowScroll(ctx) {
     const conv = ctx.conv;
@@ -1858,6 +1918,7 @@
     if (!convId) return;
     haptic("light");
     conv.textarea.value = "";
+    hideMentions(ctx);
     conv.textarea.style.height = "auto";
     conv.sendBtn.dataset.show = "0";
     conv.micBtn.dataset.hide = "0";
