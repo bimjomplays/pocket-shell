@@ -232,6 +232,7 @@
     replaySnap: (id, msgId) => bridge.call("replaySnap", [id, msgId], 45000),
     newConversation: (userIds) => bridge.call("newConversation", [userIds]),
     chatColors: (convId) => bridge.call("chatColors", [convId]),
+    releaseMedia: (convId) => bridge.call("releaseMedia", [convId]),
     searchFriends: (q) => bridge.call("searchFriends", [q]),
     findUsers: (q) => bridge.call("findUsers", [q]),
     friendRequests: () => bridge.call("friendRequests"),
@@ -510,6 +511,14 @@
       }
       state.homeReady = true;
       state.ready = true;
+      // iOS killed the page (memory) and the app reloaded it: go straight back into the chat you were in
+      storage.get("ghostResume", "").then(async (flag) => {
+        if (String(flag) !== "1") return;
+        await storage.set("ghostResume", "");
+        const last = await storage.get("ghostLastConv", "");
+        uiTrail("resume after reload -> " + (last ? "last chat" : "home"));
+        if (last && state.convById.has(last)) setTimeout(() => openConversationScreen(ctx, last), 300);
+      }).catch(() => {});
       startStreakKeeper(ctx);
       api.friendRequests().then((r) => { ctx.friendReqCount = (r || []).length; }).catch(() => {});
       ctx.revealHome = () => { boot.classList.add("gh-boot-fade"); markReady(true); };
@@ -1395,6 +1404,8 @@
   async function openConversationScreen(ctx, conversationId) {
     haptic("light");
     closeChatSearch(ctx);
+    storage.set("ghostLastConv", conversationId);
+    if (ctx.state.currentConvId && ctx.state.currentConvId !== conversationId) scheduleMediaRelease(ctx, ctx.state.currentConvId);
     loadChatColors(ctx, conversationId);
     ctx.conv.openedAt = nowMs();
     ctx.conv.peekId = null;
@@ -1451,8 +1462,21 @@
     ctx.state.presenceConv = want;
     api.setPresence(want).then((r) => { if (r && r.ok === false) gtrail("presence " + r.reason); }).catch((e) => gtrail("presence failed " + (e && e.message || e)));
   }
+  // Photos/videos/voice notes of a chat you've left are freed a little later (bridge releaseMedia + our cache),
+  // unless you went back into it. Keeping every chat's media forever made iOS kill the page after a few chats
+  // (trail.txt 2026-09-27: "WEB PROCESS CRASHED" -> Ghost reloaded with its loading screen).
+  function scheduleMediaRelease(ctx, convId) {
+    if (!convId) return;
+    setTimeout(() => {
+      if (ctx.state.currentConvId === convId) return;
+      for (const k of Array.from(mediaCache.keys())) if (k.startsWith(convId + "|")) mediaCache.delete(k);
+      api.releaseMedia(convId).catch(() => {});
+    }, 4000);
+  }
   function closeConversationScreen(ctx) {
     closeChatSearch(ctx);
+    scheduleMediaRelease(ctx, ctx.state.currentConvId);
+    storage.set("ghostLastConv", "");
     const id = ctx.state.currentConvId;
     if (id) api.closeConversation(id).catch(() => {});
     ctx.state.currentConvId = null;
@@ -1476,10 +1500,14 @@
     } else {
       start = clamp(conv.windowStart, 0, total);
       end = clamp(Math.max(conv.windowEnd, total - 1), start, total);
-      if (opts.stick) end = total; // new message(s) arrived — extend the window to include them
+      // If the newest message was on screen, the newest message stays on screen - whatever else changed (a
+      // re-sent slice, a read receipt...). Before, an update that wasn't counted as "new message arrived" kept the
+      // old end, so your newest message wasn't drawn until you scrolled (device screenshots 2026-09-27).
+      if (opts.stick || conv.windowEnd >= (conv._lastTotal || 0)) end = total;
     }
     conv.windowStart = start;
     conv.windowEnd = end;
+    conv._lastTotal = total;
     if (opts.initial && !conv.unreadBoundaryComputed) {
       conv.unreadBoundaryComputed = true;
       const n = conv.pendingUnreadForDivider || 0;
@@ -1870,13 +1898,13 @@
         if (gid) (async () => {
           const img = media.querySelector("img");
           try {
-            const bytes = await gmBytes(giphyMedia(gid, "200w.mp4"));
+            const mp4Url = await gifMp4Url(gid);
             const v = el("video");
             v.muted = true; v.loop = true; v.playsInline = true;
             if (pref("autoplayGifs")) v.autoplay = true;
             else { v.preload = "metadata"; v.addEventListener("click", (e) => { e.stopPropagation(); if (v.paused) v.play().catch(() => {}); else v.pause(); }); }
             v.setAttribute("playsinline", ""); v.setAttribute("muted", "");
-            v.src = URL.createObjectURL(new Blob([bytes], { type: "video/mp4" }));
+            v.src = mp4Url;
             v.addEventListener("loadeddata", () => { if (img) img.remove(); v.play().catch(() => {}); }, { once: true });
             v.addEventListener("error", () => { gtrail("gif video failed " + gid); v.remove(); giphyPreviewUrl(gid).then((r) => { if (img && r && r.dataUrl) img.src = r.dataUrl; }); }, { once: true });
             media.insertBefore(v, media.firstChild);
@@ -2391,8 +2419,12 @@
       // because of the loadOlderMessages-never-fires bug fixed just above it). The rest of what was just
       // fetched is already sitting in conv._all, ready to be revealed near-instantly (no network) by the very
       // next ordinary scroll-driven window-shift once the user keeps scrolling toward it.
-      conv.windowStart = Math.max(0, conv.windowStart - OVERSCAN);
-      if (conv.windowEnd - conv.windowStart > CHUNK * 4) conv.windowEnd = conv.windowStart + CHUNK * 4; // backstop
+      // (not when you're at the newest message - e.g. a load that started while the chat was opening: cutting the
+      // window's end then dropped your newest messages until you scrolled)
+      if (!conv.atBottom) {
+        conv.windowStart = Math.max(0, conv.windowStart - OVERSCAN);
+        if (conv.windowEnd - conv.windowStart > CHUNK * 4) conv.windowEnd = conv.windowStart + CHUNK * 4; // backstop
+      }
       renderMessageList(ctx, conv, entry, {}); // (paintWindow keeps the view where it was as the older messages appear above)
     } catch (e) { /* leave as-is; a manual pull will retry */ }
     conv._loadingOlder = false;
@@ -4506,6 +4538,18 @@
       s.body.appendChild(tile);
     }
   }
+  // One blob URL per GIF video, reused by every repaint (the chat re-draws its bubbles all the time; each used to
+  // make - and never free - a new copy, which is part of what grew the page until iOS killed it). Oldest dropped.
+  const gifMp4Cache = new Map();
+  async function cachedBlobUrl(key, load) {
+    if (gifMp4Cache.has(key)) { const v = gifMp4Cache.get(key); gifMp4Cache.delete(key); gifMp4Cache.set(key, v); return v; }
+    const p = load().then((bytes) => URL.createObjectURL(new Blob([bytes], { type: "video/mp4" })));
+    gifMp4Cache.set(key, p);
+    p.catch(() => gifMp4Cache.delete(key));
+    while (gifMp4Cache.size > 80) { const [k, old] = gifMp4Cache.entries().next().value; gifMp4Cache.delete(k); Promise.resolve(old).then((u) => setTimeout(() => URL.revokeObjectURL(u), 5000), () => {}); }
+    return p;
+  }
+  function gifMp4Url(gid) { return cachedBlobUrl("giphy:" + gid, () => gmBytes(giphyMedia(gid, "200w.mp4"))); }
   function gifEntry(g) { return g.src === "tenor" ? { src: "tenor", id: g.id, w: g.w, h: g.h, p: g.p, f: g.f, v: g.v } : { id: g.id, w: g.w, h: g.h }; }
   // Animated previews: animated images stay on their first frame on the phone (see the GIF bubble note), so a tile
   // shows Tenor's still/WebP first and swaps in its small looping MP4 once it scrolls into view; off-screen = paused.
@@ -4519,11 +4563,11 @@
         if (t._video) { t._video.play().catch(() => {}); continue; }
         if (t._loading) continue;
         t._loading = true;
-        gmBytes(t._gif.v).then((bytes) => {
+        cachedBlobUrl("tenor:" + t._gif.v, () => gmBytes(t._gif.v)).then((url) => {
           const v = el("video");
           v.muted = true; v.loop = true; v.playsInline = true; v.autoplay = true;
           v.setAttribute("playsinline", ""); v.setAttribute("muted", "");
-          v.src = URL.createObjectURL(new Blob([bytes], { type: "video/mp4" }));
+          v.src = url;
           v.addEventListener("loadeddata", () => { t.classList.add("gh-gif-playing"); v.play().catch(() => {}); }, { once: true });
           t._video = v;
           t.insertBefore(v, t.firstChild);

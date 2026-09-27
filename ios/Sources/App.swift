@@ -938,6 +938,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             let text = "crash at \(Date()) urls \(urlLog)\n"
             try? text.write(to: dir.appendingPathComponent("crash-\(Int(Date().timeIntervalSince1970)).txt"), atomically: true, encoding: .utf8)
         }
+        // Ghost reopens the chat you were in after this reload (ui.js reads gm.ghostResume)
+        if Self.ghostMode { UserDefaults.standard.set("1", forKey: "gm.ghostResume") }
         webView.load(URLRequest(url: Self.home))
     }
 

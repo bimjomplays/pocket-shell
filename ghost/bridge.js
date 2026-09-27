@@ -1407,6 +1407,13 @@
     if (inc && typeof inc.values === "function") for (const r of inc.values()) if (idOf(r.user_id) === id && r.type === 1 && !r.ignored_link) return "added-me";
     return "none";
   }
+  const mediaUrlsByConv = new Map();
+  function trackMedia(conversationId, list) {
+    if (!conversationId || !Array.isArray(list)) return;
+    let set = mediaUrlsByConv.get(conversationId);
+    if (!set) mediaUrlsByConv.set(conversationId, (set = new Set()));
+    for (const m of list) for (const u of [m && m.url, m && m.overlay]) if (typeof u === "string" && u.startsWith("blob:")) set.add(u);
+  }
   const methods = {
     status() {
       return { loggedIn: loggedIn(), me: meUser(), storeFound: !!store, version: VERSION };
@@ -1960,6 +1967,14 @@
       return { conversationId: conversationId || null };
     },
 
+    // Frees the blob: URLs Snapchat's resolver made for this chat's media (each loadMedia makes new ones and nobody
+    // revoked them - the page grew until iOS killed it). Snapchat keeps its own download cache, so opening the chat
+    // again just makes fresh URLs.
+    releaseMedia(conversationId) {
+      const set = mediaUrlsByConv.get(conversationId);
+      if (set) { for (const u of set) safe("revoke", () => URL.revokeObjectURL(u)); mediaUrlsByConv.delete(conversationId); }
+      return true;
+    },
     // Snapchat's own per-person colours in a group ({participantId, color: 0xRRGGBB int}, device 2026-09-27) -
     // the same colours the Snapchat app uses for names there. -> { userId: "#rrggbb" }
     chatColors(conversationId) {
@@ -2223,7 +2238,11 @@
     }
     Promise.resolve()
       .then(() => fn(...(Array.isArray(args) ? args : [])))
-      .then((result) => post({ ghost: "res", id, ok: true, result }))
+      .then((result) => {
+        // remember which chat each media URL belongs to, so leaving the chat can free them (releaseMedia)
+        if ((method === "loadMedia" || method === "openSnap" || method === "replaySnap") && result && Array.isArray(args)) trackMedia(args[0], result.media);
+        post({ ghost: "res", id, ok: true, result });
+      })
       .catch((err) => {
         trail(`method:${method}`, err);
         post({ ghost: "res", id, ok: false, error: errText(err) });
