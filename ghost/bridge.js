@@ -634,12 +634,10 @@
     pages++;
     safe("pageFeed", () => m.pageFeed());
   }, 900);
-  const allConversationIds = () => {
-    const m = messaging();
-    const ids = new Set(Object.keys(m.feed || {}));
-    for (const k of Object.keys(m.conversations || {})) ids.add(k);
-    return [...ids];
-  };
+  // Only what Snapchat's own chat list shows (the feed). messaging.conversations also holds other cached chats with
+  // no feed entry; those came out nameless ("Conversation") and, with no time, sorted to the very top - the blank
+  // rows you had to scroll past (device report 2026-09-27).
+  const allConversationIds = () => Object.keys(messaging().feed || {});
 
   // ------------------------------------------------------------------------------------------------
   // 4. events: `ready` once, `conversations` on every store change (throttled ~150ms per API.md).
