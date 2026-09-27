@@ -693,6 +693,18 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "trail":
             trail(body["text"] as? String ?? "")
             replyHandler(true, nil)
+        case "openURL": // Ghost: tapping a link in a message opens Safari (or the app that owns the link)
+            guard let str = body["url"] as? String, let url = URL(string: str), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return replyHandler(nil, "bad url") }
+            UIApplication.shared.open(url)
+            replyHandler(true, nil)
+        case "appIcon": // Ghost's Settings > Appearance > App Icon: nil name = the default icon
+            let name = body["name"] as? String
+            let alt = (name == nil || name == "default") ? nil : name
+            if body["get"] as? Bool == true { return replyHandler(UIApplication.shared.alternateIconName ?? "default", nil) }
+            guard UIApplication.shared.supportsAlternateIcons else { return replyHandler(nil, "not supported") }
+            UIApplication.shared.setAlternateIconName(alt) { error in
+                DispatchQueue.main.async { if let error { replyHandler(nil, error.localizedDescription) } else { replyHandler(true, nil) } }
+            }
         case "streakReminders": // Ghost's Streak Keeper: reminders at each streak time
             // plain values only: these go into UserNotifications' (Sendable) completion handlers
             let items: [(id: String, hour: Int, minute: Int, name: String, skipToday: Bool)] = (body["items"] as? [[String: Any]] ?? []).compactMap { (item: [String: Any]) -> (id: String, hour: Int, minute: Int, name: String, skipToday: Bool)? in

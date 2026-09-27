@@ -1734,3 +1734,104 @@ input, textarea {
 .gh-snap-row[data-saved="1"] { border-color: color-mix(in srgb, var(--gh-accent) 55%, transparent); }
 .gh-snap-row[data-saved="1"] .gh-snap-label { color: var(--gh-text); }
 .gh-snap-label, .gh-snap-time { white-space: nowrap; }
+
+/* ---- Ghost-only tools: chat search, jump flash, bookmarks, gallery, links ------------------------------------ */
+.gh-link { color: #9cc8ff; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; word-break: break-all; }
+.gh-group[data-me="1"] .gh-link { color: #fff; }
+mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1px; }
+@keyframes gh-flash { 0%, 100% { background: transparent; } 20%, 60% { background: color-mix(in srgb, var(--gh-accent) 28%, transparent); } }
+.gh-msg-flash { animation: gh-flash 1.4s ease; border-radius: 12px; }
+.gh-chat-search {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 12; background: var(--gh-bg-header);
+  padding: calc(var(--gh-safe-t) + 6px) 10px 8px; border-bottom: 0.5px solid var(--gh-divider);
+  display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: center;
+  transform: translateY(-100%); transition: transform 0.25s var(--gh-spring);
+}
+.gh-chat-search[data-open="1"] { transform: none; }
+.gh-chat-search-field { display: flex; align-items: center; gap: 7px; height: 36px; padding: 0 10px; border-radius: 11px; background: var(--gh-bg-panel-2); color: var(--gh-text-secondary); }
+.gh-chat-search-field input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: none; color: var(--gh-text); font-size: 16px; }
+.gh-chat-search-done { color: var(--gh-accent); font-size: 16px; font-weight: 600; background: none; padding: 0 4px; }
+.gh-chat-search-nav { grid-column: 1 / -1; display: flex; align-items: center; justify-content: flex-end; gap: 2px; color: var(--gh-text-secondary); font-size: 14px; min-height: 30px; }
+.gh-chat-search-count { margin-right: auto; padding-left: 4px; font-variant-numeric: tabular-nums; }
+.gh-chat-search-nav .gh-icon-btn { color: var(--gh-accent); }
+.gh-flip-y { transform: scaleY(-1); }
+.gh-bm-mark {
+  position: absolute; top: -6px; right: -8px; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  background: #f0b232; color: #111; box-shadow: 0 2px 6px rgba(0,0,0,0.35); pointer-events: none; z-index: 2;
+}
+.gh-bm-mark svg path { fill: currentColor; }
+.gh-group[data-me="1"] .gh-bm-mark { right: auto; left: -8px; }
+.gh-msg-swipe { position: relative; }
+.gh-chat-tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+.gh-chat-tool {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 6px; border-radius: 14px;
+  background: var(--gh-bg-list); color: var(--gh-accent); font-size: 13px; font-weight: 600;
+}
+.gh-chat-tool span { color: var(--gh-text); }
+.gh-chat-swatches { background: var(--gh-bg-list); border-radius: 14px; margin-top: 8px; }
+.gh-swatch-default { display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 13px; }
+.gh-seg { display: flex; gap: 4px; padding: 3px; margin-top: 6px; border-radius: 11px; background: var(--gh-bg-panel-2); }
+.gh-seg-btn { flex: 1; height: 32px; border-radius: 9px; background: none; color: var(--gh-text-secondary); font-weight: 600; font-size: 14px; }
+.gh-seg-btn[data-on="1"] { background: var(--gh-bg-panel); color: var(--gh-text); box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+.gh-gallery { margin-top: 12px; }
+.gh-gallery-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; border-radius: 12px; overflow: hidden; }
+.gh-gallery-tile { position: relative; aspect-ratio: 1; background: var(--gh-bg-panel); overflow: hidden; padding: 0; }
+.gh-gallery-tile img, .gh-gallery-tile video { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+.gh-gallery-tile[data-video="1"]::after { content: "▶"; position: absolute; left: 6px; bottom: 4px; color: #fff; font-size: 12px; text-shadow: 0 1px 3px rgba(0,0,0,0.7); }
+.gh-gallery-tile[data-snap="1"]::before { content: ""; position: absolute; top: 6px; right: 6px; width: 10px; height: 10px; border-radius: 3px; background: #f23c57; z-index: 1; }
+.gh-gallery-tile[data-empty="1"] { opacity: 0.35; }
+.gh-gallery-more { display: block; width: 100%; margin: 14px 0 6px; height: 44px; border-radius: 12px; background: var(--gh-bg-list); color: var(--gh-accent); font-weight: 600; font-size: 15px; }
+.gh-link-row { align-items: flex-start; }
+.gh-link-ic { width: 36px; height: 36px; border-radius: 9px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; background: var(--gh-accent); color: #fff; font-weight: 700; }
+.gh-link-host { font-weight: 600; font-size: 15px; }
+.gh-link-url { font-size: 13px; color: #9cc8ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-link-who, .gh-bm-top { font-size: 12.5px; color: var(--gh-text-secondary); }
+.gh-bm-row { align-items: center; }
+.gh-bm-text { font-size: 15px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.gh-bm-remove { color: var(--gh-text-tertiary); background: none; width: 30px; height: 30px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+.gh-empty-note { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 70px 30px; color: var(--gh-text-secondary); text-align: center; font-size: 17px; font-weight: 600; }
+.gh-empty-sub { font-size: 14px; font-weight: 400; }
+.gh-viewer { z-index: 36; } /* above Settings pages too (the gallery opens photos from there) */
+
+/* app icon picker */
+.gh-set-icons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px 8px; padding: 14px 10px; }
+.gh-set-appicon { display: flex; flex-direction: column; align-items: center; gap: 6px; background: none; color: var(--gh-text); font-size: 12px; }
+.gh-set-appicon-art { width: 58px; height: 58px; border-radius: 14px; display: flex; align-items: center; justify-content: center; box-shadow: 0 3px 10px rgba(0,0,0,0.35); transition: box-shadow 0.15s ease; }
+.gh-set-appicon-art svg { fill: currentColor; stroke: none; }
+.gh-set-appicon-art[data-outline="1"] svg { filter: drop-shadow(0 0 1.5px #000) drop-shadow(0 0 1px #000); }
+.gh-set-appicon[data-on="1"] .gh-set-appicon-art { box-shadow: 0 0 0 3px var(--gh-bg-list), 0 0 0 5px var(--gh-accent); }
+
+/* live wallpapers: blurred blobs / twinkling stars drifting behind a transparent message list (transform-only) */
+.gh-live-wall { position: absolute; inset: 0; overflow: hidden; background: var(--gh-bg-app); z-index: -1; pointer-events: none; } /* the screen gets isolation:isolate (ui.js setLiveWall) so -1 stays inside it */
+.gh-messages.gh-live-on { background: transparent !important; }
+.gh-live-wall i { position: absolute; border-radius: 50%; filter: blur(50px); opacity: 0.5; will-change: transform; }
+.gh-live-wall[data-kind="aurora"] .gh-live-b0 { width: 70%; height: 45%; left: -15%; top: 5%; background: #1fb8c4; animation: gh-drift-a 22s ease-in-out infinite alternate; }
+.gh-live-wall[data-kind="aurora"] .gh-live-b1 { width: 65%; height: 40%; right: -20%; top: 30%; background: #9b59f6; animation: gh-drift-b 26s ease-in-out infinite alternate; }
+.gh-live-wall[data-kind="aurora"] .gh-live-b2 { width: 60%; height: 40%; left: 10%; bottom: -5%; background: #3e88f7; animation: gh-drift-c 30s ease-in-out infinite alternate; }
+.gh-live-wall[data-kind="aurora"] .gh-live-b3 { width: 40%; height: 30%; right: 5%; top: -5%; background: #23a55a; opacity: 0.35; animation: gh-drift-b 34s ease-in-out infinite alternate-reverse; }
+.gh-live-wall[data-kind="lava"] i { opacity: 0.55; filter: blur(40px); }
+.gh-live-wall[data-kind="lava"] .gh-live-b0 { width: 55%; height: 35%; left: -10%; bottom: 0; background: #ff5c3a; animation: gh-rise 18s ease-in-out infinite alternate; }
+.gh-live-wall[data-kind="lava"] .gh-live-b1 { width: 50%; height: 32%; right: -10%; bottom: 10%; background: #ff9f2e; animation: gh-rise 23s ease-in-out infinite alternate-reverse; }
+.gh-live-wall[data-kind="lava"] .gh-live-b2 { width: 45%; height: 30%; left: 25%; top: 10%; background: #ec407a; animation: gh-drift-c 27s ease-in-out infinite alternate; }
+.gh-live-wall[data-kind="lava"] .gh-live-b3 { width: 35%; height: 25%; right: 10%; top: -5%; background: #9b59f6; animation: gh-drift-a 31s ease-in-out infinite alternate; }
+.gh-live-wall[data-kind="stars"] { background: radial-gradient(ellipse at 50% 120%, #1a2440, var(--gh-bg-app) 70%); }
+.gh-live-wall[data-kind="stars"] i {
+  inset: -50%; width: auto; height: auto; border-radius: 0; filter: none; opacity: 1;
+  background-image: radial-gradient(1.5px 1.5px at 20px 30px, #fff, transparent), radial-gradient(1px 1px at 90px 120px, #cfe0ff, transparent),
+    radial-gradient(1.2px 1.2px at 160px 60px, #fff, transparent), radial-gradient(1px 1px at 230px 180px, #fff, transparent);
+  background-size: 260px 220px;
+}
+.gh-live-wall[data-kind="stars"] .gh-live-b0 { animation: gh-stars 90s linear infinite, gh-twinkle 4s ease-in-out infinite alternate; }
+.gh-live-wall[data-kind="stars"] .gh-live-b1 { background-size: 340px 300px; opacity: 0.6; animation: gh-stars 140s linear infinite reverse, gh-twinkle 6s ease-in-out infinite alternate-reverse; }
+.gh-live-wall[data-kind="stars"] .gh-live-b2 { background-size: 420px 380px; opacity: 0.35; animation: gh-stars 200s linear infinite; }
+@keyframes gh-drift-a { to { transform: translate(35%, 25%) scale(1.2); } }
+@keyframes gh-drift-b { to { transform: translate(-30%, 20%) scale(0.85); } }
+@keyframes gh-drift-c { to { transform: translate(15%, -35%) scale(1.15); } }
+@keyframes gh-rise { to { transform: translate(10%, -120%) scale(1.25); } }
+@keyframes gh-stars { to { transform: translate(-260px, -220px); } }
+@keyframes gh-twinkle { from { opacity: 1; } to { opacity: 0.55; } }
+:host([data-reduce-motion]) .gh-live-wall i { animation: none !important; }
+.gh-set-wall[data-live] { background: linear-gradient(135deg, #1fb8c4, #9b59f6, #3e88f7) !important; background-size: 300% 300% !important; animation: gh-wallcard 6s ease-in-out infinite alternate; }
+.gh-set-wall[data-live="lava"] { background-image: linear-gradient(135deg, #ff5c3a, #ff9f2e, #ec407a) !important; }
+.gh-set-wall[data-live="stars"] { background: radial-gradient(1.5px 1.5px at 10px 14px, #fff, transparent), radial-gradient(1px 1px at 30px 40px, #fff, transparent), radial-gradient(ellipse at 50% 120%, #1a2440, #05070c) !important; background-size: 44px 52px, 44px 52px, auto !important; animation: none; }
+@keyframes gh-wallcard { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }

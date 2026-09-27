@@ -636,6 +636,9 @@
     const prevLast = prev && prev.messages.length ? prev.messages[prev.messages.length - 1].id : null;
     const newLast = entry.messages.length ? entry.messages[entry.messages.length - 1].id : null;
     const arrived = !prev || (newLast !== prevLast && entry.messages.length >= prev.messages.length);
+    // while fetchOlderPages is shifting the window (search, gallery, bookmark jumps), don't repaint underneath it:
+    // it repaints once when it's done
+    if (ctx.conv._quietLoad) { ctx.conv._missedUpdate = true; return; }
     renderMessageList(ctx, ctx.conv, entry, arrived ? { stick: true } : {});
   }
   // friends currently looking at the open chat (bridge "here" event, from Snapchat's presence session)
@@ -1350,6 +1353,7 @@
 
   async function openConversationScreen(ctx, conversationId) {
     haptic("light");
+    closeChatSearch(ctx);
     ctx.conv.peekId = null;
     applyChatWallpaper(ctx, conversationId);
     ctx.state.currentConvId = conversationId;
@@ -1398,6 +1402,7 @@
     api.setPresence(want).then((r) => { if (r && r.ok === false) gtrail("presence " + r.reason); }).catch((e) => gtrail("presence failed " + (e && e.message || e)));
   }
   function closeConversationScreen(ctx) {
+    closeChatSearch(ctx);
     const id = ctx.state.currentConvId;
     if (id) api.closeConversation(id).catch(() => {});
     ctx.state.currentConvId = null;
@@ -1567,6 +1572,7 @@
     hint.appendChild(icon("reply", 18));
     if (m.replyTo) swipe.appendChild(replyQuoteEl(m.replyTo));
     swipe.appendChild(bubbleEl(ctx, m, isMe, isLast));
+    if (ctx.state.currentConvId && isBookmarked(ctx.state.currentConvId, m.id)) { wrap.dataset.bm = "1"; const bm = el("span", "gh-bm-mark"); bm.appendChild(icon("bookmark", 11)); swipe.appendChild(bm); }
     if (m.reactions && m.reactions.length) swipe.appendChild(reactionsEl(ctx, m));
     if (isMe && m.failed) {
       const status = el("div", "gh-msg-status-fail");
@@ -1622,16 +1628,40 @@
     return wrap;
   }
 
+  // Message text: @mentions in the accent colour (like Snapchat), tappable links, and the chat-search match marked.
+  function appendRichText(ctx, b, text) {
+    const q = ctx && ctx.conv && ctx.conv.searchQ;
+    const plain = (t) => {
+      if (!q) { b.appendChild(document.createTextNode(t)); return; }
+      const low = t.toLowerCase(); let i = 0, j;
+      while ((j = low.indexOf(q, i)) !== -1) {
+        if (j > i) b.appendChild(document.createTextNode(t.slice(i, j)));
+        const mk = el("mark", "gh-hl"); mk.textContent = t.slice(j, j + q.length); b.appendChild(mk);
+        i = j + q.length;
+      }
+      if (i < t.length) b.appendChild(document.createTextNode(t.slice(i)));
+    };
+    for (const part of String(text || "").split(/((?:^|(?<=\s))@[\w.\-]+|https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]'])/i)) {
+      if (!part) continue;
+      if (/^@[\w.\-]+$/.test(part)) { const sp = el("span", "gh-mention"); sp.textContent = part; b.appendChild(sp); }
+      else if (/^https?:\/\//i.test(part)) {
+        const a = el("span", "gh-link"); a.textContent = part;
+        a.addEventListener("click", (e) => { e.stopPropagation(); openLink(part); });
+        b.appendChild(a);
+      } else plain(part);
+    }
+  }
+  function openLink(url) {
+    haptic("light");
+    try { window.webkit.messageHandlers.dg.postMessage({ op: "openURL", url }).catch(() => {}); } catch (e) { try { window.open(url, "_blank"); } catch (e2) {} }
+  }
+
   function bubbleEl(ctx, m, isMe, isLast) {
     switch (m.kind) {
       case "text": {
         const b = el("div", "gh-bubble");
         if (isLast) b.dataset.tail = "1";
-        // @mentions in the accent colour, like Snapchat
-        for (const part of String(m.text || "").split(/((?:^|(?<=\s))@[\w.\-]+)/)) {
-          if (/^@[\w.\-]+$/.test(part)) { const sp = el("span", "gh-mention"); sp.textContent = part; b.appendChild(sp); }
-          else if (part) b.appendChild(document.createTextNode(part));
-        }
+        appendRichText(ctx, b, m.text);
         b.appendChild(tickMetaEl(m, isMe));
         if (m.failed) b.dataset.failed = "1";
         return b;
@@ -2335,6 +2365,7 @@
         <div class="gh-action-item" data-act="reply"></div>
         <div class="gh-action-item" data-act="copy"></div>
         <div class="gh-action-item" data-act="save"></div>
+        <div class="gh-action-item" data-act="bookmark"></div>
         <div class="gh-action-item" data-act="fav"></div>
         <div class="gh-action-item" data-act="photos"></div>
         <div class="gh-action-item gh-action-danger" data-act="delete"></div>
@@ -2358,6 +2389,8 @@
     copyItem.append(icon("copy"), textSpan("Copy"));
     const saveItem = sheet.querySelector('[data-act="save"]');
     saveItem.append(icon("star"), textSpan("Save"));
+    const bookmarkItem = sheet.querySelector('[data-act="bookmark"]');
+    bookmarkItem.append(icon("bookmark"), textSpan("Bookmark"));
     const favItem = sheet.querySelector('[data-act="fav"]');
     favItem.append(icon("emoji"), textSpan("Add to Favorite Stickers"));
     const photosItem = sheet.querySelector('[data-act="photos"]');
@@ -2369,7 +2402,7 @@
     overlaysRoot.appendChild(sheet);
     function textSpan(t) { const s = el("span"); s.textContent = t; return s; }
 
-    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, favItem, delItem, photosItem, message: null, liftedEl: null };
+    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, bookmarkItem, favItem, delItem, photosItem, message: null, liftedEl: null };
     function closeAction() {
       if (s.liftedEl) { s.liftedEl.classList.remove("gh-msg-lifted"); s.liftedEl = null; }
       closeSheetGeneric(backdrop, sheet);
@@ -2423,6 +2456,8 @@
       api.saveMessage(convId, message.id, next).catch(() => {});
       s.close();
     };
+    s.bookmarkItem.querySelector("span").textContent = isBookmarked(convId, message.id) ? "Remove Bookmark" : "Bookmark";
+    s.bookmarkItem.onclick = () => { s.close(); haptic("light"); toggleBookmark(ctx, convId, message); };
     const isSticker = message.kind === "sticker" || message.kind === "gif";
     s.favItem.style.display = isSticker ? "" : "none";
     s.favItem.onclick = () => { s.close(); favoriteSticker(ctx, message, wrapEl); };
@@ -2537,6 +2572,9 @@
     glow:   { name: "Glow", css: "radial-gradient(ellipse 90% 60% at 50% 110%, color-mix(in srgb, var(--gh-accent) 30%, transparent), transparent 70%), radial-gradient(ellipse 80% 50% at 50% -10%, color-mix(in srgb, var(--gh-accent) 14%, transparent), transparent 70%)", size: "auto, auto", pos: "0 0, 0 0" },
     sunset: { name: "Sunset", css: "linear-gradient(170deg, rgba(255,120,90,0.16), transparent 45%, rgba(155,89,246,0.16))", size: "auto", pos: "0 0" },
     nebula: { name: "Nebula", css: "radial-gradient(circle at 20% 30%, rgba(155,89,246,0.22), transparent 40%), radial-gradient(circle at 80% 20%, rgba(31,184,196,0.16), transparent 40%), radial-gradient(circle at 60% 85%, rgba(255,92,158,0.16), transparent 45%), radial-gradient(circle, rgba(255,255,255,0.08) 0.9px, transparent 1.1px)", size: "auto, auto, auto, 30px 30px", pos: "0 0, 0 0, 0 0, 7px 11px" },
+    liveAurora: { name: "Aurora Live", live: "aurora", css: "none", size: "auto", pos: "0 0" },
+    liveLava:   { name: "Lava Live", live: "lava", css: "none", size: "auto", pos: "0 0" },
+    liveStars:  { name: "Stars Live", live: "stars", css: "none", size: "auto", pos: "0 0" },
     grid:   { name: "Grid", css: "linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px)", size: "28px 28px, 28px 28px", pos: "0 0, 0 0" },
   };
   const PREF_DEFAULTS = {
@@ -2544,6 +2582,7 @@
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true,
     doubleTapCamera: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
     wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {}, pinnedChats: [], hiddenChats: [], streakKeeper: {},
+    bookmarks: [], chatBubbles: {},
   };
   let prefs = Object.assign({}, PREF_DEFAULTS);
   function pref(k) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : PREF_DEFAULTS[k]; }
@@ -2599,7 +2638,7 @@
     haptic();
     const s = ctx.settings;
     s.el.innerHTML = "";
-    s.stack = [];
+    s.stack = []; s.rootLabel = null;
     s.el.dataset.open = "1";
     pushSettingsPage(ctx, "main");
   }
@@ -2614,7 +2653,7 @@
     const prev = s.stack[s.stack.length - 1];
     const head = el("div", "gh-set-head");
     const back = el("button", "gh-set-back gh-hit");
-    back.append(icon("back", 22), Object.assign(el("span"), { textContent: prev ? SETTINGS_TITLES[prev.name] : "Chats" }));
+    back.append(icon("back", 22), Object.assign(el("span"), { textContent: prev ? SETTINGS_TITLES[prev.name] : (s.rootLabel || "Chats") }));
     back.addEventListener("click", () => { haptic("light"); popSettingsPage(ctx); });
     const title = el("div", "gh-set-title"); title.textContent = SETTINGS_TITLES[name];
     head.append(back, title, el("div", "gh-set-head-spacer"));
@@ -2698,8 +2737,119 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
+  const SETTINGS_TITLES = { gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
   const SETTINGS_PAGES = {
+    // Every photo/video (and saved snap) and every link in the open chat, newest first. Older history loads on
+    // demand. Only what Snapchat Web can still fetch shows up (media that has expired on Snapchat's side can't).
+    gallery(ctx, body) {
+      const convId = ctx.settings.galleryConv || ctx.state.currentConvId;
+      const seg = el("div", "gh-seg");
+      const tabs = [["media", "Media"], ["links", "Links"]];
+      let tab = ctx.settings.galleryTab || "media";
+      for (const [k, l] of tabs) { const b = el("button", "gh-seg-btn gh-press"); b.textContent = l; b.dataset.k = k; b.addEventListener("click", () => { haptic("light"); tab = ctx.settings.galleryTab = k; paint(); }); seg.appendChild(b); }
+      const content = el("div", "gh-gallery");
+      const more = el("button", "gh-gallery-more gh-press");
+      body.append(seg, content, more);
+      const io = typeof IntersectionObserver === "function" ? new IntersectionObserver((entries) => {
+        for (const e of entries) if (e.isIntersecting) { io.unobserve(e.target); e.target._load && e.target._load(); }
+      }, { root: body, rootMargin: "300px" }) : null;
+      const messages = () => ((ctx.state.messagesByConv.get(convId) || {}).messages || []);
+      const paint = () => {
+        for (const b of seg.children) b.dataset.on = b.dataset.k === tab ? "1" : "0";
+        content.innerHTML = "";
+        const all = messages().slice().reverse();
+        if (tab === "media") {
+          const items = all.filter((m) => m.kind === "chat-media" || (m.kind === "snap" && m.saved));
+          const grid = el("div", "gh-gallery-grid");
+          for (const m of items) {
+            const t = el("button", "gh-gallery-tile gh-press");
+            if (m.kind === "snap") t.dataset.snap = "1";
+            t._load = () => fetchMediaFor(m).then((list) => {
+              t._list = list;
+              const r = list[0];
+              if (!r) { t.dataset.empty = "1"; return; }
+              if (r.type === "video") { const v = el("video"); v.muted = true; v.playsInline = true; v.setAttribute("playsinline", ""); v.preload = "metadata"; v.src = r.url + (r.url.includes("#") ? "" : "#t=0.1"); t.appendChild(v); t.dataset.video = "1"; }
+              else { const im = el("img"); im.alt = ""; im.loading = "lazy"; im.src = r.url; t.appendChild(im); }
+            });
+            t.addEventListener("click", async () => {
+              const list = t._list || await fetchMediaFor(m);
+              if (list && list.length) openViewerSequence(ctx, list, { title: (m.fromMe ? "You" : (m.from && m.from.name) || "") + " · " + fmtClock(m.ts) });
+              else ctx.showToast("That one isn't available anymore");
+            });
+            grid.appendChild(t);
+            if (io) io.observe(t); else t._load();
+          }
+          if (!items.length) { const e = el("div", "gh-set-group-foot"); e.textContent = "No photos or videos in the messages loaded so far."; content.appendChild(e); }
+          else content.appendChild(grid);
+        } else {
+          const rows = [];
+          for (const m of all) {
+            if (m.kind !== "text") continue;
+            const found = String(m.text || "").match(/https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]']/gi) || [];
+            for (const u of found) rows.push({ u, m });
+          }
+          if (!rows.length) { const e = el("div", "gh-set-group-foot"); e.textContent = "No links in the messages loaded so far."; content.appendChild(e); }
+          else {
+            const g = setGroup(content);
+            for (const { u, m } of rows) {
+              const row = el("button", "gh-set-row gh-press gh-link-row");
+              let host = u; try { host = new URL(u).hostname.replace(/^www\./, ""); } catch (e) {}
+              const ic = el("span", "gh-link-ic"); ic.textContent = (host[0] || "?").toUpperCase();
+              const col = el("div", "gh-set-label");
+              const h = el("div", "gh-link-host"); h.textContent = host;
+              const full = el("div", "gh-link-url"); full.textContent = u;
+              const who = el("div", "gh-link-who"); who.textContent = (m.fromMe ? "You" : (m.from && m.from.name) || "") + " · " + fmtDaySeparator(m.ts);
+              col.append(h, full, who); row.append(ic, col);
+              row.addEventListener("click", () => openLink(u));
+              g.appendChild(row);
+            }
+          }
+        }
+        const hasMore = (ctx.state.currentConvId === convId && ctx.conv && ctx.conv._hasMore);
+        more.style.display = hasMore ? "" : "none";
+        more.textContent = "Load Older Messages";
+      };
+      more.addEventListener("click", async () => {
+        if (more.dataset.busy) return;
+        more.dataset.busy = "1"; more.textContent = "Loading…";
+        await fetchOlderPages(ctx, 5);
+        delete more.dataset.busy; paint();
+      });
+      paint();
+    },
+    // Bookmarks: messages you marked (hold a message > Bookmark). Only on this phone - Snapchat never sees them.
+    bookmarks(ctx, body) {
+      const only = ctx.settings.bookmarksConv || null;
+      const paint = () => {
+        body.innerHTML = "";
+        const list = (pref("bookmarks") || []).filter((b) => !only || b.convId === only);
+        if (!list.length) {
+          const e = el("div", "gh-empty-note");
+          e.appendChild(icon("bookmark", 34));
+          const t = el("div"); t.textContent = "No bookmarks yet"; const t2 = el("div", "gh-empty-sub"); t2.textContent = "Hold any message and tap Bookmark to keep it here.";
+          e.append(t, t2); body.appendChild(e); return;
+        }
+        const g = setGroup(body, null, "Bookmarks stay on this phone only.");
+        for (const b of list) {
+          const row = el("div", "gh-set-row gh-press gh-bm-row");
+          const col = el("div", "gh-set-label");
+          const top = el("div", "gh-bm-top"); top.textContent = (only ? "" : (b.chat || "Chat") + " · ") + (b.from || "") + " · " + fmtDaySeparator(b.ts);
+          const txt = el("div", "gh-bm-text"); txt.textContent = b.text || "Message";
+          col.append(top, txt);
+          const x = el("button", "gh-bm-remove gh-hit"); x.setAttribute("aria-label", "Remove bookmark"); x.appendChild(icon("close", 16));
+          x.addEventListener("click", (e) => {
+            e.stopPropagation(); haptic("light");
+            setPref(ctx, "bookmarks", (pref("bookmarks") || []).filter((y) => !(y.convId === b.convId && y.id === b.id)));
+            if (ctx.conv && ctx.state.currentConvId === b.convId) paintWindow(ctx, ctx.conv);
+            paint();
+          });
+          row.append(col, x);
+          row.addEventListener("click", () => { haptic("light"); openBookmark(ctx, b); });
+          g.appendChild(row);
+        }
+      };
+      paint();
+    },
     // Friends: search anyone by username and add them, answer friend requests, and manage the people you have
     // (nickname / remove / block). Bridge: findUsers, friendRequests, addFriend, ignoreFriend, removeFriend,
     // blockFriend, setNickname - Snapchat's own FriendAction service, so it all shows up in the real app too.
@@ -2827,6 +2977,7 @@
       prof.append(nm, un);
       body.appendChild(prof);
       let g = setGroup(body);
+      setRow(g, { icon: "bookmark", tint: "linear-gradient(135deg,#f0b232,#ff9433)", label: "Bookmarks", value: String((pref("bookmarks") || []).length || ""), onClick: () => { ctx.settings.bookmarksConv = null; pushSettingsPage(ctx, "bookmarks"); } });
       setRow(g, { icon: "addFriend", tint: "linear-gradient(135deg,#23a55a,#1fb8c4)", label: "Friends", value: ctx.friendReqCount ? String(ctx.friendReqCount) : "", onClick: () => pushSettingsPage(ctx, "friends") });
       g = setGroup(body);
       setRow(g, { icon: "palette", tint: "linear-gradient(135deg,#ff5c9e,#9b59f6)", label: "Appearance", value: (THEMES[pref("theme")] || THEMES.night).name, onClick: () => pushSettingsPage(ctx, "appearance") });
@@ -2864,6 +3015,30 @@
         sw.appendChild(b);
       }
       g.appendChild(sw);
+      // App icon (iOS alternate icons, built into the app: ios/Resources/Assets.xcassets/AppIcon*.appiconset)
+      g = setGroup(body, "App Icon", "iOS shows a short notice when the icon changes.");
+      const icons = el("div", "gh-set-icons");
+      const ICONS = [["default", "Ghost", "linear-gradient(180deg,#5764f1,#4a52d6)", "#fff"], ["AppIconMidnight", "Midnight", "linear-gradient(135deg,#181820,#000)", "#fff"],
+        ["AppIconSunset", "Sunset", "linear-gradient(135deg,#ff9a44,#ec407a)", "#fff"], ["AppIconMint", "Mint", "linear-gradient(135deg,#2ecc8e,#16a085)", "#fff"],
+        ["AppIconSnap", "Snap", "#fffc00", "#fff"], ["AppIconBerry", "Berry", "linear-gradient(135deg,#9b59f6,#ff5c9e)", "#fff"], ["AppIconGlass", "Glass", "linear-gradient(135deg,#283040,#0c0e14)", "#aac8ff"]];
+      const paintIcons = (curName) => { for (const c of icons.children) c.dataset.on = c.dataset.k === curName ? "1" : "0"; };
+      for (const [k, name, bg, fg] of ICONS) {
+        const c = el("button", "gh-set-appicon gh-press"); c.dataset.k = k;
+        const art = el("span", "gh-set-appicon-art"); art.style.background = bg; art.style.color = fg;
+        if (k === "AppIconSnap") art.dataset.outline = "1";
+        art.appendChild(icon("ghost", 30));
+        const n = el("span", "gh-set-appicon-name"); n.textContent = name;
+        c.append(art, n);
+        c.addEventListener("click", async () => {
+          haptic("light");
+          try { await window.webkit.messageHandlers.dg.postMessage({ op: "appIcon", name: k }); paintIcons(k); }
+          catch (e) { ctx.showToast("Couldn't change the icon" + (e && e.message ? " (" + e.message + ")" : "")); }
+        });
+        icons.appendChild(c);
+      }
+      g.appendChild(icons);
+      paintIcons("default");
+      try { window.webkit.messageHandlers.dg.postMessage({ op: "appIcon", get: true }).then((n) => paintIcons(n || "default"), () => {}); } catch (e) {}
       g = setGroup(body, "Chat Wallpaper", "Your default for every chat. Tap a chat's name to give that chat its own - it keeps it whatever you pick here.");
       const walls = el("div", "gh-set-cards");
       const dimHost = el("div");
@@ -2887,6 +3062,7 @@
           const c = el("button", "gh-set-wall gh-press");
           c.style.backgroundImage = w.css; c.style.backgroundSize = w.size; c.style.backgroundPosition = w.pos;
           const n = el("span"); n.textContent = w.name; c.appendChild(n);
+          if (w.live) c.dataset.live = w.live;
           c.dataset.on = pref("wallpaper") === key ? "1" : "0";
           c.addEventListener("click", () => { haptic("light"); setPref(ctx, "wallpaper", key); paintWalls(); });
           walls.appendChild(c);
@@ -3069,10 +3245,40 @@
     const d = pref("wallpaper");
     return d === "photo" ? { kind: "photo", key: "default", dim: pref("wallDim"), fit: pref("wallFit") } : { kind: "preset", name: d };
   }
+  // Live wallpapers are a layer of drifting blobs/stars BEHIND the (then transparent) message list, moved with
+  // transforms only - the list itself never repaints for them.
+  function setLiveWall(ctx, kind) {
+    const conv = ctx.conv; if (!conv) return;
+    const scr = conv.messages.parentNode;
+    if (!kind) { if (conv.liveWall) { conv.liveWall.remove(); conv.liveWall = null; } conv.messages.classList.remove("gh-live-on"); scr.style.isolation = ""; return; }
+    scr.style.isolation = "isolate";
+    if (!conv.liveWall || conv.liveWall.dataset.kind !== kind) {
+      if (conv.liveWall) conv.liveWall.remove();
+      const w = el("div", "gh-live-wall"); w.dataset.kind = kind;
+      const n = kind === "stars" ? 3 : 4;
+      for (let i = 0; i < n; i++) w.appendChild(el("i", "gh-live-b" + i));
+      scr.insertBefore(w, conv.messages);
+      conv.liveWall = w;
+    }
+    conv.messages.classList.add("gh-live-on");
+  }
+  // your own bubble colour for one chat (Ghost-only): an accent from ACCENT_SET, only for your messages there
+  function applyChatBubbles(ctx, convId) {
+    const scr = ctx.conv && ctx.conv.messages && ctx.conv.messages.parentNode;
+    if (!scr) return;
+    const key = convId && (pref("chatBubbles") || {})[convId];
+    const a = key && ACCENT_SET[key];
+    if (a) { scr.style.setProperty("--gh-bubble-out-1", a[2]); scr.style.setProperty("--gh-bubble-out-2", a[3]); }
+    else { scr.style.removeProperty("--gh-bubble-out-1"); scr.style.removeProperty("--gh-bubble-out-2"); }
+  }
   async function applyChatWallpaper(ctx, convId) {
     const m = ctx.conv && ctx.conv.messages;
     if (!m) return;
+    applyChatBubbles(ctx, convId);
     const w = wallFor(convId);
+    const livePreset = w.kind === "preset" && WALLPAPERS[w.name] && WALLPAPERS[w.name].live;
+    setLiveWall(ctx, livePreset || null);
+    if (livePreset) { m.style.backgroundImage = "none"; m.style.backgroundColor = "transparent"; m.style.backgroundSize = ""; m.style.backgroundPosition = ""; m.style.backgroundRepeat = ""; return; }
     const token = (m._wallToken = (m._wallToken || 0) + 1);
     if (w.kind === "photo") {
       const url = await wallUrl(w.key);
@@ -3156,6 +3362,177 @@
     backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
     return { backdrop, sheet };
   }
+
+  // =====================================================================================================
+  // Ghost-only tools: jump to a message, search in a chat, bookmarks, media gallery
+  // =====================================================================================================
+  // Fetch older history quietly (no repaint per page): for search, the gallery and bookmark jumps.
+  async function fetchOlderPages(ctx, pages, until) {
+    const conv = ctx.conv, convId = ctx.state.currentConvId;
+    if (!convId || !conv || conv._loadingOlder) return 0;
+    conv._loadingOlder = true; conv._quietLoad = true; conv._missedUpdate = false;
+    let added = 0;
+    try {
+      for (let i = 0; i < pages; i++) {
+        const prev = ctx.state.messagesByConv.get(convId) || { messages: [], hasMore: true };
+        if (prev.hasMore === false) break;
+        const res = await api.loadOlder(convId);
+        if (ctx.state.currentConvId !== convId) break;
+        const entry = { messages: (res && res.messages) || prev.messages, hasMore: !!(res && res.hasMore) };
+        ctx.state.messagesByConv.set(convId, entry);
+        const a = Math.max(0, entry.messages.length - prev.messages.length);
+        added += a; conv.windowStart += a; conv.windowEnd += a;
+        conv._all = entry.messages; conv._hasMore = entry.hasMore;
+        if (!a && !entry.hasMore) break;
+        if (until && until()) break;
+      }
+    } catch (e) { gtrail("older pages failed " + (e && e.message || e)); }
+    finally {
+      conv._loadingOlder = false; conv._quietLoad = false;
+      const entry = ctx.state.messagesByConv.get(convId);
+      if (entry && ctx.state.currentConvId === convId) { conv._all = entry.messages; conv._hasMore = entry.hasMore; }
+      if (conv._missedUpdate && entry && ctx.state.currentConvId === convId) { conv._missedUpdate = false; renderMessageList(ctx, conv, entry, {}); }
+    }
+    return added;
+  }
+  async function jumpToMessage(ctx, id) {
+    const conv = ctx.conv;
+    if (!conv) return false;
+    const find = () => (conv._all || []).findIndex((m) => m.id === id);
+    let idx = find();
+    if (idx < 0 && conv._hasMore) { await fetchOlderPages(ctx, 40, () => find() >= 0); idx = find(); }
+    if (idx < 0) { ctx.showToast("Couldn't find that message"); return false; }
+    const total = conv._all.length;
+    conv.userTouched = true; conv.atBottom = false;
+    conv.windowStart = Math.max(0, idx - CHUNK); conv.windowEnd = Math.min(total, idx + CHUNK);
+    paintWindow(ctx, conv);
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+    let w = [...conv.messages.querySelectorAll(".gh-msg-wrap")].find((x) => x.dataset.messageId === id);
+    if (!w) { // a new message repainted the window meanwhile: place it around the target again
+      const j = (conv._all || []).findIndex((m) => m.id === id);
+      if (j < 0) return false;
+      conv.windowStart = Math.max(0, j - CHUNK); conv.windowEnd = Math.min(conv._all.length, j + CHUNK);
+      paintWindow(ctx, conv);
+      await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+      w = [...conv.messages.querySelectorAll(".gh-msg-wrap")].find((x) => x.dataset.messageId === id);
+      if (!w) return false;
+    }
+    conv.stickUntil = nowMs() + 450;
+    const mr = conv.messages.getBoundingClientRect(), wr = w.getBoundingClientRect();
+    conv.messages.scrollTop += (wr.top - mr.top) - (mr.height / 2 - wr.height / 2);
+    w.classList.remove("gh-msg-flash"); void w.offsetWidth; w.classList.add("gh-msg-flash");
+    if (conv.windowEnd < total) showJump(ctx, true);
+    return true;
+  }
+
+  // ---- search in a chat -----------------------------------------------------------------------------
+  function searchableText(m) { return m && m.kind === "text" ? String(m.text || "") : ""; }
+  function openChatSearch(ctx) {
+    const conv = ctx.conv;
+    if (!conv) return;
+    if (conv.searchBar) { conv.searchBar.querySelector("input").focus(); return; }
+    const bar = el("div", "gh-chat-search");
+    bar.innerHTML = `<div class="gh-chat-search-field"><input type="search" placeholder="Search this chat" enterkeyhint="search" autocomplete="off"></div>
+      <button class="gh-chat-search-done gh-hit">Done</button>
+      <div class="gh-chat-search-nav"><span class="gh-chat-search-count"></span>
+      <button class="gh-icon-btn gh-hit" data-act="older" aria-label="Older match"></button>
+      <button class="gh-icon-btn gh-hit" data-act="newer" aria-label="Newer match"></button></div>`;
+    bar.querySelector(".gh-chat-search-field").prepend(icon("search", 16));
+    bar.querySelector('[data-act="older"]').appendChild(icon("chevronDown", 20, "gh-flip-y"));
+    bar.querySelector('[data-act="newer"]').appendChild(icon("chevronDown", 20));
+    conv.messages.parentNode.appendChild(bar);
+    conv.searchBar = bar;
+    const input = bar.querySelector("input"), count = bar.querySelector(".gh-chat-search-count");
+    const st = { q: "", matches: [], cur: -1, busy: false };
+    const compute = () => {
+      const all = conv._all || [];
+      st.matches = [];
+      if (st.q) for (let i = all.length - 1; i >= 0; i--) if (searchableText(all[i]).toLowerCase().includes(st.q)) st.matches.push(all[i].id);
+    };
+    const label = () => {
+      if (!st.q) { count.textContent = ""; return; }
+      if (st.busy) { count.textContent = "Searching…"; return; }
+      count.textContent = st.matches.length ? (st.cur + 1) + " of " + st.matches.length + (conv._hasMore ? "+" : "") : (conv._hasMore ? "None yet - tap ↑" : "No results");
+    };
+    const go = (i) => { st.cur = i; label(); jumpToMessage(ctx, st.matches[i]); };
+    let timer = null;
+    input.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        st.q = input.value.trim().toLowerCase();
+        conv.searchQ = st.q || null;
+        compute();
+        if (st.matches.length) go(0); else { st.cur = -1; label(); paintWindow(ctx, conv); }
+      }, 220);
+    });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); input.blur(); } });
+    bar.querySelector('[data-act="older"]').addEventListener("click", async () => {
+      if (!st.q || st.busy) return;
+      haptic("light");
+      if (st.cur + 1 < st.matches.length) { go(st.cur + 1); return; }
+      if (!conv._hasMore) { ctx.showToast("That's the oldest match"); return; }
+      st.busy = true; label();
+      const had = st.matches.length;
+      await fetchOlderPages(ctx, 8, () => { compute(); return st.matches.length > had; });
+      compute(); st.busy = false;
+      if (st.matches.length > had) go(had); else { label(); if (!conv._hasMore) ctx.showToast("No older matches"); }
+    });
+    bar.querySelector('[data-act="newer"]').addEventListener("click", () => { if (st.cur > 0) { haptic("light"); go(st.cur - 1); } });
+    bar.querySelector(".gh-chat-search-done").addEventListener("click", () => closeChatSearch(ctx));
+    requestAnimationFrame(() => { bar.dataset.open = "1"; input.focus(); });
+  }
+  function closeChatSearch(ctx) {
+    const conv = ctx.conv;
+    if (!conv || !conv.searchBar) return;
+    conv.searchBar.remove(); conv.searchBar = null;
+    if (conv.searchQ) { conv.searchQ = null; paintWindow(ctx, conv); }
+  }
+
+  // ---- bookmarks (Ghost-only, stored on this phone) ----------------------------------------------------
+  let bmCache = { src: null, set: new Set() };
+  function bookmarkSet() {
+    const list = pref("bookmarks") || [];
+    if (bmCache.src !== list) bmCache = { src: list, set: new Set(list.map((b) => b.convId + "|" + b.id)) };
+    return bmCache.set;
+  }
+  function isBookmarked(convId, id) { return bookmarkSet().has(convId + "|" + id); }
+  function messagePreview(m) {
+    if (!m) return "";
+    if (m.kind === "text") return String(m.text || "");
+    return ({ "chat-media": "📷 Photo", snap: "👻 Snap", audio: "🎤 Voice message", sticker: "Sticker", gif: "GIF", share: "Shared link" }[m.kind] || "Message");
+  }
+  function toggleBookmark(ctx, convId, m) {
+    const list = (pref("bookmarks") || []).slice();
+    const i = list.findIndex((b) => b.convId === convId && b.id === m.id);
+    if (i >= 0) list.splice(i, 1);
+    else {
+      const cd = ctx.state.convById.get(convId);
+      const meId = ctx.state.me && ctx.state.me.id;
+      const mine = m.fromMe || (m.from && m.from.id === meId);
+      list.unshift({ convId, id: m.id, ts: m.ts || 0, kind: m.kind, text: messagePreview(m).slice(0, 400), from: mine ? "You" : (m.from && m.from.name) || "", chat: (cd && cd.title) || "", at: Date.now() });
+    }
+    setPref(ctx, "bookmarks", list);
+    ctx.showToast(i >= 0 ? "Bookmark removed" : "Bookmarked");
+    if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv);
+  }
+  async function openBookmark(ctx, b) {
+    closeSettings(ctx);
+    if (ctx.state.currentConvId !== b.convId) {
+      if (!ctx.state.convById.has(b.convId)) { ctx.showToast("That chat isn't in your list anymore"); return; }
+      await openConversationScreen(ctx, b.convId);
+    }
+    for (let i = 0; i < 40 && !((ctx.conv && ctx.conv._all) || []).length; i++) await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 250));
+    jumpToMessage(ctx, b.id);
+  }
+  function openSettingsAt(ctx, name, rootLabel) {
+    haptic();
+    const s = ctx.settings;
+    s.el.innerHTML = ""; s.stack = []; s.rootLabel = rootLabel || "Chat";
+    s.el.dataset.open = "1";
+    pushSettingsPage(ctx, name);
+  }
+
   // ---- Streak Keeper -----------------------------------------------------------------------------------
   // pref streakKeeper = { convId: {on, time: "HH:MM", last: "YYYY-MM-DD"} }. Checked every 30 s while Ghost runs and
   // whenever it comes back to the front: once it's past the time and today's hasn't gone, one black snap goes to all
@@ -3249,6 +3626,15 @@
       if (customAvatarUrls.has(avKey)) setRow(pg, { label: cd.isGroup ? "Use Bitmojis" : "Use Their Bitmoji", danger: true, onClick: async () => { await clearCustomAvatar(ctx, avKey); closeSheetGeneric(s.backdrop, s.sheet); } });
       const pf = el("div", "gh-set-group-foot"); pf.textContent = "Only you see this - it doesn't change anything on Snapchat."; s.sheet.appendChild(pf);
     }
+    // Ghost-only tools for this chat
+    {
+      const tg = el("div", "gh-chat-tools");
+      const tool = (ic, label, fn) => { const b = el("button", "gh-chat-tool gh-press"); b.append(icon(ic, 22), Object.assign(el("span"), { textContent: label })); b.addEventListener("click", () => { haptic("light"); closeSheetGeneric(s.backdrop, s.sheet); fn(); }); tg.appendChild(b); };
+      tool("search", "Search", () => openChatSearch(ctx));
+      tool("photo", "Media", () => { ctx.settings.galleryConv = convId; ctx.settings.galleryTab = "media"; openSettingsAt(ctx, "gallery"); });
+      tool("bookmark", "Bookmarks", () => { ctx.settings.bookmarksConv = convId; openSettingsAt(ctx, "bookmarks"); });
+      s.sheet.appendChild(tg);
+    }
     // their nickname (Snapchat's own friend nickname - synced with the phone app)
     const other = !cd.isGroup && cd.participants && cd.participants[0];
     if (other) {
@@ -3316,6 +3702,28 @@
       if (!(await confirmSheet(ctx, "Clear this chat from your feed? Saved messages stay.", "Clear"))) return;
       try { await api.clearChat(convId); closeSheetGeneric(s.backdrop, s.sheet); closeConversationScreen(ctx); } catch (e) { ctx.showToast("Couldn't clear it"); }
     } });
+    // your bubble colour in this chat only (Ghost-only)
+    {
+      const bt = el("div", "gh-set-group-title"); bt.textContent = "Your Bubble Color Here"; s.sheet.appendChild(bt);
+      const sw = el("div", "gh-set-swatches gh-chat-swatches");
+      const cur = () => (pref("chatBubbles") || {})[convId] || null;
+      const mkSw = (key, bg) => {
+        const b = el("button", "gh-set-swatch gh-press"); b.style.background = bg; b.setAttribute("aria-label", key || "Default");
+        if (!key) { b.classList.add("gh-swatch-default"); b.textContent = "A"; }
+        b.dataset.on = cur() === key ? "1" : "0";
+        b.addEventListener("click", () => {
+          haptic("light");
+          const all = Object.assign({}, pref("chatBubbles") || {});
+          if (key) all[convId] = key; else delete all[convId];
+          setPref(ctx, "chatBubbles", all);
+          for (const c of sw.children) c.dataset.on = "0"; b.dataset.on = "1";
+        });
+        sw.appendChild(b);
+      };
+      mkSw(null, "var(--gh-accent)");
+      for (const [key, a] of Object.entries(ACCENT_SET)) mkSw(key, "linear-gradient(135deg," + a[2] + "," + a[3] + ")");
+      s.sheet.appendChild(sw);
+    }
     const title = el("div", "gh-set-group-title"); title.textContent = "Chat Wallpaper"; s.sheet.appendChild(title);
     const cards = el("div", "gh-set-cards gh-chat-walls");
     s.sheet.appendChild(cards);
@@ -3343,7 +3751,8 @@
       });
       if (!photoUrl) pc.appendChild(icon("photo", 26, "gh-wall-photo-ico"));
       for (const [key, w] of Object.entries(WALLPAPERS)) {
-        mk(w.name, !!(own && own.kind === "preset" && own.name === key), { backgroundImage: w.css === "none" ? "none" : w.css, backgroundSize: w.size, backgroundPosition: w.pos }, () => setChatWall(ctx, convId, { kind: "preset", name: key }));
+        const card = mk(w.name, !!(own && own.kind === "preset" && own.name === key), { backgroundImage: w.css === "none" ? "none" : w.css, backgroundSize: w.size, backgroundPosition: w.pos }, () => setChatWall(ctx, convId, { kind: "preset", name: key }));
+        if (w.live) card.dataset.live = w.live;
       }
       dimRow.innerHTML = "";
       if (own && own.kind === "photo") {
