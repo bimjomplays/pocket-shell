@@ -663,7 +663,7 @@
     // chat, replay the "new message" pop and scroll - the jumping in group chats (device, 2026-09-27). Now:
     // nothing changed -> nothing; new messages at the end -> the normal arrival; anything else (reactions,
     // opened/saved state) -> repaint in place, scroll untouched.
-    const sig = (list) => list.map((m) => m.id + ":" + (m.reactions ? m.reactions.length : 0) + ":" + (m.saved ? 1 : 0) + (m.opened ? 1 : 0) + ":" + (m.text || "").length).join("|");
+    const sig = (list) => list.map((m) => m.id + ":" + (m.reactions ? m.reactions.length : 0) + ":" + (m.saved ? 1 : 0) + (m.opened ? 1 : 0) + ":" + (m.text || "").length + ":" + (m.seenBy ? m.seenBy.length : 0)).join("|");
     if (prev && sig(prev.messages) === sig(entry.messages) && prev.hasMore === entry.hasMore) return;
     const prevLast = prev && prev.messages.length ? prev.messages[prev.messages.length - 1].id : null;
     const newLast = entry.messages.length ? entry.messages[entry.messages.length - 1].id : null;
@@ -1396,6 +1396,7 @@
     haptic("light");
     closeChatSearch(ctx);
     loadChatColors(ctx, conversationId);
+    ctx.conv.openedAt = nowMs();
     ctx.conv.peekId = null;
     applyChatWallpaper(ctx, conversationId);
     ctx.state.currentConvId = conversationId;
@@ -1432,6 +1433,13 @@
     }
     if (ctx.state.currentConvId !== conversationId) return; // navigated away while loading
     renderMessageList(ctx, conv, entry, { stick: true, initial: true });
+    // and once the screen has finished sliding in, nudge the list by a pixel: WebKit sometimes hasn't drawn the
+    // newest bubbles yet (they appeared only once you scrolled) - a scroll makes it draw them
+    for (const ms of [350, 900]) setTimeout(() => {
+      if (ctx.state.currentConvId !== conversationId) return;
+      const m = conv.messages; conv.stickUntil = nowMs() + 100;
+      const top = m.scrollTop; m.scrollTop = top - 1; m.scrollTop = conv.atBottom ? m.scrollHeight : top;
+    }, ms);
     syncPresence(ctx);
   }
   // "Show me in chats" (Settings, default on): friends see my Bitmoji (phone, not laptop) in the chat I have
@@ -1480,7 +1488,9 @@
     paintWindow(ctx, conv);
     // pop-in animation for a genuinely new message (never for a virtualized-scroll window shift, which
     // calls paintWindow directly instead of coming through here — see handleWindowScroll)
-    if (opts.stick && !opts.initial) {
+    // (no pop for the first second after opening: on the phone the animation could stay frozen on its first,
+    // invisible frame while the screen slid in, so your newest message didn't show until you scrolled)
+    if (opts.stick && !opts.initial && nowMs() - (conv.openedAt || 0) > 1200) {
       const wraps = conv.messages.querySelectorAll(".gh-msg-wrap");
       const last = wraps[wraps.length - 1];
       if (last) {
@@ -1556,6 +1566,7 @@
       groupEl.append(gutter, col);
       frag.appendChild(groupEl);
     }
+    if (end === total && total) { const seen = seenRowEl(ctx, all); if (seen) frag.appendChild(seen); }
     // keep what's on screen where it is: swapping every bubble (a new message, a read receipt...) briefly changes
     // the list's height, and the view used to jump up (device 2026-09-27: "sending a message makes me jump up")
     const mEl = conv.messages, fromBottom = mEl.scrollHeight - mEl.scrollTop, wasBottom = conv.atBottom;
@@ -1583,6 +1594,65 @@
       conv.bottomSpacer.style.height = Math.round(conv.avgHeight * (total - end)) + "px";
       restore();
     });
+  }
+
+  // Read receipts under the newest message. 1:1: "Delivered" / "Opened" under your last message (like Snapchat).
+  // Groups: "Seen by" + the faces of everyone who has read the newest message; tap for the names.
+  function seenRowEl(ctx, all) {
+    let m = null;
+    for (let i = all.length - 1; i >= 0; i--) if (all[i].kind !== "system" && all[i].kind !== "call") { m = all[i]; break; }
+    if (!m || m.pending || m.failed) return null;
+    const convId = ctx.state.currentConvId;
+    const cd = ctx.state.convById.get(convId) || {};
+    const meId = ctx.state.me && ctx.state.me.id;
+    const mine = m.fromMe || (m.from && m.from.id === meId);
+    const seen = (m.seenBy || []).filter((id) => id !== meId);
+    const row = el("div", "gh-seen");
+    row.dataset.side = mine ? "right" : "left";
+    if (!cd.isGroup) {
+      if (!mine) return null;
+      const opened = seen.length > 0 || m.opened;
+      row.dataset.state = opened ? "opened" : "delivered";
+      const w = el("span", "gh-seen-word"); w.textContent = opened ? "Opened" : "Delivered";
+      row.appendChild(w);
+      return row;
+    }
+    if (!seen.length) {
+      if (!mine) return null;
+      const w = el("span", "gh-seen-word"); w.textContent = "Delivered"; row.appendChild(w);
+      return row;
+    }
+    const people = seen.map((id) => (cd.participants || []).find((p) => p.id === id) || { id, name: "Someone" });
+    row.dataset.state = "opened";
+    const w = el("span", "gh-seen-word"); w.textContent = people.length >= ((cd.participants || []).length - (mine ? 0 : 1)) && people.length > 1 ? "Seen by everyone" : "Seen by";
+    const faces = el("span", "gh-seen-faces");
+    for (const u of people.slice(0, 7)) faces.appendChild(makeAvatar(u, 18));
+    row.append(w, faces);
+    if (people.length > 7) { const more = el("span"); more.textContent = "+" + (people.length - 7); row.appendChild(more); }
+    row.classList.add("gh-press");
+    row.addEventListener("click", () => {
+      haptic("light");
+      const s = ctx.chatSheet;
+      s.sheet.innerHTML = "";
+      s.sheet.appendChild(el("div", "gh-sheet-grip"));
+      const t = el("div", "gh-set-group-title"); t.textContent = "Seen by " + people.length; s.sheet.appendChild(t);
+      const g = el("div", "gh-set-group"); s.sheet.appendChild(g);
+      for (const u of people) {
+        const r2 = el("div", "gh-set-row gh-reactor-row");
+        r2.appendChild(makeAvatar(u, 34));
+        const nm = el("span", "gh-set-label"); nm.textContent = u.name || "Someone";
+        const pc = personColor(ctx, u.id); if (pc) nm.style.color = pc;
+        r2.appendChild(nm); g.appendChild(r2);
+      }
+      const unseen = (cd.participants || []).filter((p) => p.id !== meId && p.id !== (m.from && m.from.id) && !seen.includes(p.id));
+      if (unseen.length) {
+        const t2 = el("div", "gh-set-group-title"); t2.textContent = "Not yet"; s.sheet.appendChild(t2);
+        const g2 = el("div", "gh-set-group"); s.sheet.appendChild(g2);
+        for (const u of unseen) { const r3 = el("div", "gh-set-row gh-reactor-row"); r3.appendChild(makeAvatar(u, 34)); const nm = el("span", "gh-set-label"); nm.textContent = u.name || "Someone"; r3.appendChild(nm); g2.appendChild(r3); }
+      }
+      openSheetGeneric(s.backdrop, s.sheet);
+    });
+    return row;
   }
 
   function sepEl(text) { const e = el("div", "gh-day-sep"); e.textContent = text; return e; }
@@ -2346,13 +2416,16 @@
       row.style.display = "flex";
       row.innerHTML = "";
       row.dataset.here = "1";
-      for (const u of here.slice(0, 4)) {
+      for (const u of here.slice(0, 8)) {
         const a = el("div", "gh-here-av");
+        if (u.typing) a.dataset.typing = "1";
         a.appendChild(makeAvatar(u, 30));
         row.appendChild(a);
       }
+      const first = (u) => (u.name || "Someone").split(" ")[0];
+      const names = here.length <= 3 ? here.map(first).join(", ").replace(/, ([^,]*)$/, " & $1") : here.slice(0, 2).map(first).join(", ") + " & " + (here.length - 2) + " more";
       if (here.some((u) => u.typing)) { const b = el("div", "gh-typing-bubble"); b.innerHTML = "<span></span><span></span><span></span>"; row.appendChild(b); }
-      else { const t = el("div", "gh-here-label"); t.textContent = here.length === 1 ? ((here[0].name || "").split(" ")[0] + " is here") : here.length + " here"; row.appendChild(t); }
+      const t = el("div", "gh-here-label"); t.textContent = names + (here.length === 1 ? " is here" : " are here"); row.appendChild(t);
       return;
     }
     row.dataset.here = "0";

@@ -871,6 +871,8 @@
       // YOUR id is in openedBy (the sender is always in it - that's why every received snap said "Opened");
       // one you sent is opened when anyone else is.
       opened: (me && senderId === me) ? others(md.openedBy).length > 0 : (md.openedBy || []).some((u) => idOf(u) === me),
+      // who has seen it (chats: seenBy, snaps: openedBy), not counting whoever sent it
+      seenBy: Array.from(new Set([...others(md.seenBy), ...others(md.openedBy)])),
       replayable: md.playableSnapState === 4 || undefined, // PlayableSnapState VIEWEDREPLAYABLE
       saveable: md.isSaveable === false ? false : undefined,
       snapSound: kind === "snap" ? !!(mc.snapDisplayInfo && mc.snapDisplayInfo.hasAudio) : undefined,

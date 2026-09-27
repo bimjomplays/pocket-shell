@@ -1861,3 +1861,17 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-reactor-row .gh-avatar { width: 34px !important; height: 34px !important; }
 .gh-reactor-emoji { font-size: 22px; }
 .gh-reactor-sub { font-size: 12.5px; color: var(--gh-text-secondary); font-weight: 400; }
+/* a short reply under a long quoted message keeps its own size (it used to stretch to the quote's width) */
+.gh-msg-swipe { display: flex; flex-direction: column; align-items: flex-start; }
+.gh-group[data-me="1"] .gh-msg-swipe { align-items: flex-end; }
+.gh-msg-swipe > .gh-reply-quote { max-width: min(100%, 270px); box-sizing: border-box; }
+.gh-msg-swipe > .gh-reactions { align-self: auto; }
+/* read receipts under the newest message */
+.gh-seen { display: flex; align-items: center; gap: 6px; margin: 4px 4px 2px; font-size: 12px; color: var(--gh-text-secondary); justify-content: flex-end; }
+.gh-seen[data-side="left"] { justify-content: flex-start; margin-left: 44px; }
+.gh-seen[data-state="opened"] .gh-seen-word { color: var(--gh-accent); font-weight: 600; }
+.gh-seen-faces { display: inline-flex; }
+.gh-seen-faces .gh-avatar { width: 18px !important; height: 18px !important; border: 1.5px solid var(--gh-bg-app); box-sizing: content-box; }
+.gh-seen-faces .gh-avatar + .gh-avatar { margin-left: -6px; }
+.gh-seen.gh-press { cursor: pointer; }
+.gh-here-av[data-typing="1"] .gh-avatar { box-shadow: 0 0 0 2px var(--gh-accent); }
