@@ -131,7 +131,10 @@
     return `${m}:${String(s).padStart(2, "0")}`;
   }
   function initials(name) {
-    return (name || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
+    // whole characters, not UTF-16 halves: a name starting with an emoji used to yield half an emoji, which made
+    // encodeURIComponent throw in the avatar and the whole chat list failed to draw (device log 2026-09-26)
+    const out = (name || "?").trim().split(/\s+/).slice(0, 2).map((w) => Array.from(w)[0] || "").join("").toUpperCase();
+    return out.replace(/[\uD800-\uDFFF]/g, (c, i, str) => (/[\uD800-\uDBFF]/.test(c) && /[\uDC00-\uDFFF]/.test(str[i + 1] || "")) || (/[\uDC00-\uDFFF]/.test(c) && /[\uD800-\uDBFF]/.test(str[i - 1] || "")) ? c : "") || "?";
   }
   function hashStr(s) {
     let h = 0;
@@ -658,9 +661,10 @@
   function placeholderAvatarUrl(user) {
     const name = (user && (user.name || user.username)) || "?";
     const [c1, c2] = gradientFor(user, name);
-    const label = initials(name);
+    const label = initials(name).replace(/[<>&"]/g, "");
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient></defs><rect width="96" height="96" fill="url(#g)"/><text x="48" y="58" font-family="-apple-system,system-ui,sans-serif" font-size="36" font-weight="600" fill="#fff" text-anchor="middle">${label}</text></svg>`;
-    return "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+    try { return "data:image/svg+xml;utf8," + encodeURIComponent(svg); }
+    catch (e) { return "data:image/svg+xml;utf8," + encodeURIComponent(svg.replace(/[\uD800-\uDFFF]/g, "")); }
   }
 
   // status -> tick state: single check = sent, double = delivered/opened/viewed (Telegram keeps both the
