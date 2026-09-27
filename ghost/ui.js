@@ -74,13 +74,23 @@
     speed: '<path d="M12 2v3M4.2 6.2l2.1 2.1M2 14h3M19 14h3M17.7 8.3l2.1-2.1"/><path d="M12 14l4-3"/><circle cx="12" cy="14" r="8"/>',
     call: '<path d="M22 16.9v2a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 013.1 4.2 2 2 0 015 2h2a2 2 0 012 1.7c.1.9.3 1.8.6 2.7a2 2 0 01-.4 2.1L8 9.9a16 16 0 006 6l1.4-1.2a2 2 0 012.1-.4c.9.3 1.8.5 2.7.6a2 2 0 011.8 2z"/>',
     videoCall: '<path d="M15 8l6-3v14l-6-3"/><rect x="1" y="6" width="14" height="12" rx="2"/>',
+    attach: '<path d="M20.5 11.5L12 20a5 5 0 01-7-7l8.5-8.5a3.5 3.5 0 015 5L10 18a2 2 0 01-3-3l7-7"/>',
+    compose: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>',
+    lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/>',
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>',
+    chatsTab: '<path d="M21 12a8 8 0 01-11.8 7L4 20l1.2-4.8A8 8 0 1121 12z"/>',
+    storiesTab: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/>',
+    settingsTab: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.9 2.9l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1-1.6 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.9-2.9l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.9-2.9l.1.1a1.7 1.7 0 001.9.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.9 2.9l-.1.1a1.7 1.7 0 00-.3 1.9V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>',
+    gallery: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5.5-5.5L6 19"/>',
   };
-  function icon(name, size) {
+  function icon(name, size, extraClass) {
     const wrap = document.createElement("span");
     wrap.className = "gh-svg-wrap";
     const s = size || 20;
     wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ""}</svg>`;
-    return wrap.firstChild;
+    const svg = wrap.firstChild;
+    if (extraClass) svg.setAttribute("class", extraClass);
+    return svg;
   }
 
   // ---- time formatting ------------------------------------------------------------------------------
@@ -278,7 +288,7 @@
   }
 
   const ACCENTS = {
-    blue: ["#5865f2", "#4752c4"], yellow: ["#f0b232", "#c9911c"], purple: ["#9b59f6", "#7c3fd1"],
+    blue: ["#3e88f7", "#2f74e0"], yellow: ["#f0b232", "#c9911c"], purple: ["#9b59f6", "#7c3fd1"],
     green: ["#23a55a", "#1a7f45"], pink: ["#ff5c9e", "#d63f80"],
   };
   function applyAccent(host) {
@@ -287,6 +297,11 @@
     const pair = ACCENTS[key] || ACCENTS.blue;
     host.style.setProperty("--gh-accent", pair[0]);
     host.style.setProperty("--gh-accent-hover", pair[1]);
+  }
+  function applyReduceMotion(host) {
+    let on = false;
+    try { if (typeof window.dgSetting === "function") on = !!window.dgSetting("reduceMotion", false); } catch (e) {}
+    if (on) host.setAttribute("data-reduce-motion", ""); else host.removeAttribute("data-reduce-motion");
   }
 
   function mount() {
@@ -303,8 +318,9 @@
     document.documentElement.appendChild(host); // not body — see loading contract above
     applyZoom(host);
     applyAccent(host);
+    applyReduceMotion(host);
     window.addEventListener("resize", () => applyZoom(host));
-    if (typeof window.dgOnSettings === "function") window.dgOnSettings(() => applyAccent(host));
+    if (typeof window.dgOnSettings === "function") window.dgOnSettings(() => { applyAccent(host); applyReduceMotion(host); });
   }
 
   // =====================================================================================================
@@ -348,6 +364,10 @@
     ctx.actionSheet = buildActionSheet(ctx, overlays);
     ctx.gifSheet = buildGifSheet(ctx, overlays);
     ctx.newChatSheet = buildNewChatSheet(ctx, overlays);
+    ctx.attachSheet = buildAttachSheet(ctx, overlays);
+    // Every sheet starts fully out of the render tree (see closeSheetGeneric's note) — openSheetGeneric
+    // clears this the moment a sheet is actually opened.
+    for (const s of [ctx.actionSheet, ctx.gifSheet, ctx.newChatSheet, ctx.attachSheet]) s.sheet.style.display = "none";
 
     ctx.viewer = buildViewer(ctx);
     root.appendChild(ctx.viewer.el);
@@ -459,7 +479,11 @@
   function applyTyping(ctx, data) {
     if (!data) return;
     ctx.state.typingByConv.set(data.conversationId, new Set(data.userIds || []));
-    if (ctx.state.currentConvId === data.conversationId) updateTypingIndicator(ctx);
+    if (ctx.state.currentConvId === data.conversationId) {
+      updateTypingIndicator(ctx);
+      const cd = ctx.state.convById.get(data.conversationId);
+      if (cd) updateConvHeader(ctx, cd);
+    }
     renderHomeRowTyping(ctx, data.conversationId, (data.userIds || []).length > 0);
   }
 
@@ -470,24 +494,34 @@
     const screen = el("div", "gh-screen");
     screen.dataset.screen = "home";
     screen.innerHTML = `
-      <div class="gh-header">
-        <div class="gh-header-title">Messages</div>
-        <button class="gh-icon-btn gh-hit" data-act="settings"></button>
-        <button class="gh-icon-btn gh-hit" data-act="new"></button>
+      <div class="gh-home-header">
+        <div class="gh-home-nav-row">
+          <button class="gh-edit-btn gh-hit">Edit</button>
+          <div class="gh-collapsed-title">Chats</div>
+          <button class="gh-icon-btn gh-hit" data-act="new"></button>
+        </div>
+        <div class="gh-large-title-row"><div class="gh-large-title">Chats</div></div>
       </div>
       <div class="gh-home-body">
-        <div class="gh-search-wrap">
-          <div class="gh-search"></div>
-        </div>
-        <div class="gh-stories"></div>
         <div class="gh-ptr"><div class="gh-spinner"></div></div>
-        <div class="gh-list gh-scroll"></div>
+        <div class="gh-list gh-scroll">
+          <div class="gh-search-sticky"><div class="gh-search"></div></div>
+          <div class="gh-stories"></div>
+        </div>
       </div>
-      <button class="gh-fab gh-press" data-act="new"></button>
+      <div class="gh-tab-bar">
+        <button class="gh-tab-btn gh-hit" data-tab="chats" data-active="1"></button>
+        <button class="gh-tab-btn gh-hit" data-tab="stories"></button>
+        <button class="gh-tab-btn gh-hit" data-tab="settings"></button>
+      </div>
     `;
-    screen.querySelector('[data-act="settings"]').appendChild(icon("settings"));
-    screen.querySelector('[data-act="new"].gh-icon-btn').appendChild(icon("newMsg"));
-    screen.querySelector(".gh-fab").appendChild(icon("plus", 24));
+    screen.querySelector('[data-act="new"].gh-icon-btn').appendChild(icon("compose"));
+    const tabChats = screen.querySelector('[data-tab="chats"]');
+    tabChats.append(icon("chatsTab", 25), Object.assign(document.createElement("span"), { textContent: "Chats" }));
+    const tabStories = screen.querySelector('[data-tab="stories"]');
+    tabStories.append(icon("storiesTab", 25), Object.assign(document.createElement("span"), { textContent: "Stories" }));
+    const tabSettings = screen.querySelector('[data-tab="settings"]');
+    tabSettings.append(icon("settingsTab", 25), Object.assign(document.createElement("span"), { textContent: "Settings" }));
     const search = screen.querySelector(".gh-search");
     search.appendChild(icon("search", 16));
     const input = el("input");
@@ -502,16 +536,42 @@
     const storiesEl = screen.querySelector(".gh-stories");
     const ptr = screen.querySelector(".gh-ptr");
 
-    screen.querySelector('[data-act="settings"]').addEventListener("click", () => {
-      haptic();
-      try { if (typeof window.dgOpenSettings === "function") window.dgOpenSettings(); } catch (e) {}
-    });
+    screen.querySelector(".gh-edit-btn").addEventListener("click", () => { haptic(); ctx.showToast("Editing chats isn't available yet"); });
     for (const b of screen.querySelectorAll('[data-act="new"]')) {
       b.addEventListener("click", () => { haptic(); openNewChatSheet(ctx); });
     }
+    tabSettings.addEventListener("click", () => {
+      haptic();
+      for (const t of [tabChats, tabStories, tabSettings]) t.dataset.active = "0";
+      tabSettings.dataset.active = "1";
+      try { if (typeof window.dgOpenSettings === "function") window.dgOpenSettings(); } catch (e) {}
+      setTimeout(() => { tabSettings.dataset.active = "0"; tabChats.dataset.active = "1"; }, 400);
+    });
+    tabChats.addEventListener("click", () => {
+      haptic();
+      for (const t of [tabChats, tabStories, tabSettings]) t.dataset.active = "0";
+      tabChats.dataset.active = "1";
+      list.scrollTo({ top: 0, behavior: "smooth" });
+    });
+    tabStories.addEventListener("click", () => {
+      haptic();
+      for (const t of [tabChats, tabStories, tabSettings]) t.dataset.active = "0";
+      tabStories.dataset.active = "1";
+      list.scrollTo({ top: 0, behavior: "smooth" });
+    });
     input.addEventListener("input", () => { home.query = input.value.trim().toLowerCase(); renderHomeList(ctx); });
 
     const home = { screen, list, storiesEl, input, ptr, rows: new Map(), query: "" };
+    let scrollScheduled = false;
+    list.addEventListener("scroll", () => {
+      if (scrollScheduled) return;
+      scrollScheduled = true;
+      requestAnimationFrame(() => {
+        scrollScheduled = false;
+        const p = clamp(list.scrollTop / 36, 0, 1);
+        screen.style.setProperty("--gh-title-collapse", String(p));
+      });
+    }, { passive: true });
     initPullToRefresh(ctx, home);
     return home;
   }
@@ -545,32 +605,50 @@
     else img.src = placeholderAvatarUrl(user);
     return img;
   }
+  // Telegram-style gradient letter avatars: two-stop diagonal gradients, one of a small fixed palette
+  // picked deterministically from the user's id/name so the same person always gets the same colors.
+  const AVATAR_GRADIENTS = [
+    ["#ff885e", "#ff516a"], ["#ffcd6a", "#ffa85c"], ["#82b1ff", "#665fff"], ["#a0de7e", "#54cb68"],
+    ["#53edd6", "#28c9b7"], ["#72d5fd", "#2a9ef1"], ["#e0a2f3", "#d669ed"], ["#ff9dcb", "#e2506b"],
+  ];
+  function gradientFor(user, name) {
+    if (user && user.color) return [user.color, user.color];
+    return AVATAR_GRADIENTS[Math.abs(hashStr(String((user && user.id) || name))) % AVATAR_GRADIENTS.length];
+  }
   function placeholderAvatarUrl(user) {
     const name = (user && (user.name || user.username)) || "?";
-    const color = (user && user.color) || AVATAR_PALETTE[Math.abs(hashStr(String((user && user.id) || name))) % AVATAR_PALETTE.length];
+    const [c1, c2] = gradientFor(user, name);
     const label = initials(name);
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="${color}"/><text x="48" y="56" font-family="system-ui,sans-serif" font-size="36" font-weight="700" fill="rgba(255,255,255,0.92)" text-anchor="middle">${label}</text></svg>`;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient></defs><rect width="96" height="96" fill="url(#g)"/><text x="48" y="58" font-family="-apple-system,system-ui,sans-serif" font-size="36" font-weight="600" fill="#fff" text-anchor="middle">${label}</text></svg>`;
     return "data:image/svg+xml;utf8," + encodeURIComponent(svg);
   }
-  const AVATAR_PALETTE = ["#5865f2", "#eb459e", "#23a55a", "#f0b232", "#9b59f6", "#3ba55d", "#ed4245", "#00a8fc"];
 
+  // status -> tick state: single check = sent, double = delivered/opened/viewed (Telegram keeps both the
+  // same grey — there's no "read = blue" convention there, unlike WhatsApp). Only rendered when the bridge
+  // actually supplies conv.preview.status (an optional field per API.md); never fabricated.
+  function tickFor(status) {
+    if (status === "sent") return "single";
+    if (status === "delivered" || status === "opened" || status === "viewed" || status === "received") return "double";
+    return null;
+  }
   function previewLine(conv) {
     const p = conv.preview || { kind: "none" };
     const you = p.fromMe ? "You: " : "";
+    const tick = p.fromMe ? tickFor(p.status) : null;
     switch (p.kind) {
-      case "text": return { text: you + (p.text || ""), iconName: null };
-      case "chat-media": return { text: you + "Sent a photo", iconName: "photo" };
-      case "gif": return { text: you + "Sent a GIF", iconName: "gifBadge" };
-      case "audio": return { text: you + "Sent a voice message", iconName: "mic" };
+      case "text": return { text: you + (p.text || ""), iconName: null, tick };
+      case "chat-media": return { text: you + "Sent a photo", iconName: "photo", tick };
+      case "gif": return { text: you + "Sent a GIF", iconName: "gifBadge", tick };
+      case "audio": return { text: you + "Sent a voice message", iconName: "mic", tick };
       case "snap": {
         const label = p.fromMe
           ? ({ sent: "Snap sent", delivered: "Snap delivered", opened: "Snap opened" }[p.status] || "Snap sent")
           : ({ received: "New Snap", opened: "Opened", viewed: "Opened" }[p.status] || "New Snap");
-        return { text: label, iconName: "camera" };
+        return { text: label, iconName: "camera", tick: p.fromMe ? tickFor(p.status) : null };
       }
-      case "call": return { text: p.text || "Call", iconName: "call" };
-      case "system": return { text: p.text || "", iconName: null };
-      default: return { text: "No messages yet", iconName: null };
+      case "call": return { text: p.text || "Call", iconName: "call", tick: null };
+      case "system": return { text: p.text || "", iconName: null, tick: null };
+      default: return { text: "No messages yet", iconName: null, tick: null };
     }
   }
 
@@ -579,7 +657,7 @@
     const q = home.query;
     const list = home.list;
     const seen = new Set();
-    let prevEl = null;
+    let prevEl = home.storiesEl; // the sticky search field + stories rail are permanent, pinned before all rows
     for (const conv of ctx.state.conversations) {
       if (q && !(conv.title || "").toLowerCase().includes(q)) continue;
       seen.add(conv.id);
@@ -645,8 +723,9 @@
       dots.innerHTML = "<span></span><span></span><span></span>";
       previewEl.appendChild(dots);
     } else {
-      const { text, iconName } = previewLine(conv);
+      const { text, iconName, tick } = previewLine(conv);
       previewEl.innerHTML = "";
+      if (tick) previewEl.appendChild(icon(tick === "double" ? "checkDouble" : "check", 15, "gh-tick"));
       if (iconName) previewEl.appendChild(icon(iconName, 14));
       const span = el("span");
       span.textContent = text;
@@ -662,6 +741,7 @@
       streakEl.style.display = "";
     } else streakEl.style.display = "none";
     const badge = rowEl.querySelector(".gh-row-badge");
+    badge.dataset.muted = conv.muted ? "1" : "0";
     if (conv.unreadCount > 0) { badge.textContent = conv.unreadCount > 99 ? "99+" : String(conv.unreadCount); badge.style.display = ""; }
     else if (conv.hasUnreadSnap) { badge.textContent = ""; badge.style.width = "10px"; badge.style.minWidth = "10px"; badge.style.height = "10px"; badge.style.display = ""; }
     else badge.style.display = "none";
@@ -709,17 +789,17 @@
     screen.dataset.side = "right";
     screen.innerHTML = `
       <div class="gh-header">
-        <button class="gh-icon-btn gh-hit" data-act="back"></button>
+        <div class="gh-back-wrap">
+          <button class="gh-icon-btn gh-hit" data-act="back"></button>
+          <div class="gh-back-badge" data-empty="1"></div>
+        </div>
         <div class="gh-header-title">
           <div class="gh-conv-title-row">
             <div class="gh-conv-name"></div>
           </div>
           <div class="gh-conv-sub"></div>
         </div>
-        <div class="gh-conv-header-icons">
-          <span class="gh-icon-btn"></span>
-          <span class="gh-icon-btn"></span>
-        </div>
+        <div class="gh-conv-header-avatar"></div>
       </div>
       <div class="gh-messages gh-scroll">
         <div class="gh-msg-top-spacer" style="flex:none;"></div>
@@ -739,26 +819,20 @@
         <button class="gh-composer-btn gh-hit" data-act="attach"></button>
         <div class="gh-composer-field">
           <textarea class="gh-composer-textarea" rows="1" placeholder="Message"></textarea>
+          <button class="gh-composer-emoji-btn gh-hit" data-act="emoji"></button>
         </div>
-        <button class="gh-composer-btn gh-hit" data-act="gif"></button>
-        <button class="gh-composer-btn gh-hit" data-act="emoji"></button>
-        <button class="gh-composer-send gh-hit gh-press" data-act="send"></button>
-      </div>
-      <div class="gh-attach-menu">
-        <div class="gh-attach-item" data-act="photo"></div>
-        <div class="gh-attach-item" data-act="camera"></div>
+        <div class="gh-composer-send-wrap">
+          <button class="gh-composer-mic gh-hit gh-press" data-act="mic"></button>
+          <button class="gh-composer-send gh-hit gh-press" data-act="send"></button>
+        </div>
       </div>
       <input type="file" accept="image/*,video/*" class="gh-file-input" style="display:none;">
     `;
     screen.querySelector('[data-act="back"]').appendChild(icon("back"));
-    screen.querySelectorAll(".gh-conv-header-icons .gh-icon-btn")[0].appendChild(icon("call", 18));
-    screen.querySelectorAll(".gh-conv-header-icons .gh-icon-btn")[1].appendChild(icon("videoCall", 18));
-    screen.querySelector('[data-act="attach"]').appendChild(icon("plus"));
-    screen.querySelector('[data-act="gif"]').appendChild(icon("gifBadge"));
+    screen.querySelector('[data-act="attach"]').appendChild(icon("attach"));
     screen.querySelector('[data-act="emoji"]').appendChild(icon("emoji"));
+    screen.querySelector('[data-act="mic"]').appendChild(icon("mic"));
     screen.querySelector('[data-act="send"]').appendChild(icon("send", 18));
-    screen.querySelector('[data-act="photo"]').append(icon("photo"), Object.assign(document.createElement("span"), { textContent: "Photo & Video Library" }));
-    screen.querySelector('[data-act="camera"]').append(icon("camera"), Object.assign(document.createElement("span"), { textContent: "Camera" }));
     screen.querySelector(".gh-reply-bar-close").appendChild(icon("close", 16));
     screen.querySelector(".gh-jump").append(icon("chevronDown", 16), Object.assign(document.createElement("span"), { textContent: "New messages" }));
 
@@ -772,11 +846,13 @@
       replyBar: screen.querySelector(".gh-reply-bar"),
       textarea: screen.querySelector(".gh-composer-textarea"),
       sendBtn: screen.querySelector('[data-act="send"]'),
-      attachMenu: screen.querySelector(".gh-attach-menu"),
+      micBtn: screen.querySelector('[data-act="mic"]'),
       fileInput: screen.querySelector(".gh-file-input"),
       nameEl: screen.querySelector(".gh-conv-name"),
       subEl: screen.querySelector(".gh-conv-sub"),
       titleRow: screen.querySelector(".gh-conv-title-row"),
+      avatarSlot: screen.querySelector(".gh-conv-header-avatar"),
+      backBadge: screen.querySelector(".gh-back-badge"),
       rendered: new Map(), // messageId -> element
       windowStart: 0, windowEnd: 0,
       avgHeight: 64,
@@ -788,23 +864,18 @@
     conv.textarea.addEventListener("input", () => {
       conv.textarea.style.height = "auto";
       conv.textarea.style.height = Math.min(100, conv.textarea.scrollHeight) + "px";
-      conv.sendBtn.dataset.show = conv.textarea.value.trim() ? "1" : "0";
+      const hasText = !!conv.textarea.value.trim();
+      conv.sendBtn.dataset.show = hasText ? "1" : "0";
+      conv.micBtn.dataset.hide = hasText ? "1" : "0";
     });
     screen.querySelector('[data-act="send"]').addEventListener("click", () => sendCurrentText(ctx));
-    screen.querySelector('[data-act="attach"]').addEventListener("click", (e) => {
-      e.stopPropagation();
-      haptic();
-      conv.attachMenu.dataset.open = conv.attachMenu.dataset.open === "1" ? "0" : "1";
-    });
-    document.addEventListener("click", () => { conv.attachMenu.dataset.open = "0"; });
-    screen.querySelector('[data-act="photo"]').addEventListener("click", () => { conv.attachMenu.dataset.open = "0"; conv.fileInput.click(); });
-    screen.querySelector('[data-act="camera"]').addEventListener("click", () => { conv.attachMenu.dataset.open = "0"; openCamera(ctx, { mode: "snap" }); });
+    conv.micBtn.addEventListener("click", () => { haptic(); ctx.showToast("Voice messages need a device"); });
+    screen.querySelector('[data-act="attach"]').addEventListener("click", () => openAttachSheet(ctx));
     conv.fileInput.addEventListener("change", () => {
       const f = conv.fileInput.files && conv.fileInput.files[0];
       conv.fileInput.value = "";
       if (f) sendMediaFile(ctx, f);
     });
-    screen.querySelector('[data-act="gif"]').addEventListener("click", () => openGifSheet(ctx));
     screen.querySelector(".gh-reply-bar-close").addEventListener("click", () => setReplyTo(ctx, null));
     conv.jump.addEventListener("click", () => scrollConvToBottom(ctx, true));
     conv.messages.addEventListener("scroll", () => onConvScroll(ctx), { passive: true });
@@ -817,12 +888,26 @@
     const conv = ctx.conv;
     conv.nameEl.textContent = convData.title || "Unknown";
     const typingSet = ctx.state.typingByConv.get(convData.id);
-    if (typingSet && typingSet.size) conv.subEl.textContent = "typing…";
-    else conv.subEl.textContent = convData.isGroup ? `${(convData.participants || []).length} members` : "";
+    if (typingSet && typingSet.size) {
+      conv.subEl.innerHTML = "";
+      conv.subEl.append(document.createTextNode("typing"), (() => { const d = el("span", "gh-row-dots"); d.innerHTML = "<span></span><span></span><span></span>"; return d; })());
+      conv.subEl.dataset.typing = "1";
+    } else {
+      conv.subEl.dataset.typing = "0";
+      conv.subEl.textContent = convData.isGroup ? `${(convData.participants || []).length} members` : "last seen recently";
+    }
     const av = convData.isGroup ? { name: convData.title, avatarUrl: convData.avatarUrl } : (convData.participants && convData.participants[0]) || { name: convData.title };
-    const old = conv.titleRow.querySelector(".gh-avatar");
-    if (old) old.remove();
-    conv.titleRow.insertBefore(makeAvatar(av, 32), conv.titleRow.firstChild);
+    conv.avatarSlot.innerHTML = "";
+    conv.avatarSlot.appendChild(makeAvatar(av, 34));
+    conv.messages.dataset.group = convData.isGroup ? "1" : "0";
+    // back-button badge: how many OTHER conversations still have something unread, like iOS Mail/Messages
+    let otherUnread = 0;
+    for (const c of ctx.state.conversations) {
+      if (c.id === convData.id) continue;
+      if (c.unreadCount > 0 || c.hasUnreadSnap) otherUnread++;
+    }
+    conv.backBadge.dataset.empty = otherUnread > 0 ? "0" : "1";
+    conv.backBadge.textContent = otherUnread > 99 ? "99+" : String(otherUnread);
   }
 
   async function openConversationScreen(ctx, conversationId) {
@@ -837,6 +922,7 @@
     conv.replyTo = null;
     conv.textarea.value = "";
     conv.sendBtn.dataset.show = "0";
+    conv.micBtn.dataset.hide = "0";
     setReplyTo(ctx, null);
     let entry = ctx.state.messagesByConv.get(conversationId);
     if (!entry) {
@@ -880,6 +966,16 @@
     conv.windowStart = start;
     conv.windowEnd = end;
     paintWindow(ctx, conv);
+    // pop-in animation for a genuinely new message (never for a virtualized-scroll window shift, which
+    // calls paintWindow directly instead of coming through here — see handleWindowScroll)
+    if (opts.stick && !opts.initial) {
+      const wraps = conv.messages.querySelectorAll(".gh-msg-wrap");
+      const last = wraps[wraps.length - 1];
+      if (last) {
+        last.classList.add("gh-msg-pop");
+        last.addEventListener("animationend", () => last.classList.remove("gh-msg-pop"), { once: true });
+      }
+    }
     if (opts.initial || opts.stick) {
       if (conv.atBottom || opts.initial) requestAnimationFrame(() => scrollConvToBottom(ctx, false));
       else showJump(ctx, true);
@@ -929,7 +1025,7 @@
       tm.textContent = fmtClock(g.items[0].ts);
       meta.append(nm, tm);
       col.appendChild(meta);
-      for (const m of g.items) col.appendChild(messageWrapEl(ctx, m, isMe));
+      for (let i = 0; i < g.items.length; i++) col.appendChild(messageWrapEl(ctx, g.items[i], isMe, i === g.items.length - 1));
       groupEl.append(gutter, col);
       frag.appendChild(groupEl);
     }
@@ -955,22 +1051,36 @@
     return e;
   }
 
-  function messageWrapEl(ctx, m, isMe) {
+  function messageWrapEl(ctx, m, isMe, isLast) {
     const wrap = el("div", "gh-msg-wrap");
     wrap.dataset.messageId = m.id;
     const swipe = el("div", "gh-msg-swipe");
     const hint = el("div", "gh-reply-hint");
     hint.appendChild(icon("reply", 18));
     if (m.replyTo) swipe.appendChild(replyQuoteEl(m.replyTo));
-    swipe.appendChild(bubbleEl(ctx, m, isMe));
+    swipe.appendChild(bubbleEl(ctx, m, isMe, isLast));
     if (m.reactions && m.reactions.length) swipe.appendChild(reactionsEl(ctx, m));
-    if (isMe) {
-      const status = el("div", "gh-msg-status");
-      status.textContent = m.pending ? "Sending…" : m.failed ? "Failed" : "";
-      if (status.textContent) swipe.appendChild(status);
+    if (isMe && m.failed) {
+      const status = el("div", "gh-msg-status-fail");
+      status.textContent = "Not delivered — tap to retry";
+      swipe.appendChild(status);
     }
     wrap.append(hint, swipe);
     return wrap;
+  }
+  // time + delivery ticks, rendered as a floated trailing element inside the bubble's flow-root so text
+  // wraps around it exactly the way Telegram's own trailing timestamp does (see .gh-bubble-meta in ui.css).
+  // Tick state comes only from fields ghost/API.md already defines (pending/failed) — there is no per-message
+  // read-receipt field in the contract, so a normally-sent message always shows the "delivered" double tick.
+  function tickMetaEl(m, isMe, extraClass) {
+    const meta = el("span", (extraClass ? "gh-bubble-meta " + extraClass : "gh-bubble-meta"));
+    meta.appendChild(document.createTextNode(fmtClock(m.ts)));
+    if (isMe) {
+      if (m.failed) meta.appendChild(icon("close", 14, "gh-tick gh-tick-fail"));
+      else if (m.pending) meta.appendChild(icon("check", 14, "gh-tick gh-tick-pending"));
+      else meta.appendChild(icon("checkDouble", 14, "gh-tick"));
+    }
+    return meta;
   }
   function replyQuoteEl(r) {
     const q = el("div", "gh-reply-quote");
@@ -1004,24 +1114,28 @@
     return wrap;
   }
 
-  function bubbleEl(ctx, m, isMe) {
+  function bubbleEl(ctx, m, isMe, isLast) {
     switch (m.kind) {
       case "text": {
         const b = el("div", "gh-bubble");
-        b.textContent = m.text || "";
+        if (isLast) b.dataset.tail = "1";
+        b.appendChild(document.createTextNode(m.text || ""));
+        b.appendChild(tickMetaEl(m, isMe));
         if (m.failed) b.dataset.failed = "1";
         return b;
       }
       case "chat-media": {
-        const b = el("div", "gh-bubble", {});
-        b.style.padding = "3px";
+        const b = el("div", "gh-bubble gh-gif-bubble", {});
         const media = mediaEl(m.media && m.media[0], { fullscreenOnTap: true, ctx, message: m });
+        media.appendChild(tickMetaEl(m, isMe, "gh-media-meta"));
         b.appendChild(media);
         return b;
       }
       case "gif": {
         const b = el("div", "gh-bubble gh-gif-bubble");
-        b.appendChild(mediaEl(m.media && m.media[0], { autoplay: true, ctx, message: m }));
+        const media = mediaEl(m.media && m.media[0], { autoplay: true, ctx, message: m });
+        media.appendChild(tickMetaEl(m, isMe, "gh-media-meta"));
+        b.appendChild(media);
         return b;
       }
       case "sticker": {
@@ -1030,18 +1144,21 @@
         const img = el("img");
         img.src = (ref && (ref.url || (ref.blob && URL.createObjectURL(ref.blob)))) || "";
         b.appendChild(img);
+        b.appendChild(tickMetaEl(m, isMe, "gh-sticker-meta"));
         return b;
       }
-      case "snap": return snapTileEl(ctx, m);
-      case "audio": return audioBubbleEl(ctx, m, isMe);
+      case "snap": return snapTileEl(ctx, m, isMe);
+      case "audio": return audioBubbleEl(ctx, m, isMe, isLast);
       case "unknown": {
         const b = el("div", "gh-bubble gh-unknown");
-        b.textContent = m.text || "Unsupported message";
+        b.appendChild(document.createTextNode(m.text || "Unsupported message"));
+        b.appendChild(tickMetaEl(m, isMe));
         return b;
       }
       default: {
         const b = el("div", "gh-bubble gh-unknown");
-        b.textContent = m.text || "";
+        b.appendChild(document.createTextNode(m.text || ""));
+        b.appendChild(tickMetaEl(m, isMe));
         return b;
       }
     }
@@ -1070,12 +1187,12 @@
     return wrap;
   }
 
-  function snapTileEl(ctx, m) {
+  function snapTileEl(ctx, m, isMe) {
     const b = el("div", "gh-snap-tile");
     b.dataset.opened = m.opened ? "1" : "0";
-    b.appendChild(icon("camera", 30));
+    b.appendChild(icon(m.opened ? "camera" : "lock", 20));
     const label = el("div");
-    label.textContent = m.opened ? "Opened" : "Tap to view";
+    label.textContent = m.opened ? "Snap · Opened" : "Snap · Tap to view";
     b.appendChild(label);
     b.classList.add("gh-press");
     b.addEventListener("click", async () => {
@@ -1085,7 +1202,8 @@
         const res = await api.openSnap(ctx.state.currentConvId, m.id);
         m.opened = true;
         b.dataset.opened = "1";
-        label.textContent = "Opened";
+        label.textContent = "Snap · Opened";
+        b.replaceChild(icon("camera", 20), b.firstChild);
         const items = (res && res.media) || [];
         if (items.length) openViewerSequence(ctx, items, { title: (m.from && m.from.name) || "Snap" });
       } catch (e) { ctx.showToast("Couldn't open that Snap"); }
@@ -1093,9 +1211,10 @@
     return b;
   }
 
-  function audioBubbleEl(ctx, m, isMe) {
+  function audioBubbleEl(ctx, m, isMe, isLast) {
     const ref = (m.media && m.media[0]) || {};
     const b = el("div", "gh-bubble gh-audio");
+    if (isLast) b.dataset.tail = "1";
     const playBtn = el("button", "gh-audio-play gh-hit");
     playBtn.appendChild(icon("play", 16));
     const wave = el("div", "gh-audio-wave");
@@ -1138,6 +1257,7 @@
     });
     b.append(playBtn, wave, speedBtn);
     if (ref.durationSec) { const d = el("span", "gh-audio-speed"); d.style.background = "transparent"; d.textContent = fmtDuration(ref.durationSec); b.appendChild(d); }
+    b.appendChild(tickMetaEl(m, isMe, "gh-audio-meta"));
     return b;
   }
 
@@ -1233,6 +1353,7 @@
     conv.textarea.value = "";
     conv.textarea.style.height = "auto";
     conv.sendBtn.dataset.show = "0";
+    conv.micBtn.dataset.hide = "0";
     const replyToMessageId = conv.replyTo ? conv.replyTo.id : undefined;
     setReplyTo(ctx, null);
     try { await api.sendText(convId, text, replyToMessageId ? { replyToMessageId } : {}); }
@@ -1342,18 +1463,33 @@
 
     overlaysRoot.appendChild(backdrop);
     overlaysRoot.appendChild(sheet);
-    backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
     function textSpan(t) { const s = el("span"); s.textContent = t; return s; }
 
-    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, message: null };
+    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, message: null, liftedEl: null };
+    function closeAction() {
+      if (s.liftedEl) { s.liftedEl.classList.remove("gh-msg-lifted"); s.liftedEl = null; }
+      closeSheetGeneric(backdrop, sheet);
+    }
+    s.close = closeAction;
+    backdrop.addEventListener("click", closeAction);
     return s;
   }
   function closeSheetGeneric(backdrop, sheet) {
     backdrop.dataset.open = "0";
     sheet.classList.add("gh-anim");
     sheet.dataset.open = "0";
+    // Fully drop the sheet out of the render tree once its slide-down finishes, instead of just leaving it
+    // transformed off-screen: on this machine's software compositor, a long-lived page that keeps many
+    // transform-animated overlay layers around (several sheets, each opened/closed a few times) can start
+    // leaving a closed layer's last-painted pixels on screen even though its own geometry/attributes are
+    // correctly "closed" (reproducible on the unmodified original code too, given enough sheet toggles) —
+    // `display:none` sidesteps it outright since a display:none box has nothing to paint or leave behind.
+    clearTimeout(sheet._closeTimer);
+    sheet._closeTimer = setTimeout(() => { if (sheet.dataset.open === "0") sheet.style.display = "none"; }, 360);
   }
   function openSheetGeneric(backdrop, sheet) {
+    clearTimeout(sheet._closeTimer);
+    sheet.style.display = "";
     backdrop.dataset.open = "1";
     sheet.classList.add("gh-anim");
     requestAnimationFrame(() => { sheet.dataset.open = "1"; });
@@ -1369,19 +1505,20 @@
       b.onclick = () => {
         haptic("light");
         api.react(convId, message.id, mine ? null : b.dataset.emoji).catch(() => {});
-        closeSheetGeneric(s.backdrop, s.sheet);
+        s.close();
       };
     }
-    s.replyItem.onclick = () => { setReplyTo(ctx, message); ctx.conv.textarea.focus(); closeSheetGeneric(s.backdrop, s.sheet); };
-    s.copyItem.onclick = () => { copyToClipboard(message.text || ""); closeSheetGeneric(s.backdrop, s.sheet); };
+    s.replyItem.onclick = () => { setReplyTo(ctx, message); ctx.conv.textarea.focus(); s.close(); };
+    s.copyItem.onclick = () => { copyToClipboard(message.text || ""); s.close(); };
     const saveLabel = s.saveItem.querySelector("span");
     saveLabel.textContent = message.saved ? "Unsave" : "Save";
     s.saveItem.onclick = () => {
       const next = !message.saved;
       message.saved = next;
       api.saveMessage(convId, message.id, next).catch(() => {});
-      closeSheetGeneric(s.backdrop, s.sheet);
+      s.close();
     };
+    if (wrapEl) { wrapEl.classList.add("gh-msg-lifted"); s.liftedEl = wrapEl; }
     openSheetGeneric(s.backdrop, s.sheet);
   }
   function copyToClipboard(text) {
@@ -1391,6 +1528,52 @@
       ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
       document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
     } catch (e) {}
+  }
+
+  // =====================================================================================================
+  // Attach sheet (paperclip in the composer) — Telegram-style bottom sheet: Gallery, Camera, GIF
+  // =====================================================================================================
+  function buildAttachSheet(ctx, overlaysRoot) {
+    const backdrop = el("div", "gh-backdrop");
+    const sheet = el("div", "gh-sheet gh-attach-sheet");
+    sheet.innerHTML = `
+      <div class="gh-sheet-grip"></div>
+      <div class="gh-action-list">
+        <div class="gh-action-item" data-act="photo"></div>
+        <div class="gh-action-item" data-act="camera"></div>
+        <div class="gh-action-item" data-act="gif"></div>
+      </div>
+    `;
+    const row = (act, tint, iconName, label) => {
+      const item = sheet.querySelector(`[data-act="${act}"]`);
+      const tag = el("div", "gh-attach-icon");
+      tag.dataset.tint = tint;
+      tag.appendChild(icon(iconName, 19));
+      item.append(tag, Object.assign(document.createElement("span"), { textContent: label }));
+    };
+    row("photo", "blue", "gallery", "Gallery");
+    row("camera", "pink", "camera", "Camera");
+    row("gif", "green", "gifBadge", "GIF");
+    overlaysRoot.append(backdrop, sheet);
+    // Closing WITHOUT the slide-down transition here on purpose: the destination (gif sheet / camera /
+    // file picker) covers the same screen area a moment later, so animating this sheet's own close at the
+    // same time as another sheet's open animation just fights it for that space and never reads as
+    // intentional. An instant close reads as "handed off", which is what it visually is.
+    function closeInstant(next) {
+      backdrop.classList.remove("gh-anim"); sheet.classList.remove("gh-anim");
+      backdrop.dataset.open = "0"; sheet.dataset.open = "0";
+      sheet.style.display = "none"; // see closeSheetGeneric's note — dropped from the render tree immediately
+      next();
+    }
+    backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
+    sheet.querySelector('[data-act="photo"]').addEventListener("click", () => closeInstant(() => ctx.conv.fileInput.click()));
+    sheet.querySelector('[data-act="camera"]').addEventListener("click", () => closeInstant(() => openCamera(ctx, { mode: "snap" })));
+    sheet.querySelector('[data-act="gif"]').addEventListener("click", () => closeInstant(() => openGifSheet(ctx)));
+    return { backdrop, sheet };
+  }
+  function openAttachSheet(ctx) {
+    haptic();
+    openSheetGeneric(ctx.attachSheet.backdrop, ctx.attachSheet.sheet);
   }
 
   // =====================================================================================================

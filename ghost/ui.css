@@ -1,8 +1,8 @@
-/* Ghost — brand-new dark, Discord-like messaging UI drawn over a hidden Snapchat Web page.
-   Injected as a <style> inside <ghost-app>'s shadow root by ui.js (see the loading contract note at the
-   top of ui.js) — nothing here can leak to/from Snapchat's page, so there is zero Snapchat-look risk.
-   One dark theme by design (the brief asks for "dark Discord-like", not a light mode); the "accent" native
-   setting still recolors --gh-accent cheaply (see applyAccent() in ui.js). */
+/* Ghost — messaging UI drawn over a hidden Snapchat Web page, styled to look and feel like Telegram for iOS
+   (night theme). Injected as a <style> inside <ghost-app>'s shadow root by ui.js (see the loading contract
+   note at the top of ui.js) — nothing here can leak to/from Snapchat's page, so there is zero Snapchat-look
+   risk. One dark theme by design; the "accent" native setting still recolors --gh-accent cheaply (see
+   applyAccent() in ui.js) for people who want a different bubble/pill tint than Telegram blue. */
 
 /* ---------------------------------------------------------------------------------------------------
    Host: the whole app sits in one fixed layer over the page. `zoom` corrects for Snapchat Web's own
@@ -17,7 +17,7 @@
   zoom: var(--gh-zoom, 1);
   display: block;
   contain: layout size style;
-  font-family: -apple-system, "SF Pro Text", "Inter", system-ui, sans-serif;
+  font-family: -apple-system, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
   color: var(--gh-text);
   -webkit-tap-highlight-color: transparent;
 }
@@ -30,40 +30,52 @@
   -webkit-touch-callout: none;
 }
 
-/* ---- palette --------------------------------------------------------------------------------------- */
+/* ---- palette: Telegram iOS "Night" -------------------------------------------------------------------- */
 :host {
-  --gh-bg-0: #111214;   /* deepest: conversation list column, status/nav backdrop */
-  --gh-bg-1: #1e1f22;   /* app surface: home body, message list */
-  --gh-bg-2: #2b2d31;   /* elevated: headers, composer, sheets, cards, incoming bubbles */
-  --gh-bg-3: #35373c;   /* hover / pressed / inputs */
-  --gh-bg-4: #3f4147;   /* stronger hover on bg-3 elements */
-  --gh-accent: #5865f2;
-  --gh-accent-hover: #4752c4;
+  --gh-bg-app: #0e161f;      /* deepest backdrop, behind the wallpaper */
+  --gh-bg-list: #17212b;     /* chat list + settings surfaces */
+  /* Nav bars/composer/tab-bar read as "frosted glass" via a near-opaque tint rather than a live
+     backdrop-filter blur: blurring continuously-scrolling content behind fixed chrome is the classic
+     expensive case for a compositor with no hardware blur path (confirmed on this machine's software GL —
+     it alone blew the scripted-scroll frame budget), so real motion cost stays at zero here. */
+  --gh-bg-header: rgba(21, 30, 39, 0.96);
+  --gh-bg-panel: #1c2733;    /* sheets, cards, popovers */
+  --gh-bg-panel-2: #24313f;  /* hover / pressed / inputs on a panel */
+  --gh-bg-input: #253340;    /* composer field, search field */
+  --gh-bubble-in-1: #1c2936;
+  --gh-bubble-in-2: #18232e;
+  --gh-bubble-out-1: #3a6a94;
+  --gh-bubble-out-2: #2b5278;
+  --gh-accent: #3e88f7;
+  --gh-accent-hover: #2f74e0;
   --gh-accent-text: #ffffff;
-  --gh-text: #f2f3f5;
-  --gh-text-muted: #949ba4;
-  --gh-text-faint: #6d6f78;
-  --gh-danger: #f23f42;
-  --gh-success: #23a55a;
-  --gh-streak: #ff8c42;
-  --gh-divider: rgba(255, 255, 255, 0.06);
-  --gh-overlay: rgba(0, 0, 0, 0.6);
+  --gh-text: #ffffff;
+  --gh-text-secondary: #8b98a5;
+  --gh-text-tertiary: #64707c;
+  --gh-danger: #ff5555;
+  --gh-streak: #ff9f2e;
+  --gh-unread-pill: var(--gh-accent);
+  --gh-muted-pill: #4b5762;
+  --gh-divider: rgba(255, 255, 255, 0.07);
+  --gh-overlay: rgba(3, 8, 13, 0.62);
   --gh-radius-lg: 20px;
-  --gh-radius-md: 14px;
-  --gh-radius-sm: 8px;
+  --gh-radius-md: 17px;
+  --gh-radius-sm: 9px;
   --gh-safe-t: env(safe-area-inset-top, 0px);
   --gh-safe-b: env(safe-area-inset-bottom, 0px);
   --gh-safe-l: env(safe-area-inset-left, 0px);
   --gh-safe-r: env(safe-area-inset-right, 0px);
+  --gh-spring: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .gh-root {
   position: absolute;
   inset: 0;
-  background: var(--gh-bg-1);
+  background: var(--gh-bg-app);
   overflow: hidden;
   font-size: 15px;
   line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
 }
 
 button {
@@ -93,17 +105,17 @@ input, textarea {
   justify-content: center;
 }
 .gh-press {
-  transition: transform 0.12s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.12s ease;
+  transition: transform 0.15s var(--gh-spring), opacity 0.15s ease, background 0.15s ease;
 }
 .gh-press:active {
-  transform: scale(0.94);
-  opacity: 0.75;
+  transform: scale(0.96);
+  opacity: 0.8;
 }
 
 .gh-avatar {
   border-radius: 50%;
   object-fit: cover;
-  background: var(--gh-bg-3);
+  background: var(--gh-bg-panel-2);
   flex: none;
   display: block;
 }
@@ -116,6 +128,19 @@ input, textarea {
 }
 .gh-scroll::-webkit-scrollbar { display: none; }
 
+/* respect the native reduceMotion setting the same way we respect the OS-level one */
+:host([data-reduce-motion]) .gh-screen.gh-anim,
+:host([data-reduce-motion]) .gh-sheet.gh-anim,
+:host([data-reduce-motion]) .gh-shade.gh-anim,
+:host([data-reduce-motion]) .gh-msg-swipe.gh-anim,
+:host([data-reduce-motion]) .gh-press,
+:host([data-reduce-motion]) .gh-msg-pop,
+:host([data-reduce-motion]) .gh-composer-send,
+:host([data-reduce-motion]) .gh-composer-mic {
+  transition-duration: 0.001s !important;
+  animation-duration: 0.001s !important;
+}
+
 /* ---------------------------------------------------------------------------------------------------
    Boot screen
 --------------------------------------------------------------------------------------------------- */
@@ -127,25 +152,25 @@ input, textarea {
   align-items: center;
   justify-content: center;
   gap: 18px;
-  background: var(--gh-bg-0);
+  background: var(--gh-bg-app);
   z-index: 5;
 }
 .gh-boot-logo {
   width: 76px;
   height: 76px;
   border-radius: 22px;
-  background: linear-gradient(160deg, var(--gh-accent), #8b5cf6);
+  background: linear-gradient(160deg, #6fb4ff, var(--gh-accent) 60%, #2a63c9);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 12px 32px rgba(88, 101, 242, 0.35);
+  box-shadow: 0 14px 34px rgba(62, 136, 247, 0.4);
 }
 .gh-boot-logo svg { width: 40px; height: 40px; }
 .gh-spinner {
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  border: 3px solid var(--gh-bg-3);
+  border: 3px solid var(--gh-bg-panel-2);
   border-top-color: var(--gh-accent);
   animation: gh-spin 0.8s linear infinite;
 }
@@ -163,14 +188,14 @@ input, textarea {
 .gh-screen {
   position: absolute;
   inset: 0;
-  background: var(--gh-bg-1);
+  background: var(--gh-bg-list);
   display: flex;
   flex-direction: column;
   will-change: transform;
   transform: translate3d(0, 0, 0);
 }
 .gh-screen[data-side="right"] { transform: translate3d(100%, 0, 0); }
-.gh-screen.gh-anim { transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1); }
+.gh-screen.gh-anim { transition: transform 0.38s var(--gh-spring); }
 .gh-shade {
   position: absolute;
   inset: 0;
@@ -178,27 +203,27 @@ input, textarea {
   opacity: 0;
   pointer-events: none;
 }
-.gh-shade.gh-anim { transition: opacity 0.32s cubic-bezier(0.32, 0.72, 0, 1); }
+.gh-shade.gh-anim { transition: opacity 0.38s var(--gh-spring); }
 
 /* ---------------------------------------------------------------------------------------------------
-   Header (shared shape: home + conversation)
+   Header: frosted glass nav bar, shared shape between home + conversation
 --------------------------------------------------------------------------------------------------- */
 .gh-header {
   flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: calc(var(--gh-safe-t) + 8px) 12px 10px;
-  background: var(--gh-bg-2);
-  border-bottom: 1px solid var(--gh-divider);
+  padding: calc(var(--gh-safe-t) + 6px) 12px 8px;
+  background: var(--gh-bg-header);
+  border-bottom: 0.5px solid var(--gh-divider);
   position: relative;
-  z-index: 2;
+  z-index: 5;
 }
 .gh-header-title {
   flex: 1;
   min-width: 0;
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 17px;
+  font-weight: 600;
   letter-spacing: -0.2px;
   white-space: nowrap;
   overflow: hidden;
@@ -211,31 +236,101 @@ input, textarea {
   display: flex;
   align-items: center;
   justify-content: center;
+  color: var(--gh-accent);
+  flex: none;
+}
+.gh-icon-btn:active { background: rgba(255, 255, 255, 0.08); }
+.gh-icon-btn svg { width: 23px; height: 23px; }
+
+/* ---------------------------------------------------------------------------------------------------
+   HOME: large-title header that collapses on scroll, sticky search, stories rail, chat rows, tab bar.
+--------------------------------------------------------------------------------------------------- */
+.gh-home-header {
+  flex: none;
+  position: relative;
+  z-index: 5;
+  background: var(--gh-bg-header);
+  border-bottom: 0.5px solid var(--gh-divider);
+  padding-top: var(--gh-safe-t);
+}
+.gh-home-nav-row {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  gap: 4px;
+}
+.gh-edit-btn {
+  color: var(--gh-accent);
+  font-size: 17px;
+  font-weight: 400;
+  padding: 0 10px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+.gh-edit-btn:active { opacity: 0.5; }
+.gh-collapsed-title {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 17px;
+  font-weight: 600;
+  opacity: var(--gh-title-collapse, 0);
+  transition: opacity 0.05s linear;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gh-large-title-row {
+  padding: 0 16px 6px;
+  transform-origin: left bottom;
+  transform: scale(calc(1 - 0.14 * var(--gh-title-collapse, 0)))
+             translateY(calc(-1 * var(--gh-title-collapse, 0) * 4px));
+  opacity: calc(1 - 0.9 * var(--gh-title-collapse, 0));
+  transition: opacity 0.05s linear;
+  height: calc(40px * (1 - var(--gh-title-collapse, 0)));
+  overflow: hidden;
+  display: flex;
+  align-items: flex-start;
+}
+.gh-large-title {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
   color: var(--gh-text);
 }
-.gh-icon-btn:active { background: var(--gh-bg-3); }
-.gh-icon-btn svg { width: 22px; height: 22px; }
 
-/* ---- Home ------------------------------------------------------------------------------------------ */
 .gh-home-body {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--gh-bg-1);
+  background: var(--gh-bg-list);
 }
-.gh-search-wrap { padding: 8px 12px 4px; flex: none; }
+.gh-list {
+  flex: 1;
+  min-height: 0;
+  padding-bottom: calc(var(--gh-safe-b) + 60px); /* clears the frosted tab bar */
+}
+.gh-search-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--gh-bg-list);
+  padding: 8px 12px 8px;
+}
 .gh-search {
-  height: 38px;
-  border-radius: 12px;
-  background: var(--gh-bg-2);
+  height: 36px;
+  border-radius: 11px;
+  background: var(--gh-bg-input);
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 12px;
-  color: var(--gh-text-muted);
+  gap: 7px;
+  padding: 0 10px;
+  color: var(--gh-text-secondary);
 }
-.gh-search svg { width: 16px; height: 16px; flex: none; opacity: 0.8; }
+.gh-search svg { width: 16px; height: 16px; flex: none; opacity: 0.85; }
 .gh-search input {
   flex: 1;
   min-width: 0;
@@ -243,15 +338,15 @@ input, textarea {
   border: none;
   outline: none;
   color: var(--gh-text);
-  font-size: 15px;
+  font-size: 16px;
 }
-.gh-search input::placeholder { color: var(--gh-text-faint); }
+.gh-search input::placeholder { color: var(--gh-text-tertiary); }
 
 .gh-stories {
   flex: none;
   display: flex;
   gap: 14px;
-  padding: 10px 14px 12px;
+  padding: 4px 14px 14px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
@@ -259,7 +354,7 @@ input, textarea {
 .gh-stories::-webkit-scrollbar { display: none; }
 .gh-story {
   flex: none;
-  width: 60px;
+  width: 62px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -270,50 +365,28 @@ input, textarea {
   height: 58px;
   border-radius: 50%;
   padding: 2.5px;
-  background: var(--gh-bg-3);
+  background: var(--gh-bg-panel-2);
 }
 .gh-story[data-unviewed="1"] .gh-story-ring {
-  background: linear-gradient(135deg, #5865f2, #8b5cf6 45%, #ff8c42);
+  background: linear-gradient(135deg, #4fb0ff, var(--gh-accent) 55%, #7d5fff);
 }
-.gh-story-ring .gh-avatar { width: 100%; height: 100%; border: 2.5px solid var(--gh-bg-1); }
+.gh-story-ring .gh-avatar { width: 100%; height: 100%; border: 2.5px solid var(--gh-bg-list); }
 .gh-story-name {
-  font-size: 11px;
-  color: var(--gh-text-muted);
-  max-width: 60px;
+  font-size: 11.5px;
+  color: var(--gh-text-secondary);
+  max-width: 62px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.gh-story[data-me="1"] .gh-story-ring { position: relative; }
-.gh-story-add {
-  position: absolute;
-  right: -2px;
-  bottom: -2px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--gh-accent);
-  border: 2.5px solid var(--gh-bg-1);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  line-height: 1;
-  color: #fff;
-}
 
-.gh-list {
-  flex: 1;
-  min-height: 0;
-  padding-bottom: calc(var(--gh-safe-b) + 84px); /* clears the FAB so the last row can scroll fully into view */
-}
 .gh-ptr {
   height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  color: var(--gh-text-muted);
+  color: var(--gh-text-secondary);
   transition: height 0.15s ease;
 }
 .gh-ptr .gh-spinner { width: 20px; height: 20px; border-width: 2px; }
@@ -322,21 +395,24 @@ input, textarea {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 9px 14px;
+  padding: 8px 14px;
   position: relative;
 }
-.gh-row:active { background: var(--gh-bg-2); }
-.gh-row-avatar-wrap { position: relative; flex: none; }
-.gh-row .gh-avatar { width: 52px; height: 52px; }
-.gh-row-unread-ring {
+.gh-row:active { background: rgba(255, 255, 255, 0.05); }
+.gh-row::after {
+  content: "";
   position: absolute;
-  inset: -3px;
-  border-radius: 50%;
-  border: 2.5px solid var(--gh-accent);
-  display: none;
+  left: 84px;
+  right: 0;
+  bottom: 0;
+  height: 0.5px;
+  background: var(--gh-divider);
 }
-.gh-row[data-unread="1"] .gh-row-unread-ring { display: block; }
-.gh-row-body { flex: 1; min-width: 0; }
+.gh-row:last-child::after { display: none; }
+.gh-row-avatar-wrap { position: relative; flex: none; }
+.gh-row .gh-avatar { width: 58px; height: 58px; }
+.gh-row-unread-ring { display: none; } /* Telegram doesn't ring unread rows; the pill/bold text says it */
+.gh-row-body { flex: 1; min-width: 0; padding-top: 1px; }
 .gh-row-top {
   display: flex;
   align-items: baseline;
@@ -346,29 +422,29 @@ input, textarea {
   flex: 1;
   min-width: 0;
   font-weight: 600;
-  font-size: 15.5px;
+  font-size: 17px;
+  color: var(--gh-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.gh-row[data-unread="1"] .gh-row-name { color: #fff; }
 .gh-row-time {
   flex: none;
-  font-size: 12px;
-  color: var(--gh-text-faint);
+  font-size: 15px;
+  color: var(--gh-text-tertiary);
 }
-.gh-row[data-unread="1"] .gh-row-time { color: var(--gh-accent); font-weight: 600; }
+.gh-row[data-unread="1"] .gh-row-time { color: var(--gh-accent); font-weight: 500; }
 .gh-row-bottom {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   margin-top: 2px;
 }
 .gh-row-preview {
   flex: 1;
   min-width: 0;
-  font-size: 13.5px;
-  color: var(--gh-text-muted);
+  font-size: 15px;
+  color: var(--gh-text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -376,12 +452,12 @@ input, textarea {
   align-items: center;
   gap: 4px;
 }
-.gh-row[data-unread="1"] .gh-row-preview { color: var(--gh-text); font-weight: 500; }
 .gh-row-preview svg { width: 14px; height: 14px; flex: none; opacity: 0.85; }
+.gh-row-preview .gh-tick { width: 15px; height: 15px; flex: none; opacity: 0.65; margin-right: 1px; }
 .gh-row-streak {
   flex: none;
-  font-size: 12px;
-  color: var(--gh-text-muted);
+  font-size: 12.5px;
+  color: var(--gh-text-secondary);
   display: flex;
   align-items: center;
   gap: 2px;
@@ -389,25 +465,26 @@ input, textarea {
 .gh-row-streak[data-expiring="1"] { color: var(--gh-streak); }
 .gh-row-badge {
   flex: none;
-  min-width: 20px;
-  height: 20px;
+  min-width: 22px;
+  height: 22px;
   padding: 0 6px;
-  border-radius: 10px;
-  background: var(--gh-accent);
+  border-radius: 11px;
+  background: var(--gh-unread-pill);
   color: #fff;
-  font-size: 11.5px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: center;
 }
+.gh-row-badge[data-muted="1"] { background: var(--gh-muted-pill); }
 .gh-row-dots {
   display: inline-flex;
   gap: 3px;
   align-items: center;
 }
 .gh-row-dots span {
-  width: 5px; height: 5px; border-radius: 50%; background: var(--gh-text-muted);
+  width: 5px; height: 5px; border-radius: 50%; background: var(--gh-accent);
   animation: gh-typing 1.1s ease-in-out infinite;
 }
 .gh-row-dots span:nth-child(2) { animation-delay: 0.15s; }
@@ -420,74 +497,116 @@ input, textarea {
 .gh-empty {
   padding: 60px 30px;
   text-align: center;
-  color: var(--gh-text-faint);
+  color: var(--gh-text-tertiary);
   font-size: 14px;
 }
 
-.gh-fab {
+/* ---- bottom tab bar (Chats / Stories / Settings), frosted glass ---------------------------------------- */
+.gh-tab-bar {
   position: absolute;
-  right: calc(18px + var(--gh-safe-r));
-  bottom: calc(18px + var(--gh-safe-b));
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  background: var(--gh-accent);
-  color: #fff;
+  left: 0; right: 0; bottom: 0;
   display: flex;
+  padding-bottom: var(--gh-safe-b);
+  background: var(--gh-bg-header);
+  border-top: 0.5px solid var(--gh-divider);
+  z-index: 4;
+}
+.gh-tab-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 8px 20px rgba(88, 101, 242, 0.45);
-  z-index: 3;
+  gap: 2px;
+  padding: 6px 0 4px;
+  color: var(--gh-text-tertiary);
+  min-height: 48px;
 }
-.gh-fab svg { width: 24px; height: 24px; }
+.gh-tab-btn svg { width: 25px; height: 25px; }
+.gh-tab-btn span { font-size: 10.5px; font-weight: 500; }
+.gh-tab-btn[data-active="1"] { color: var(--gh-accent); }
+.gh-tab-btn:active { opacity: 0.6; }
 
-/* ---- Conversation ------------------------------------------------------------------------------------ */
-.gh-conv-header .gh-header-title { display: flex; flex-direction: column; gap: 0; font-size: 15px; text-align: left; }
-.gh-conv-title-row { display: flex; align-items: center; gap: 8px; }
-.gh-conv-name { font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.gh-conv-sub { font-size: 12px; color: var(--gh-text-muted); font-weight: 400; }
-.gh-conv-header .gh-avatar { width: 32px; height: 32px; }
-.gh-conv-header-icons { display: flex; gap: 2px; opacity: 0.35; }
+/* ---------------------------------------------------------------------------------------------------
+   CONVERSATION: frosted header (back + badge, centered name/status, avatar right), wallpaper, bubbles.
+--------------------------------------------------------------------------------------------------- */
+.gh-conv-header .gh-header-title { display: flex; flex-direction: column; gap: 0; text-align: center; align-items: center; }
+.gh-conv-title-row { display: flex; align-items: center; justify-content: center; gap: 4px; }
+.gh-conv-name { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-conv-sub { font-size: 12.5px; color: var(--gh-text-secondary); font-weight: 400; }
+.gh-conv-sub[data-typing="1"] { color: var(--gh-accent); }
+.gh-conv-header-avatar { flex: none; margin-left: 2px; }
+.gh-conv-header-avatar .gh-avatar { width: 34px; height: 34px; }
+.gh-back-wrap { display: flex; align-items: center; flex: none; position: relative; }
+.gh-back-wrap .gh-icon-btn { width: 32px; margin-right: -6px; }
+.gh-back-badge {
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--gh-accent); color: #fff; font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  margin-left: 2px;
+}
+.gh-back-badge[data-empty="1"] { display: none; }
 
+/* wallpaper: dark navy base + a soft radial glow + a faint doodle pattern, all static (cheap to paint) */
 .gh-messages {
   flex: 1;
   min-height: 0;
-  padding: 10px 12px calc(10px + var(--gh-safe-b));
+  padding: 10px 10px calc(10px + var(--gh-safe-b));
   display: flex;
   flex-direction: column;
+  position: relative;
+  background-color: #0e161f;
+  background-image:
+    radial-gradient(ellipse 120% 70% at 15% -5%, rgba(62, 136, 247, 0.14), transparent 55%),
+    radial-gradient(ellipse 120% 70% at 100% 100%, rgba(93, 74, 173, 0.12), transparent 55%),
+    radial-gradient(circle, rgba(255,255,255,0.05) 1.4px, transparent 1.6px),
+    radial-gradient(circle, rgba(255,255,255,0.035) 1.1px, transparent 1.3px);
+  background-size: auto, auto, 64px 64px, 40px 40px;
+  background-position: 0 0, 0 0, 0 0, 20px 26px;
+  background-repeat: no-repeat, no-repeat, repeat, repeat;
 }
 .gh-day-sep {
   align-self: center;
-  font-size: 11.5px;
-  color: var(--gh-text-faint);
-  background: var(--gh-bg-2);
-  padding: 4px 12px;
-  border-radius: 10px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--gh-text-secondary);
+  background: rgba(30, 44, 58, 0.72);
+  padding: 5px 12px;
+  border-radius: 12px;
   margin: 14px 0 10px;
 }
 .gh-load-older {
   align-self: center;
-  color: var(--gh-text-faint);
+  color: var(--gh-text-tertiary);
   font-size: 12px;
   padding: 8px;
 }
 
-.gh-group { display: flex; gap: 8px; margin-top: 2px; max-width: 86%; position: relative; }
-.gh-group[data-me="1"] { align-self: flex-end; flex-direction: row-reverse; max-width: 86%; }
-.gh-group[data-first="1"] { margin-top: 14px; }
-.gh-group-gutter { width: 32px; flex: none; display: flex; align-items: flex-end; }
-.gh-group-gutter .gh-avatar { width: 28px; height: 28px; }
+.gh-group { display: flex; gap: 6px; margin-top: 2px; max-width: 100%; position: relative; }
+.gh-group[data-me="1"] { align-self: flex-end; flex-direction: row-reverse; }
+.gh-group[data-me="0"] { align-self: flex-start; }
+.gh-group[data-first="1"] { margin-top: 10px; }
+.gh-group-gutter { width: 26px; flex: none; display: flex; align-items: flex-end; align-self: stretch; }
+.gh-group-gutter .gh-avatar { width: 24px; height: 24px; }
 .gh-group[data-me="1"] .gh-group-gutter { display: none; }
-.gh-group-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.gh-messages:not([data-group="1"]) .gh-group-gutter { display: none; }
+.gh-messages:not([data-group="1"]) .gh-group[data-me="0"] { padding-left: 0; }
+/* flex: 0 1 auto (not 1, i.e. no flex-grow) on purpose: a short "ok" bubble must shrink to its own content
+   width, not stretch to fill the row — max-width just caps it when the content IS that wide. */
+.gh-group-col { flex: 0 1 auto; min-width: 0; max-width: 78%; display: flex; flex-direction: column; }
 .gh-group[data-me="1"] .gh-group-col { align-items: flex-end; }
-.gh-group-meta { display: flex; align-items: baseline; gap: 7px; margin: 0 2px 3px; }
-.gh-group[data-me="1"] .gh-group-meta { flex-direction: row-reverse; }
-.gh-group-name { font-size: 13px; font-weight: 600; color: var(--gh-text); }
-.gh-group-time { font-size: 11px; color: var(--gh-text-faint); }
+.gh-group[data-me="0"] .gh-group-col { align-items: flex-start; }
+/* sender name label: only shown above the first bubble of an incoming run, and only in group chats —
+   Telegram hides it entirely in 1:1 chats since the header already says who you're talking to. */
+.gh-group-meta { display: none; margin: 0 2px 3px; }
+.gh-messages[data-group="1"] .gh-group[data-me="0"][data-first="1"] .gh-group-meta {
+  display: block; font-size: 13px; font-weight: 600; color: var(--gh-accent);
+}
+.gh-group-time { display: none; } /* redundant with the per-bubble time+ticks rendered at bottom-right */
 
-.gh-msg-wrap { position: relative; max-width: 100%; margin-top: 3px; }
+.gh-msg-wrap { position: relative; max-width: 100%; margin-top: 2px; }
 .gh-msg-swipe { transform: translateX(var(--gh-swipe-x, 0px)); }
-.gh-msg-swipe.gh-anim { transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.gh-msg-swipe.gh-anim { transition: transform 0.22s var(--gh-spring); }
 .gh-reply-hint {
   position: absolute;
   left: -34px;
@@ -499,122 +618,200 @@ input, textarea {
 }
 .gh-group[data-me="1"] .gh-reply-hint { left: auto; right: -34px; }
 
+/* new-message pop-in (only ever applied once, to a genuinely new incoming/outgoing bubble — never during
+   virtualized-scroll repaint, so it never touches the perf budget) */
+@keyframes gh-msg-pop {
+  from { opacity: 0; transform: scale(0.82) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.gh-msg-pop { animation: gh-msg-pop 0.28s var(--gh-spring); transform-origin: bottom center; }
+.gh-group[data-me="1"] .gh-msg-pop { transform-origin: bottom right; }
+.gh-group[data-me="0"] .gh-msg-pop { transform-origin: bottom left; }
+
 .gh-bubble {
-  background: var(--gh-bg-2);
+  --tail-bg: var(--gh-bubble-in-2);
+  display: flow-root;
+  background: linear-gradient(var(--gh-bubble-in-1), var(--gh-bubble-in-2));
   border-radius: var(--gh-radius-md);
-  padding: 8px 12px;
-  font-size: 15px;
+  padding: 7px 9px 7px 11px;
+  font-size: 16.5px;
   color: var(--gh-text);
   word-break: break-word;
   -webkit-user-select: text;
   user-select: text;
   position: relative;
 }
-.gh-group[data-me="1"] .gh-bubble { background: var(--gh-accent); color: var(--gh-accent-text); }
-.gh-group[data-first="1"] .gh-bubble:first-child { border-top-left-radius: var(--gh-radius-md); }
-.gh-group[data-me="0"] .gh-msg-wrap:first-child .gh-bubble { border-top-left-radius: 4px; }
-.gh-group[data-me="1"] .gh-msg-wrap:first-child .gh-bubble { border-top-right-radius: 4px; }
-:host([data-compact]) .gh-bubble { padding: 6px 10px; font-size: 14px; }
+.gh-group[data-me="1"] .gh-bubble {
+  --tail-bg: var(--gh-bubble-out-2);
+  background: linear-gradient(var(--gh-bubble-out-1), var(--gh-bubble-out-2));
+  color: #fff;
+}
+/* corner shaping: squared toward the near neighbour mid-run, full round at the outer ends of the run */
+.gh-group[data-me="0"] .gh-msg-wrap:not(:first-child) .gh-bubble { border-top-left-radius: 6px; }
+.gh-group[data-me="1"] .gh-msg-wrap:not(:first-child) .gh-bubble { border-top-right-radius: 6px; }
+.gh-group[data-me="0"] .gh-msg-wrap:not(:last-child) .gh-bubble { border-bottom-left-radius: 6px; }
+.gh-group[data-me="1"] .gh-msg-wrap:not(:last-child) .gh-bubble { border-bottom-right-radius: 6px; }
+:host([data-compact]) .gh-bubble { padding: 6px 8px 6px 10px; font-size: 15px; }
 
-.gh-bubble.gh-pressed { filter: brightness(1.12); }
+/* tail: only the last bubble of a run gets one, only for plain text/audio bubbles (media has its own look) */
+.gh-bubble[data-tail="1"] { border-bottom-left-radius: 4px; }
+.gh-group[data-me="1"] .gh-bubble[data-tail="1"] { border-bottom-left-radius: var(--gh-radius-md); border-bottom-right-radius: 4px; }
+.gh-bubble[data-tail="1"]::before {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: 11px; height: 13px;
+  background: var(--tail-bg);
+}
+.gh-group[data-me="0"] .gh-bubble[data-tail="1"]::before {
+  left: -7px;
+  -webkit-mask-image: radial-gradient(circle 11px at right -1px top -1px, transparent 99%, black 100%);
+  mask-image: radial-gradient(circle 11px at right -1px top -1px, transparent 99%, black 100%);
+}
+.gh-group[data-me="1"] .gh-bubble[data-tail="1"]::before {
+  right: -7px;
+  -webkit-mask-image: radial-gradient(circle 11px at left -1px top -1px, transparent 99%, black 100%);
+  mask-image: radial-gradient(circle 11px at left -1px top -1px, transparent 99%, black 100%);
+}
+
+.gh-bubble.gh-pressed { filter: brightness(1.14); }
 .gh-bubble[data-failed="1"] { outline: 1.5px solid var(--gh-danger); }
-.gh-msg-status { font-size: 10.5px; color: var(--gh-text-faint); margin-top: 2px; text-align: right; }
+
+/* time + ticks: a floated inline trailing element inside the bubble's flow-root, exactly like Telegram —
+   text wraps around it naturally, no JS layout math needed. */
+.gh-bubble-meta {
+  float: right;
+  clear: both;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 3px 0 0 8px;
+  font-size: 11.5px;
+  color: rgba(255,255,255,0.62);
+  white-space: nowrap;
+  user-select: none;
+}
+.gh-group[data-me="0"] .gh-bubble-meta { color: var(--gh-text-tertiary); }
+.gh-bubble-meta .gh-tick { width: 15px; height: 15px; flex: none; }
+.gh-bubble-meta .gh-tick.gh-tick-pending { opacity: 0.55; }
+.gh-bubble-meta .gh-tick-fail { color: var(--gh-danger); }
+.gh-msg-status-fail { font-size: 10.5px; color: var(--gh-danger); margin-top: 2px; text-align: right; }
 
 .gh-reply-quote {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0 2px 3px;
-  padding: 5px 9px;
-  background: var(--gh-bg-2);
-  border-radius: 10px 10px 4px 10px;
-  font-size: 12.5px;
-  color: var(--gh-text-muted);
+  align-items: stretch;
+  gap: 7px;
+  margin: 0 0 5px;
+  padding: 2px 0 2px 8px;
+  font-size: 13px;
+  color: rgba(255,255,255,0.85);
   max-width: 100%;
   position: relative;
+  border-radius: 4px;
+  overflow: hidden;
 }
 .gh-reply-quote::before {
   content: "";
   position: absolute;
-  left: -12px;
-  bottom: 8px;
-  width: 12px;
-  height: 14px;
-  border-left: 2px solid var(--gh-bg-3);
-  border-bottom: 2px solid var(--gh-bg-3);
-  border-bottom-left-radius: 8px;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--gh-accent);
 }
-.gh-group[data-me="1"] .gh-reply-quote::before { display: none; }
-.gh-reply-quote b { color: var(--gh-text); font-weight: 600; }
-.gh-reply-quote span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-group[data-me="0"] .gh-reply-quote { color: var(--gh-text); }
+.gh-reply-quote b { display: block; color: var(--gh-accent); font-weight: 600; font-size: 12.5px; }
+.gh-group[data-me="1"] .gh-reply-quote b { color: #bfe0ff; }
+.gh-reply-quote span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.85; }
 
 .gh-media {
-  border-radius: var(--gh-radius-md);
+  border-radius: 14px;
   overflow: hidden;
-  max-width: 240px;
+  max-width: 250px;
   max-height: 320px;
   display: block;
-  background: var(--gh-bg-3);
+  background: var(--gh-bg-panel-2);
   position: relative;
 }
 .gh-media img, .gh-media video { width: 100%; height: 100%; display: block; object-fit: cover; }
+.gh-media-meta {
+  position: absolute;
+  right: 6px; bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: rgba(0,0,0,0.38);
+  color: #fff;
+  font-size: 11px;
+}
+.gh-media-meta .gh-tick { width: 14px; height: 14px; }
 .gh-media[data-loading="1"]::after {
   content: "";
   position: absolute; inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
   animation: gh-shimmer 1.2s linear infinite;
 }
 @keyframes gh-shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
 
 .gh-snap-tile {
-  width: 200px;
-  height: 140px;
+  width: 210px;
+  height: 78px;
   border-radius: var(--gh-radius-md);
-  background: linear-gradient(160deg, var(--gh-accent), #8b5cf6);
+  background: linear-gradient(135deg, #3a6a94, #2b5278);
   color: #fff;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  font-weight: 700;
-  font-size: 13px;
+  gap: 10px;
+  padding: 0 14px;
+  font-weight: 600;
+  font-size: 14px;
 }
-.gh-snap-tile[data-opened="1"] { background: var(--gh-bg-3); color: var(--gh-text-muted); }
-.gh-snap-tile svg { width: 30px; height: 30px; }
+.gh-snap-tile[data-opened="1"] { background: var(--gh-bg-panel-2); color: var(--gh-text-secondary); }
+.gh-snap-tile svg { width: 22px; height: 22px; flex: none; }
 
 .gh-audio {
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 190px;
-  padding: 4px 2px;
+  padding: 4px 4px 4px 2px;
 }
 .gh-audio-play {
   width: 34px; height: 34px; border-radius: 50%;
-  background: rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.18);
   display: flex; align-items: center; justify-content: center; flex: none;
 }
-.gh-group[data-me="0"] .gh-audio-play { background: var(--gh-bg-3); }
+.gh-group[data-me="0"] .gh-audio-play { background: var(--gh-bg-panel-2); color: var(--gh-accent); }
 .gh-audio-wave { flex: 1; height: 22px; display: flex; align-items: center; gap: 2px; }
 .gh-audio-wave span { width: 2.5px; border-radius: 2px; background: currentColor; opacity: 0.55; }
 .gh-audio-speed {
   flex: none; font-size: 11px; font-weight: 700; padding: 3px 7px; border-radius: 8px;
-  background: rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.18);
 }
-.gh-group[data-me="0"] .gh-audio-speed { background: var(--gh-bg-3); }
+.gh-group[data-me="0"] .gh-audio-speed { background: var(--gh-bg-panel-2); }
+.gh-audio-meta { float: none; margin: 0 0 0 2px; } /* .gh-audio is a flex row, so the float trick doesn't apply here */
 
 .gh-gif-bubble { background: none; padding: 0; }
-.gh-gif-bubble .gh-media { max-width: 220px; }
+.gh-gif-bubble .gh-media { max-width: 230px; }
 
-.gh-sticker { background: none; padding: 0; }
-.gh-sticker img { width: 96px; height: 96px; display: block; }
+.gh-sticker { background: none; padding: 0; display: flow-root; position: relative; }
+.gh-sticker img { width: 108px; height: 108px; display: block; }
+.gh-sticker-meta {
+  position: absolute; right: 4px; bottom: 2px;
+  display: flex; align-items: center; gap: 2px;
+  padding: 2px 6px; border-radius: 9px;
+  background: rgba(0,0,0,0.38); color: #fff; font-size: 10.5px;
+}
+.gh-sticker-meta .gh-tick { width: 13px; height: 13px; }
 
 .gh-system-line, .gh-call-line {
   align-self: center;
   font-size: 12px;
-  color: var(--gh-text-faint);
+  color: var(--gh-text-secondary);
+  background: rgba(30, 44, 58, 0.6);
   padding: 4px 10px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -622,33 +819,33 @@ input, textarea {
 }
 .gh-call-line svg { width: 14px; height: 14px; }
 
-.gh-unknown { color: var(--gh-text-muted); font-style: italic; }
+.gh-unknown { color: var(--gh-text-secondary); font-style: italic; }
 
 .gh-reactions {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
+  clear: both;
 }
 .gh-group[data-me="1"] .gh-reactions { justify-content: flex-end; }
 .gh-reaction-pill {
   display: flex;
   align-items: center;
   gap: 3px;
-  background: var(--gh-bg-2);
-  border: 1px solid var(--gh-divider);
+  background: rgba(255,255,255,0.1);
   border-radius: 12px;
   padding: 2px 7px;
-  font-size: 12px;
+  font-size: 12.5px;
 }
-.gh-reaction-pill[data-mine="1"] { background: rgba(88, 101, 242, 0.22); border-color: var(--gh-accent); }
+.gh-group[data-me="0"] .gh-reaction-pill { background: var(--gh-bg-panel-2); }
+.gh-reaction-pill[data-mine="1"] { background: var(--gh-accent); }
 
 .gh-jump {
   position: absolute;
   right: 12px;
   bottom: 12px;
-  background: var(--gh-bg-2);
-  border: 1px solid var(--gh-divider);
+  background: var(--gh-bg-panel);
   border-radius: 20px;
   padding: 7px 12px 7px 10px;
   display: flex;
@@ -656,54 +853,55 @@ input, textarea {
   gap: 6px;
   font-size: 12.5px;
   color: var(--gh-text);
-  box-shadow: 0 6px 16px rgba(0,0,0,0.35);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.45);
   opacity: 0;
   transform: translateY(8px) scale(0.9);
   pointer-events: none;
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  transition: opacity 0.18s ease, transform 0.18s var(--gh-spring);
   z-index: 2;
 }
 .gh-jump[data-show="1"] { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
-.gh-jump svg { width: 16px; height: 16px; }
+.gh-jump svg { width: 16px; height: 16px; color: var(--gh-accent); }
 
-.gh-typing-row { display: flex; align-items: center; gap: 8px; padding: 2px 2px 6px; }
+.gh-typing-row { display: flex; align-items: center; gap: 8px; padding: 2px 4px 6px; }
 .gh-typing-bubble {
-  background: var(--gh-bg-2);
+  background: var(--gh-bubble-in-2);
   border-radius: var(--gh-radius-md);
   padding: 9px 12px;
   display: inline-flex;
   gap: 3px;
 }
-.gh-typing-bubble span { width: 6px; height: 6px; border-radius: 50%; background: var(--gh-text-muted); animation: gh-typing 1.1s ease-in-out infinite; }
+.gh-typing-bubble span { width: 6px; height: 6px; border-radius: 50%; background: var(--gh-text-secondary); animation: gh-typing 1.1s ease-in-out infinite; }
 .gh-typing-bubble span:nth-child(2) { animation-delay: 0.15s; }
 .gh-typing-bubble span:nth-child(3) { animation-delay: 0.3s; }
 
-/* ---- Composer ---------------------------------------------------------------------------------------- */
+/* ---- Composer: paperclip · rounded field (emoji inside) · mic/send morph ------------------------------- */
 .gh-composer {
   flex: none;
   display: flex;
   align-items: flex-end;
-  gap: 6px;
-  padding: 8px 10px calc(8px + var(--gh-safe-b));
-  background: var(--gh-bg-2);
-  border-top: 1px solid var(--gh-divider);
+  gap: 4px;
+  padding: 6px 8px calc(6px + var(--gh-safe-b));
+  background: var(--gh-bg-header);
+  border-top: 0.5px solid var(--gh-divider);
 }
 .gh-composer-btn {
   width: 40px; height: 40px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
-  color: var(--gh-text-muted);
+  color: var(--gh-accent);
   flex: none;
 }
-.gh-composer-btn:active { background: var(--gh-bg-3); }
-.gh-composer-btn svg { width: 22px; height: 22px; }
+.gh-composer-btn:active { background: rgba(255,255,255,0.08); }
+.gh-composer-btn svg { width: 24px; height: 24px; }
 .gh-composer-field {
   flex: 1;
   min-width: 0;
-  background: var(--gh-bg-3);
-  border-radius: 20px;
-  padding: 9px 14px;
+  background: var(--gh-bg-input);
+  border-radius: 19px;
+  padding: 8px 6px 8px 15px;
   display: flex;
   align-items: flex-end;
+  gap: 4px;
   max-height: 120px;
 }
 .gh-composer-textarea {
@@ -714,143 +912,155 @@ input, textarea {
   outline: none;
   resize: none;
   color: var(--gh-text);
-  font-size: 15px;
+  font-size: 16.5px;
   max-height: 100px;
   line-height: 1.3;
+  padding: 2px 0;
 }
-.gh-composer-textarea::placeholder { color: var(--gh-text-faint); }
+.gh-composer-textarea::placeholder { color: var(--gh-text-tertiary); }
+.gh-composer-emoji-btn {
+  width: 30px; height: 30px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--gh-text-tertiary);
+  flex: none;
+}
+.gh-composer-emoji-btn svg { width: 21px; height: 21px; }
+
+.gh-composer-send-wrap { position: relative; width: 40px; height: 40px; flex: none; }
+.gh-composer-mic, .gh-composer-send {
+  position: absolute; inset: 0;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform 0.2s var(--gh-spring), opacity 0.16s ease;
+}
+.gh-composer-mic {
+  color: var(--gh-accent);
+  transform: scale(1) rotate(0deg);
+  opacity: 1;
+}
 .gh-composer-send {
-  width: 40px; height: 40px; border-radius: 50%;
   background: var(--gh-accent);
   color: #fff;
-  display: flex; align-items: center; justify-content: center;
-  flex: none;
-  transform: scale(0.001);
+  transform: scale(0.4) rotate(-45deg);
   opacity: 0;
-  transition: transform 0.16s cubic-bezier(0.2,0.8,0.2,1), opacity 0.16s ease;
 }
-.gh-composer-send[data-show="1"] { transform: scale(1); opacity: 1; }
-.gh-composer-send svg { width: 18px; height: 18px; }
+.gh-composer-send[data-show="1"] { transform: scale(1) rotate(0deg); opacity: 1; }
+.gh-composer-mic[data-hide="1"] { transform: scale(0.4) rotate(45deg); opacity: 0; pointer-events: none; }
+.gh-composer-mic svg, .gh-composer-send svg { width: 19px; height: 19px; }
 
 .gh-reply-bar {
   flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  background: var(--gh-bg-2);
-  border-top: 1px solid var(--gh-divider);
+  padding: 7px 12px;
+  background: var(--gh-bg-header);
+  border-top: 0.5px solid var(--gh-divider);
   max-height: 0;
   overflow: hidden;
-  transition: max-height 0.18s ease, padding 0.18s ease;
+  transition: max-height 0.2s ease;
 }
 .gh-reply-bar[data-show="1"] { max-height: 60px; }
+.gh-reply-bar:not([data-show="1"]) { padding-top: 0; padding-bottom: 0; border-top-width: 0; }
 .gh-reply-bar-line { width: 3px; align-self: stretch; background: var(--gh-accent); border-radius: 2px; }
 .gh-reply-bar-body { flex: 1; min-width: 0; }
 .gh-reply-bar-name { font-size: 12.5px; font-weight: 600; color: var(--gh-accent); }
-.gh-reply-bar-text { font-size: 13px; color: var(--gh-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.gh-reply-bar-close { width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--gh-text-muted); flex: none; }
-
-.gh-attach-menu {
-  position: absolute;
-  left: 10px;
-  bottom: calc(64px + var(--gh-safe-b));
-  background: var(--gh-bg-2);
-  border-radius: var(--gh-radius-md);
-  border: 1px solid var(--gh-divider);
-  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  transform-origin: bottom left;
-  transform: scale(0.85) translateY(6px);
-  opacity: 0;
-  pointer-events: none;
-  transition: transform 0.16s cubic-bezier(0.2,0.8,0.2,1), opacity 0.16s ease;
-  z-index: 4;
-}
-.gh-attach-menu[data-open="1"] { transform: scale(1) translateY(0); opacity: 1; pointer-events: auto; }
-.gh-attach-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 14.5px;
-  white-space: nowrap;
-  color: var(--gh-text);
-}
-.gh-attach-item:active { background: var(--gh-bg-3); }
-.gh-attach-item svg { width: 20px; height: 20px; color: var(--gh-accent); }
+.gh-reply-bar-text { font-size: 13px; color: var(--gh-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-reply-bar-close { width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--gh-text-secondary); flex: none; }
 
 /* ---------------------------------------------------------------------------------------------------
-   Overlays: backdrop + sheet base, action sheet, GIF sheet, new-chat sheet, snap/story viewer, camera
+   Overlays: backdrop + sheet base (attach / GIF / new-chat / action sheet), snap/story viewer, camera
 --------------------------------------------------------------------------------------------------- */
 .gh-overlay-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
 .gh-backdrop {
   position: absolute; inset: 0;
   background: var(--gh-overlay);
+  -webkit-backdrop-filter: blur(0px);
+  backdrop-filter: blur(0px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.22s ease;
+  transition: opacity 0.25s ease, backdrop-filter 0.25s ease;
 }
-.gh-backdrop[data-open="1"] { opacity: 1; pointer-events: auto; }
+.gh-backdrop[data-open="1"] {
+  opacity: 1;
+  pointer-events: auto;
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
 
 .gh-sheet {
   position: absolute;
   left: 0; right: 0; bottom: 0;
-  background: var(--gh-bg-2);
-  border-radius: 20px 20px 0 0;
+  background: var(--gh-bg-panel);
+  border-radius: 14px 14px 0 0;
   padding-bottom: var(--gh-safe-b);
   transform: translateY(100%);
   pointer-events: none;
   max-height: 82%;
   display: flex;
   flex-direction: column;
+  box-shadow: 0 -8px 40px rgba(0,0,0,0.35);
 }
-.gh-sheet.gh-anim { transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1); }
+.gh-sheet.gh-anim { transition: transform 0.34s var(--gh-spring); }
 .gh-sheet[data-open="1"] { transform: translateY(0); pointer-events: auto; }
-.gh-sheet-grip { align-self: center; width: 36px; height: 4px; border-radius: 2px; background: var(--gh-bg-4); margin: 8px 0 4px; flex: none; }
+.gh-sheet-grip { align-self: center; width: 36px; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.22); margin: 8px 0 4px; flex: none; }
 
-/* ---- action sheet ------------------------------------------------------------------------------------- */
+/* ---- action sheet: pressed bubble lifts, a reaction bar, a rounded menu ------------------------------- */
+.gh-msg-lifted { position: relative; z-index: 15; }
+.gh-msg-lifted .gh-bubble {
+  transform: scale(1.035);
+  box-shadow: 0 10px 34px rgba(0,0,0,0.45);
+  transition: transform 0.22s var(--gh-spring), box-shadow 0.22s var(--gh-spring);
+}
 .gh-action-sheet .gh-react-row {
   display: flex;
   justify-content: space-between;
-  padding: 6px 16px 10px;
+  padding: 8px 14px 10px;
 }
 .gh-react-emoji {
-  width: 44px; height: 44px;
+  width: 42px; height: 42px;
   border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
-  font-size: 24px;
+  font-size: 23px;
 }
-.gh-react-emoji:active { background: var(--gh-bg-3); }
-.gh-react-emoji[data-mine="1"] { background: rgba(88,101,242,0.22); }
+.gh-react-emoji:active { background: rgba(255,255,255,0.08); transform: scale(1.15); }
+.gh-react-emoji[data-mine="1"] { background: rgba(62,136,247,0.22); }
 .gh-action-list { padding: 4px 0 10px; }
 .gh-action-item {
   display: flex;
   align-items: center;
   gap: 14px;
   padding: 13px 20px;
-  font-size: 15.5px;
+  font-size: 16px;
 }
-.gh-action-item:active { background: var(--gh-bg-3); }
-.gh-action-item svg { width: 20px; height: 20px; color: var(--gh-text-muted); }
+.gh-action-item:active { background: rgba(255,255,255,0.06); }
+.gh-action-item svg { width: 20px; height: 20px; color: var(--gh-text-secondary); }
 .gh-action-item[data-danger="1"] { color: var(--gh-danger); }
 .gh-action-item[data-danger="1"] svg { color: var(--gh-danger); }
+
+/* ---- attach sheet (Gallery / Camera / GIF) ------------------------------------------------------------- */
+.gh-attach-sheet .gh-action-item svg { color: #fff; }
+.gh-attach-icon {
+  width: 34px; height: 34px; border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  flex: none;
+}
+.gh-attach-icon svg { width: 19px; height: 19px; }
+.gh-attach-icon[data-tint="blue"] { background: var(--gh-accent); }
+.gh-attach-icon[data-tint="pink"] { background: #e767b1; }
+.gh-attach-icon[data-tint="green"] { background: #47c16e; }
 
 /* ---- new chat sheet ------------------------------------------------------------------------------------ */
 .gh-newchat-header { display: flex; align-items: center; gap: 10px; padding: 4px 16px 10px; }
 .gh-newchat-header .gh-header-title { font-size: 17px; }
 .gh-newchat-search { padding: 0 16px 8px; }
-.gh-friend-row { display: flex; align-items: center; gap: 12px; padding: 9px 16px; }
-.gh-friend-row:active { background: var(--gh-bg-3); }
-.gh-friend-row .gh-avatar { width: 40px; height: 40px; }
-.gh-friend-name { flex: 1; font-size: 15px; font-weight: 500; }
+.gh-friend-row { display: flex; align-items: center; gap: 12px; padding: 8px 16px; }
+.gh-friend-row:active { background: rgba(255,255,255,0.06); }
+.gh-friend-row .gh-avatar { width: 44px; height: 44px; }
+.gh-friend-name { flex: 1; font-size: 16px; font-weight: 500; }
 .gh-friend-check {
   width: 22px; height: 22px; border-radius: 50%;
-  border: 1.5px solid var(--gh-text-faint);
+  border: 1.5px solid var(--gh-text-tertiary);
   flex: none;
 }
 .gh-friend-row[data-picked="1"] .gh-friend-check {
@@ -863,10 +1073,10 @@ input, textarea {
   border-radius: 14px;
   background: var(--gh-accent);
   color: #fff;
-  font-weight: 700;
-  font-size: 15px;
+  font-weight: 600;
+  font-size: 16px;
 }
-.gh-newchat-create:disabled { background: var(--gh-bg-3); color: var(--gh-text-faint); }
+.gh-newchat-create:disabled { background: var(--gh-bg-panel-2); color: var(--gh-text-tertiary); }
 
 /* ---- GIF sheet ------------------------------------------------------------------------------------------ */
 .gh-gif-sheet { height: 70%; max-height: 70%; }
@@ -875,23 +1085,23 @@ input, textarea {
 .gh-gif-tab {
   padding: 7px 14px;
   border-radius: 16px;
-  background: var(--gh-bg-3);
+  background: var(--gh-bg-panel-2);
   font-size: 13px;
   font-weight: 600;
-  color: var(--gh-text-muted);
+  color: var(--gh-text-secondary);
 }
 .gh-gif-tab[data-on="1"] { background: var(--gh-accent); color: #fff; }
 .gh-gif-body { flex: 1; min-height: 0; padding: 0 8px 8px; }
 .gh-gif-grid { display: flex; gap: 6px; }
 .gh-gif-col { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .gh-gif-tile {
-  border-radius: 10px;
+  border-radius: 12px;
   overflow: hidden;
-  background: var(--gh-bg-3);
+  background: var(--gh-bg-panel-2);
   position: relative;
 }
 .gh-gif-tile img { width: 100%; display: block; }
-.gh-gif-note { text-align: center; color: var(--gh-text-faint); padding: 40px 20px; font-size: 13.5px; }
+.gh-gif-note { text-align: center; color: var(--gh-text-tertiary); padding: 40px 20px; font-size: 13.5px; }
 
 /* ---- snap / story viewer ----------------------------------------------------------------------------- */
 .gh-viewer {
@@ -953,7 +1163,7 @@ input, textarea {
 .gh-camera-preview video, .gh-camera-preview img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .gh-camera-note {
   position: absolute; top: 50%; left: 16px; right: 16px; transform: translateY(-50%);
-  color: var(--gh-text-muted); text-align: center; font-size: 13px; z-index: 1;
+  color: var(--gh-text-secondary); text-align: center; font-size: 13px; z-index: 1;
 }
 .gh-camera-top { position: absolute; top: calc(var(--gh-safe-t) + 10px); left: 12px; right: 12px; display: flex; justify-content: space-between; z-index: 2; }
 .gh-camera-top .gh-icon-btn { background: rgba(0,0,0,0.35); color: #fff; }
@@ -980,13 +1190,13 @@ input, textarea {
   position: absolute;
   left: 16px; right: 16px;
   bottom: calc(24px + var(--gh-safe-b));
-  background: var(--gh-bg-3);
+  background: var(--gh-bg-panel);
   color: var(--gh-text);
-  border-radius: 12px;
+  border-radius: 13px;
   padding: 12px 16px;
   font-size: 13.5px;
   text-align: center;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.45);
   opacity: 0;
   transform: translateY(10px);
   pointer-events: none;
@@ -995,28 +1205,7 @@ input, textarea {
 }
 .gh-toast.gh-toast-show { opacity: 1; transform: translateY(0); }
 
-/* ---- reduced motion / low-power fallback ---------------------------------------------------------------- */
+/* ---- reduced motion / low-power fallback (OS-level; the native dgSetting("reduceMotion") path is above) - */
 @media (prefers-reduced-motion: reduce) {
-  .gh-screen.gh-anim, .gh-sheet.gh-anim, .gh-shade.gh-anim, .gh-msg-swipe.gh-anim, .gh-press { transition-duration: 0.001s !important; }
+  .gh-screen.gh-anim, .gh-sheet.gh-anim, .gh-shade.gh-anim, .gh-msg-swipe.gh-anim, .gh-press, .gh-msg-pop { transition-duration: 0.001s !important; animation-duration: 0.001s !important; }
 }
-
-/* ---- Discord-style messages (what the user picked): every message on the left, yours too; a big avatar next to
-   the first line of each run with name + time, no speech bubbles - just text on the background; a soft highlight
-   when pressed. Overrides the bubble layout above. */
-.gh-group, .gh-group[data-me="1"] { align-self: stretch; flex-direction: row; max-width: 100%; gap: 12px; }
-.gh-group-gutter, .gh-group[data-me="1"] .gh-group-gutter { display: flex; width: 40px; align-items: flex-start; padding-top: 2px; }
-.gh-group-gutter .gh-avatar { width: 40px; height: 40px; }
-.gh-group[data-first="0"] .gh-group-gutter .gh-avatar { visibility: hidden; height: 0; }
-.gh-group[data-me="1"] .gh-group-col { align-items: stretch; }
-.gh-group-meta, .gh-group[data-me="1"] .gh-group-meta { flex-direction: row; margin: 0 0 1px; }
-.gh-group-name { font-size: 15.5px; }
-.gh-bubble, .gh-group[data-me="1"] .gh-bubble {
-  background: transparent; color: var(--gh-text); padding: 1px 0; border-radius: 4px; font-size: 16px; line-height: 1.38;
-}
-.gh-group[data-me="0"] .gh-msg-wrap:first-child .gh-bubble, .gh-group[data-me="1"] .gh-msg-wrap:first-child .gh-bubble { border-radius: 4px; }
-.gh-msg-wrap { margin-top: 1px; }
-.gh-bubble.gh-pressed { filter: none; background: rgba(255, 255, 255, 0.05); }
-.gh-group[data-me="1"] .gh-reactions { justify-content: flex-start; }
-.gh-group[data-me="1"] .gh-reply-hint { left: -34px; right: auto; }
-/* the reply bar takes no room at all while hidden (its padding/border used to show an empty strip) */
-.gh-reply-bar:not([data-show="1"]) { padding-top: 0; padding-bottom: 0; border-top-width: 0; }
