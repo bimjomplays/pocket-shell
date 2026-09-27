@@ -170,11 +170,11 @@
         const p = pending.get(msg.id);
         if (!p) return;
         pending.delete(msg.id);
-        if (msg.ok) p.resolve(msg.result);
+        if (msg.ok) p.resolve(nickify(msg.result));
         else p.reject(new Error(typeof msg.error === "string" ? msg.error : (msg.error && msg.error.message) || "ghost bridge error"));
       } else if (msg.ghost === "event") {
         const set = listeners.get(msg.type);
-        if (set) for (const fn of Array.from(set)) { try { fn(msg.data); } catch (err) { /* one bad listener shouldn't break others */ } }
+        if (set) { const data = nickify(msg.data); for (const fn of Array.from(set)) { try { fn(data); } catch (err) { /* one bad listener shouldn't break others */ } } }
       }
     });
     function call(method, args, timeoutMs) {
@@ -1408,6 +1408,7 @@
     if (ctx.state.currentConvId && ctx.state.currentConvId !== conversationId) scheduleMediaRelease(ctx, ctx.state.currentConvId);
     loadChatColors(ctx, conversationId);
     ctx.conv.openedAt = nowMs();
+    setTimeout(() => { if (ctx.conv.liveWall) ctx.conv.liveWall.start(); }, 0);
     ctx.conv.peekId = null;
     applyChatWallpaper(ctx, conversationId);
     ctx.state.currentConvId = conversationId;
@@ -2801,10 +2802,44 @@
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true,
     doubleTapCamera: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
-    wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {}, pinnedChats: [], hiddenChats: [], streakKeeper: {},
+    wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {}, pinnedChats: [], hiddenChats: [], streakKeeper: {}, nicknames: {},
     bookmarks: [], chatBubbles: {},
   };
   let prefs = Object.assign({}, PREF_DEFAULTS);
+  // Ghost nicknames: Snapchat Web's gateway doesn't allow changing a friend's display name (ChangeDisplayNameForFriends
+  // - like RemoveFriends/BlockFriends - answers "Response closed without headers", device-probed 2026-09-27), so a
+  // nickname is Ghost's own, kept on this phone and swapped in for every {id, name} person the bridge hands over.
+  function nickify(data, depth) {
+    let nicks = null; try { nicks = (prefs && prefs.nicknames) || null; } catch (e) { return data; }
+    if (!data || typeof data !== "object" || (depth || 0) > 6) return data;
+    if (Array.isArray(data)) { for (const x of data) nickify(x, (depth || 0) + 1); return data; }
+    if (typeof data.id === "string" && typeof data.name === "string") {
+      const n = nicks && nicks[data.id];
+      if (n) { if (data._realName === undefined) data._realName = data.name; data.name = n; }
+      else if (data._realName !== undefined) { data.name = data._realName; delete data._realName; }
+    }
+    // a 1:1 chat is titled by the person
+    if (Array.isArray(data.participants) && data.isGroup === false && data.participants.length === 1) {
+      const p = data.participants[0]; nickify(p, (depth || 0) + 1);
+      const n = nicks && p && nicks[p.id];
+      if (n) { if (data._realTitle === undefined) data._realTitle = data.title; data.title = n; }
+      else if (data._realTitle !== undefined) { data.title = data._realTitle; delete data._realTitle; }
+    }
+    for (const k of ["from", "participants", "users", "conversations", "messages", "replyTo", "reactions", "me", "calls", "remote"]) if (data[k] && typeof data[k] === "object") nickify(data[k], (depth || 0) + 1);
+    return data;
+  }
+  async function setNickname(ctx, userId, name) {
+    const all = Object.assign({}, pref("nicknames") || {});
+    if (name) all[userId] = name; else delete all[userId];
+    setPref(ctx, "nicknames", all);
+    // re-apply to what's already on screen: the chat list, the open chat
+    const convs = Array.from(ctx.state.convById.values());
+    nickify(convs);
+    for (const e of ctx.state.messagesByConv.values()) nickify(e.messages);
+    try { applyConversations(ctx, await api.listConversations()); } catch (e) {}
+    const cd = ctx.state.currentConvId && ctx.state.convById.get(ctx.state.currentConvId);
+    if (cd) { updateConvHeader(ctx, cd); if (ctx.conv) paintWindow(ctx, ctx.conv); }
+  }
   function pref(k) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : PREF_DEFAULTS[k]; }
   async function loadPrefs(ctx) {
     try { prefs = Object.assign({}, PREF_DEFAULTS, await storage.get("ghostPrefs", {})); } catch (e) {}
@@ -3165,12 +3200,12 @@
       const nm = el("div", "gh-set-profile-name"); nm.textContent = u.name || "Friend";
       const un = el("div", "gh-set-profile-user"); un.textContent = u.username ? "@" + u.username : "";
       prof.append(nm, un); body.appendChild(prof);
-      let g = setGroup(body, null, "A nickname changes their name for you only - here and in the Snapchat app. Leave it empty to use their own name.");
+      let g = setGroup(body, null, "Nicknames show in Ghost only (Snapchat Web can't change names on Snapchat). Leave it empty to use their own name.");
       setRow(g, { icon: "edit", tint: "#3e88f7", label: "Edit Nickname", onClick: async () => {
-        const v = await promptSheet(ctx, "Nickname for " + (u.username ? "@" + u.username : u.name), u.name);
+        const v = await promptSheet(ctx, "Nickname for " + (u.username ? "@" + u.username : (u._realName || u.name)), (pref("nicknames") || {})[u.id] || "");
         if (v == null) return;
-        try { await api.setNickname(u.id, v); u.name = v || u.username || u.name; nm.textContent = u.name; ctx.showToast(v ? "Nickname saved" : "Nickname removed"); }
-        catch (e) { ctx.showToast(String(e && e.message || "Couldn't change it")); }
+        await setNickname(ctx, u.id, v); nickify(u); nm.textContent = u.name;
+        ctx.showToast(v ? "Nickname saved" : "Nickname removed");
       } });
       setRow(g, { icon: "newMsg", tint: "#23a55a", label: "Chat", onClick: async () => {
         try {
@@ -3178,15 +3213,7 @@
           if (res && res.conversationId) { closeSettings(ctx); if (!ctx.state.convById.has(res.conversationId)) await api.listConversations().then((cs) => applyConversations(ctx, cs || [])); openConversationScreen(ctx, res.conversationId); }
         } catch (e) { ctx.showToast("Couldn't open that chat"); }
       } });
-      g = setGroup(body);
-      setRow(g, { label: "Remove Friend", danger: true, onClick: async () => {
-        if (!(await confirmSheet(ctx, "Remove " + (u.name || "this friend") + " from your friends?", "Remove"))) return;
-        try { await api.removeFriend(u.id); ctx.showToast("Removed"); popSettingsPage(ctx); } catch (e) { ctx.showToast(String(e && e.message || "Couldn't remove")); }
-      } });
-      setRow(g, { label: "Block", danger: true, onClick: async () => {
-        if (!(await confirmSheet(ctx, "Block " + (u.name || "them") + "? They won't be able to contact you.", "Block"))) return;
-        try { await api.blockFriend(u.id); ctx.showToast("Blocked"); popSettingsPage(ctx); } catch (e) { ctx.showToast(String(e && e.message || "Couldn't block")); }
-      } });
+      // (Remove/Block: Snapchat Web's gateway refuses those calls - use the Snapchat app for them)
     },
     main(ctx, body) {
       const me = ctx.state.me || {};
@@ -3463,22 +3490,79 @@
     const d = pref("wallpaper");
     return d === "photo" ? { kind: "photo", key: "default", dim: pref("wallDim"), fit: pref("wallFit") } : { kind: "preset", name: d };
   }
-  // Live wallpapers are a layer of drifting blobs/stars BEHIND the (then transparent) message list, moved with
-  // transforms only - the list itself never repaints for them.
+  // Live wallpapers: a small <canvas> behind the (then transparent) message list, drawn ~30 times a second only
+  // while the chat is on screen. The first version used huge blurred/oversized CSS layers (4x the screen, x3) that
+  // cost hundreds of MB on the phone - iOS then killed the page every 2-3 chats (device 2026-09-27). The blob kinds
+  // draw at a tiny resolution and let CSS scale them up (they're meant to be blurry); stars draw at 1x.
+  const LIVE_KINDS = {
+    aurora: { lowRes: true, blobs: [["#1fb8c4", 0.1, 0.25, 0.55, 22], ["#9b59f6", 0.85, 0.45, 0.5, 26], ["#3e88f7", 0.35, 0.9, 0.5, 30], ["#23a55a", 0.8, 0.05, 0.35, 34]] },
+    lava:   { lowRes: true, blobs: [["#ff5c3a", 0.15, 0.95, 0.45, 18], ["#ff9f2e", 0.85, 0.8, 0.42, 23], ["#ec407a", 0.5, 0.2, 0.4, 27], ["#9b59f6", 0.8, 0.05, 0.3, 31]] },
+    stars:  { lowRes: false },
+  };
   function setLiveWall(ctx, kind) {
     const conv = ctx.conv; if (!conv) return;
     const scr = conv.messages.parentNode;
-    if (!kind) { if (conv.liveWall) { conv.liveWall.remove(); conv.liveWall = null; } conv.messages.classList.remove("gh-live-on"); scr.style.isolation = ""; return; }
-    scr.style.isolation = "isolate";
-    if (!conv.liveWall || conv.liveWall.dataset.kind !== kind) {
-      if (conv.liveWall) conv.liveWall.remove();
-      const w = el("div", "gh-live-wall"); w.dataset.kind = kind;
-      const n = kind === "stars" ? 3 : 4;
-      for (let i = 0; i < n; i++) w.appendChild(el("i", "gh-live-b" + i));
-      scr.insertBefore(w, conv.messages);
-      conv.liveWall = w;
+    if (!kind || !LIVE_KINDS[kind]) {
+      if (conv.liveWall) { conv.liveWall.stop(); conv.liveWall.el.remove(); conv.liveWall = null; }
+      conv.messages.classList.remove("gh-live-on"); scr.style.isolation = "";
+      return;
     }
+    scr.style.isolation = "isolate";
     conv.messages.classList.add("gh-live-on");
+    if (conv.liveWall && conv.liveWall.kind === kind) { conv.liveWall.start(); return; }
+    if (conv.liveWall) { conv.liveWall.stop(); conv.liveWall.el.remove(); }
+    const spec = LIVE_KINDS[kind];
+    const cv = el("canvas", "gh-live-wall"); cv.dataset.kind = kind;
+    scr.insertBefore(cv, conv.messages);
+    const g = cv.getContext("2d");
+    let raf = 0, last = 0, W = 0, H = 0, stars = null;
+    const size = () => {
+      const r = cv.getBoundingClientRect();
+      const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
+      const k = spec.lowRes ? 60 / w : Math.min(2, window.devicePixelRatio || 1);
+      const nw = Math.round(w * k), nh = Math.round(h * k);
+      if (nw !== W || nh !== H) { W = cv.width = nw; H = cv.height = nh; stars = null; }
+    };
+    const bg = () => getComputedStyle(ctx.host).getPropertyValue("--gh-bg-app").trim() || "#000";
+    const draw = (t) => {
+      size();
+      const s = t / 1000;
+      g.globalCompositeOperation = "source-over";
+      if (spec.lowRes) {
+        g.fillStyle = bg(); g.fillRect(0, 0, W, H);
+        g.globalCompositeOperation = "lighter";
+        for (const [col, x, y, rad, per] of spec.blobs) {
+          const px = (x + 0.18 * Math.sin(s * 6.283 / per)) * W, py = (y + 0.14 * Math.cos(s * 6.283 / (per * 1.3))) * H;
+          const rr = rad * W * (1 + 0.15 * Math.sin(s * 6.283 / (per * 0.8)));
+          const gr = g.createRadialGradient(px, py, 0, px, py, rr);
+          gr.addColorStop(0, col + "88"); gr.addColorStop(1, col + "00");
+          g.fillStyle = gr; g.fillRect(0, 0, W, H);
+        }
+      } else {
+        if (!stars) { stars = []; for (let i = 0; i < 140; i++) stars.push([Math.random() * W, Math.random() * H, Math.random() * 1.3 + 0.3, Math.random() * 6.28, Math.random() < 0.3 ? 2.2 : 1]); }
+        const grd = g.createRadialGradient(W / 2, H * 1.2, 0, W / 2, H * 1.2, H);
+        grd.addColorStop(0, "#1a2440"); grd.addColorStop(1, bg());
+        g.fillStyle = grd; g.fillRect(0, 0, W, H);
+        g.fillStyle = "#fff";
+        for (const st of stars) {
+          const x = (st[0] - s * 4 * st[4] * (W / 400)) % W, y = (st[1] - s * 3 * st[4] * (W / 400)) % H;
+          g.globalAlpha = 0.45 + 0.55 * Math.abs(Math.sin(s * 0.8 + st[3]));
+          g.beginPath(); g.arc(x < 0 ? x + W : x, y < 0 ? y + H : y, st[2] * (W / 400), 0, 6.283); g.fill();
+        }
+        g.globalAlpha = 1;
+      }
+    };
+    const loop = (t) => {
+      raf = 0;
+      if (!cv.isConnected) return;
+      const still = ctx.host.hasAttribute("data-reduce-motion");
+      if (t - last > 33 || !last) { last = t; draw(t); }
+      if (!still && !document.hidden && ctx.state.currentConvId) raf = requestAnimationFrame(loop);
+    };
+    const lw = { kind, el: cv, start: () => { if (!raf) raf = requestAnimationFrame(loop); }, stop: () => { if (raf) cancelAnimationFrame(raf); raf = 0; } };
+    document.addEventListener("visibilitychange", () => { if (!document.hidden && conv.liveWall === lw) lw.start(); });
+    conv.liveWall = lw;
+    lw.start();
   }
   // your own bubble colour for one chat (Ghost-only): an accent from ACCENT_SET, only for your messages there
   function applyChatBubbles(ctx, convId) {
@@ -3853,15 +3937,15 @@
       tool("bookmark", "Bookmarks", () => { ctx.settings.bookmarksConv = convId; openSettingsAt(ctx, "bookmarks"); });
       s.sheet.appendChild(tg);
     }
-    // their nickname (Snapchat's own friend nickname - synced with the phone app)
+    // their nickname (Ghost's own - see nickify)
     const other = !cd.isGroup && cd.participants && cd.participants[0];
     if (other) {
       const ng0 = el("div", "gh-set-group"); ng0.style.marginTop = "14px"; s.sheet.appendChild(ng0);
       setRow(ng0, { icon: "edit", tint: "#3e88f7", label: "Edit Nickname", value: "", onClick: async () => {
-        const v = await promptSheet(ctx, "Nickname for " + (other.username ? "@" + other.username : cd.title || "them"), cd.title || other.name);
+        const v = await promptSheet(ctx, "Nickname for " + (other.username ? "@" + other.username : (cd._realTitle || cd.title || "them")), (pref("nicknames") || {})[other.id] || "");
         if (v == null) return;
-        try { await api.setNickname(other.id, v); cd.title = v || other.username || cd.title; nm.textContent = cd.title; updateConvHeader(ctx, cd); ctx.showToast(v ? "Nickname saved" : "Nickname removed"); }
-        catch (e) { ctx.showToast(String(e && e.message || "Couldn't change it")); }
+        await setNickname(ctx, other.id, v); nm.textContent = cd.title;
+        ctx.showToast(v ? "Nickname saved" : "Nickname removed");
       } });
     }
     // Streak Keeper: a black snap to this chat at the same time every day

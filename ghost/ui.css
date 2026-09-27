@@ -1801,36 +1801,9 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-set-appicon-art[data-outline="1"] svg { filter: drop-shadow(0 0 1.5px #000) drop-shadow(0 0 1px #000); }
 .gh-set-appicon[data-on="1"] .gh-set-appicon-art { box-shadow: 0 0 0 3px var(--gh-bg-list), 0 0 0 5px var(--gh-accent); }
 
-/* live wallpapers: blurred blobs / twinkling stars drifting behind a transparent message list (transform-only) */
-.gh-live-wall { position: absolute; inset: 0; overflow: hidden; background: var(--gh-bg-app); z-index: -1; pointer-events: none; } /* the screen gets isolation:isolate (ui.js setLiveWall) so -1 stays inside it */
+/* live wallpapers: a canvas behind a transparent message list (ui.js setLiveWall) */
+.gh-live-wall { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; background: var(--gh-bg-app); } /* the screen gets isolation:isolate so -1 stays inside it */
 .gh-messages.gh-live-on { background: transparent !important; }
-.gh-live-wall i { position: absolute; border-radius: 50%; filter: blur(50px); opacity: 0.5; will-change: transform; }
-.gh-live-wall[data-kind="aurora"] .gh-live-b0 { width: 70%; height: 45%; left: -15%; top: 5%; background: #1fb8c4; animation: gh-drift-a 22s ease-in-out infinite alternate; }
-.gh-live-wall[data-kind="aurora"] .gh-live-b1 { width: 65%; height: 40%; right: -20%; top: 30%; background: #9b59f6; animation: gh-drift-b 26s ease-in-out infinite alternate; }
-.gh-live-wall[data-kind="aurora"] .gh-live-b2 { width: 60%; height: 40%; left: 10%; bottom: -5%; background: #3e88f7; animation: gh-drift-c 30s ease-in-out infinite alternate; }
-.gh-live-wall[data-kind="aurora"] .gh-live-b3 { width: 40%; height: 30%; right: 5%; top: -5%; background: #23a55a; opacity: 0.35; animation: gh-drift-b 34s ease-in-out infinite alternate-reverse; }
-.gh-live-wall[data-kind="lava"] i { opacity: 0.55; filter: blur(40px); }
-.gh-live-wall[data-kind="lava"] .gh-live-b0 { width: 55%; height: 35%; left: -10%; bottom: 0; background: #ff5c3a; animation: gh-rise 18s ease-in-out infinite alternate; }
-.gh-live-wall[data-kind="lava"] .gh-live-b1 { width: 50%; height: 32%; right: -10%; bottom: 10%; background: #ff9f2e; animation: gh-rise 23s ease-in-out infinite alternate-reverse; }
-.gh-live-wall[data-kind="lava"] .gh-live-b2 { width: 45%; height: 30%; left: 25%; top: 10%; background: #ec407a; animation: gh-drift-c 27s ease-in-out infinite alternate; }
-.gh-live-wall[data-kind="lava"] .gh-live-b3 { width: 35%; height: 25%; right: 10%; top: -5%; background: #9b59f6; animation: gh-drift-a 31s ease-in-out infinite alternate; }
-.gh-live-wall[data-kind="stars"] { background: radial-gradient(ellipse at 50% 120%, #1a2440, var(--gh-bg-app) 70%); }
-.gh-live-wall[data-kind="stars"] i {
-  inset: -50%; width: auto; height: auto; border-radius: 0; filter: none; opacity: 1;
-  background-image: radial-gradient(1.5px 1.5px at 20px 30px, #fff, transparent), radial-gradient(1px 1px at 90px 120px, #cfe0ff, transparent),
-    radial-gradient(1.2px 1.2px at 160px 60px, #fff, transparent), radial-gradient(1px 1px at 230px 180px, #fff, transparent);
-  background-size: 260px 220px;
-}
-.gh-live-wall[data-kind="stars"] .gh-live-b0 { animation: gh-stars 90s linear infinite, gh-twinkle 4s ease-in-out infinite alternate; }
-.gh-live-wall[data-kind="stars"] .gh-live-b1 { background-size: 340px 300px; opacity: 0.6; animation: gh-stars 140s linear infinite reverse, gh-twinkle 6s ease-in-out infinite alternate-reverse; }
-.gh-live-wall[data-kind="stars"] .gh-live-b2 { background-size: 420px 380px; opacity: 0.35; animation: gh-stars 200s linear infinite; }
-@keyframes gh-drift-a { to { transform: translate(35%, 25%) scale(1.2); } }
-@keyframes gh-drift-b { to { transform: translate(-30%, 20%) scale(0.85); } }
-@keyframes gh-drift-c { to { transform: translate(15%, -35%) scale(1.15); } }
-@keyframes gh-rise { to { transform: translate(10%, -120%) scale(1.25); } }
-@keyframes gh-stars { to { transform: translate(-260px, -220px); } }
-@keyframes gh-twinkle { from { opacity: 1; } to { opacity: 0.55; } }
-:host([data-reduce-motion]) .gh-live-wall i { animation: none !important; }
 .gh-set-wall[data-live] { background: linear-gradient(135deg, #1fb8c4, #9b59f6, #3e88f7) !important; background-size: 300% 300% !important; animation: gh-wallcard 6s ease-in-out infinite alternate; }
 .gh-set-wall[data-live="lava"] { background-image: linear-gradient(135deg, #ff5c3a, #ff9f2e, #ec407a) !important; }
 .gh-set-wall[data-live="stars"] { background: radial-gradient(1.5px 1.5px at 10px 14px, #fff, transparent), radial-gradient(1px 1px at 30px 40px, #fff, transparent), radial-gradient(ellipse at 50% 120%, #1a2440, #05070c) !important; background-size: 44px 52px, 44px 52px, auto !important; animation: none; }
