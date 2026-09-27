@@ -905,7 +905,7 @@
       const st = e && e.state;
       if (!st || !HERE_TYPES.has(st.type)) continue;
       const uid = idOf(e.userId);
-      if (!uid) continue;
+      if (!uid || uid === meId()) continue; // our own entry (Ghost is in the session too)
       const ts = st.typingState && st.typingState.state;
       users.push({ id: uid, state: st.type, platform: st.platform, typing: !!(ts && ts !== "none"), voice: !!(st.typingState && st.typingState.activityType === "voice_note") });
     }

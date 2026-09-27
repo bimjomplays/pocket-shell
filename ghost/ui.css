@@ -1384,3 +1384,5 @@ input, textarea {
 .gh-story-ring[data-preview="1"] .gh-story-badge { opacity: 1; }
 .gh-story-badge .gh-avatar { width: 100% !important; height: 100% !important; border: none; }
 .gh-story-name { max-width: 70px; }
+/* a photo/GIF still loading (or still uploading, if you just sent it) keeps a visible placeholder */
+.gh-media[data-loading="1"] { width: 200px; height: 150px; }

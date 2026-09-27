@@ -498,6 +498,8 @@
     root.addEventListener("click", (e) => {
       const rt = ctx.state.rowTap;
       if (!rt || nowMs() - rt.t > 330) return;
+      // only a second tap on the same row, or on the chat screen that row just opened - never another row/tab
+      if (!(rt.row.contains(e.target) || (e.target.closest && e.target.closest(".gh-screen") === ctx.conv.screen))) { ctx.state.rowTap = null; return; }
       ctx.state.rowTap = null;
       e.stopPropagation(); e.preventDefault();
       openCamera(ctx, { to: rt.id });
@@ -583,8 +585,6 @@
     if (!data) return;
     ctx.state.hereByConv = ctx.state.hereByConv || new Map();
     ctx.state.hereByConv.set(data.conversationId, data.users || []);
-    const typing = (data.users || []).filter((u) => u.typing).map((u) => u.id);
-    ctx.state.typingByConv.set(data.conversationId, new Set(typing));
     if (ctx.state.currentConvId === data.conversationId) {
       updateTypingIndicator(ctx);
       const cd = ctx.state.convById.get(data.conversationId);
@@ -878,7 +878,7 @@
     // tap = open the chat; double-tap = snap camera for this person (like Snapchat). The chat opens at once on the
     // first tap (no waiting to see if a second one comes); the camera then slides up over it.
     rowEl.addEventListener("click", () => {
-      ctx.state.rowTap = { id: conv.id, t: nowMs() }; // a 2nd tap lands on the chat screen - see the root listener
+      ctx.state.rowTap = { id: conv.id, t: nowMs(), row: rowEl }; // a 2nd tap lands on the chat screen - see the root listener
       openConversationScreen(ctx, conv.id);
     });
     const row = { el: rowEl, id: conv.id };
@@ -1082,7 +1082,7 @@
     const conv = ctx.conv;
     conv.nameEl.textContent = convData.title || "Unknown";
     const typingSet = ctx.state.typingByConv.get(convData.id);
-    if (typingSet && typingSet.size) {
+    if ((typingSet && typingSet.size) || hereUsers(ctx, convData.id).some((u) => u.typing)) {
       conv.subEl.innerHTML = "";
       conv.subEl.append(document.createTextNode("typing"), (() => { const d = el("span", "gh-row-dots"); d.innerHTML = "<span></span><span></span><span></span>"; return d; })());
       conv.subEl.dataset.typing = "1"; conv.subEl.dataset.here = "0";
@@ -1502,11 +1502,22 @@
     pumpMedia();
     return p;
   }
+  // A photo/GIF you JUST sent has no downloadable copy until the upload finishes (device 2026-09-27: loadMedia came
+  // back empty, the empty result was cached, and your sent GIFs never appeared). So an empty answer is retried a few
+  // times with backoff, and is never cached - the next repaint asks again.
+  const MEDIA_RETRY_MS = [1500, 3500, 7000, 15000];
   function pumpMedia() {
     while (mediaActive < 3 && mediaWaiting.length) {
-      const { m, resolve } = mediaWaiting.shift();
+      const job = mediaWaiting.shift();
+      const { m, resolve } = job;
       mediaActive++;
-      api.loadMedia(m.conversationId, m.id).then((r) => resolve((r && r.media) || []), (e) => { gtrail("media load failed " + (e && e.message || e)); resolve([]); })
+      api.loadMedia(m.conversationId, m.id).then((r) => (r && r.media) || [], (e) => { gtrail("media load failed " + (e && e.message || e)); return []; })
+        .then((list) => {
+          if (list.length) { resolve(list); return; }
+          const tries = job.tries || 0;
+          if (tries < MEDIA_RETRY_MS.length) setTimeout(() => { job.tries = tries + 1; mediaWaiting.push(job); pumpMedia(); }, MEDIA_RETRY_MS[tries]);
+          else { mediaCache.delete(m.conversationId + "|" + m.id); resolve([]); }
+        })
         .finally(() => { mediaActive--; pumpMedia(); });
     }
   }
@@ -2263,7 +2274,7 @@
 
     let holdTimer = null, startX = 0, startY = 0, mode = null, held = false;
     wrap.addEventListener("touchstart", (e) => {
-      if (e.touches.length !== 1 || v.replyOpen && e.target.closest(".gh-viewer-reply")) return;
+      if (e.touches.length !== 1 || v.replyOpen) return;
       startX = e.touches[0].clientX; startY = e.touches[0].clientY; mode = null; held = false;
       holdTimer = setTimeout(() => { held = true; pauseViewer(ctx, true); }, 200);
     }, { passive: true });
@@ -2375,6 +2386,7 @@
   }
   function pauseViewer(ctx, pause) {
     const v = ctx.viewer;
+    if (!!v.paused === !!pause) return; // already in that state: re-pausing would corrupt the elapsed time
     v.paused = pause;
     const video = v.media.querySelector("video");
     if (pause) {
@@ -2617,7 +2629,7 @@
       const type = ["video/mp4;codecs=avc1", "video/mp4", "video/webm"].find((t) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t));
       c.recorder = type ? new MediaRecorder(c.stream, { mimeType: type }) : new MediaRecorder(c.stream);
       const mime = (c.recorder.mimeType || type || "video/mp4").split(";")[0];
-      const dims = { width: c.video ? c.video.videoWidth : 1080, height: c.video ? c.video.videoHeight : 1920 };
+      const dims = { width: c.video ? c.video.videoWidth : 1080, height: c.video ? c.video.videoHeight : 1920, hasAudio: c.stream.getAudioTracks().length > 0 };
       c.recorder.ondataavailable = (e) => { if (e.data && e.data.size) c.chunks.push(e.data); };
       c.recorder.onstop = () => {
         const blob = new Blob(c.chunks, { type: mime });
@@ -2646,7 +2658,7 @@
   }
   function openReview(ctx, blob, kind, fromCamera, dims) {
     const c = ctx.camera;
-    c.captured = { blob, kind, width: dims && dims.width, height: dims && dims.height };
+    c.captured = { blob, kind, width: dims && dims.width, height: dims && dims.height, hasAudio: dims ? dims.hasAudio !== false : true };
     stopCameraStream(ctx);
     c.reviewMedia.innerHTML = "";
     const url = URL.createObjectURL(blob);
@@ -2719,7 +2731,7 @@
     c.sending = true; c.sendBtn.dataset.sending = "1"; paintChosen(ctx);
     const cap = c.captured, ids = Array.from(c.picked);
     try {
-      await api.sendSnap(ids, cap.blob, { kind: cap.kind, width: cap.width, height: cap.height });
+      await api.sendSnap(ids, cap.blob, { kind: cap.kind, width: cap.width, height: cap.height, hasAudio: cap.hasAudio });
       haptic("success");
       closeCamera(ctx);
       ctx.showToast(ids.length > 1 ? `Snap sent to ${ids.length} chats` : "Snap sent");
