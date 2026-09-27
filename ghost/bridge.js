@@ -378,7 +378,14 @@
       kind,
       text: text || (kind === "unknown" && kase ? "[" + kase + "]" : text),
       media, // chat photos/videos: download/decrypt goes through Snapchat's media manager - next step
-      replyTo: mc.quotedMessage ? { messageId: String(mc.quotedMessage.messageId || ""), text: undefined } : undefined,
+      replyTo: mc.quotedMessage ? safe("quoted", () => {
+        const q = mc.quotedMessage.content || mc.quotedMessage;
+        const qd = decodeContent(q);
+        const qc = qd && qd.content;
+        const qtext = qc && (qc.$case === "text" ? qc.text && qc.text.text : qc.$case ? ({ snapdoc: "Snap", chatMedia: "Photo", externalMedia: "Photo", sticker: "Sticker", note: "Voice note", creativeToolItem: "GIF" }[qc.$case] || undefined) : undefined);
+        const qfrom = idOf(q.senderId) || idOf(mc.quotedMessage.senderId);
+        return { messageId: String(q.messageId != null ? q.messageId : ""), from: qfrom ? personFor(qfrom) : undefined, text: qtext };
+      }, { messageId: "" }) : undefined,
       reactions: reactions.length ? reactions : undefined,
       saved: (md.savedBy || []).length > 0,
       opened: others(md.openedBy).length > 0 || others(md.seenBy).length > 0,
@@ -654,10 +661,14 @@
     post({ ghost: "event", type: "conversations", data: { conversations: convs } });
   }, 150);
 
+  const lastMsgRef = new Map(); // conversationId -> the messages Map last sent (Snapchat replaces it on every change)
   const emitMessagesFor = throttle((conversationId) => {
     safe("messages-event", () => {
       const entry = (messaging().conversations || {})[conversationId];
       if (!entry) return;
+      const ref = entry.messages;
+      if (lastMsgRef.get(conversationId) === ref && lastMsgRef.get(conversationId + "#more") === !!entry.hasMoreMessages) return;
+      lastMsgRef.set(conversationId, ref); lastMsgRef.set(conversationId + "#more", !!entry.hasMoreMessages);
       const msgs = entry.messages;
       const list = [];
       if (msgs && typeof msgs.entries === "function") {

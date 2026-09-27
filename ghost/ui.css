@@ -586,8 +586,8 @@ input, textarea {
 .gh-group[data-me="1"] { align-self: flex-end; flex-direction: row-reverse; }
 .gh-group[data-me="0"] { align-self: flex-start; }
 .gh-group[data-first="1"] { margin-top: 10px; }
-.gh-group-gutter { width: 26px; flex: none; display: flex; align-items: flex-end; align-self: stretch; }
-.gh-group-gutter .gh-avatar { width: 24px; height: 24px; }
+.gh-group-gutter { width: 34px; flex: none; display: flex; align-items: flex-end; align-self: stretch; }
+.gh-group-gutter .gh-avatar { width: 32px !important; height: 32px !important; min-width: 32px; } /* never wider than its column (it overlapped the bubbles) */
 .gh-group[data-me="1"] .gh-group-gutter { display: none; }
 .gh-messages:not([data-group="1"]) .gh-group-gutter { display: none; }
 .gh-messages:not([data-group="1"]) .gh-group[data-me="0"] { padding-left: 0; }

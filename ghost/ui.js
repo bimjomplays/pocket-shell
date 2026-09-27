@@ -516,8 +516,19 @@
   function applyMessages(ctx, data) {
     if (!data) return;
     const entry = { messages: data.messages || [], hasMore: !!data.hasMore };
+    const prev = ctx.state.messagesByConv.get(data.conversationId);
     ctx.state.messagesByConv.set(data.conversationId, entry);
-    if (ctx.state.currentConvId === data.conversationId) renderMessageList(ctx, ctx.conv, entry, { stick: true });
+    if (ctx.state.currentConvId !== data.conversationId) return;
+    // Snapchat's store changes many times a second (presence, typing...), and every update used to repaint the
+    // chat, replay the "new message" pop and scroll - the jumping in group chats (device, 2026-09-27). Now:
+    // nothing changed -> nothing; new messages at the end -> the normal arrival; anything else (reactions,
+    // opened/saved state) -> repaint in place, scroll untouched.
+    const sig = (list) => list.map((m) => m.id + ":" + (m.reactions ? m.reactions.length : 0) + ":" + (m.saved ? 1 : 0) + (m.opened ? 1 : 0) + ":" + (m.text || "").length).join("|");
+    if (prev && sig(prev.messages) === sig(entry.messages) && prev.hasMore === entry.hasMore) return;
+    const prevLast = prev && prev.messages.length ? prev.messages[prev.messages.length - 1].id : null;
+    const newLast = entry.messages.length ? entry.messages[entry.messages.length - 1].id : null;
+    const arrived = !prev || (newLast !== prevLast && entry.messages.length >= prev.messages.length);
+    renderMessageList(ctx, ctx.conv, entry, arrived ? { stick: true } : {});
   }
   function applyTyping(ctx, data) {
     if (!data) return;
@@ -1063,7 +1074,7 @@
       groupEl.dataset.me = isMe ? "1" : "0";
       groupEl.dataset.first = "1";
       const gutter = el("div", "gh-group-gutter");
-      gutter.appendChild(makeAvatar(isMe ? (ctx.state.me || g.from || { name: "You" }) : g.from, 40)); // Discord: every run starts with a big avatar, yours too
+      gutter.appendChild(makeAvatar(isMe ? (ctx.state.me || g.from || { name: "You" }) : g.from, 32)); // Discord: every run starts with a big avatar, yours too
       const col = el("div", "gh-group-col");
       const meta = el("div", "gh-group-meta");
       const nm = el("span", "gh-group-name");
