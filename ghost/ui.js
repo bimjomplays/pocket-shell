@@ -2095,7 +2095,12 @@
   async function openStickerSheet(ctx) {
     haptic();
     const s = ctx.stickerSheet;
-    const p = stickerPeople(ctx);
+    let p = stickerPeople(ctx);
+    if (!p.me) {
+      // "me" arrives with the login event, often before Snapchat has loaded profiles - ask again now
+      try { const st = await api.status(); if (st && st.me) ctx.state.me = st.me; } catch (e) {}
+      p = stickerPeople(ctx);
+    }
     if (!p.me) { ctx.showToast("Your Bitmoji hasn't loaded yet"); return; }
     s.tabs.duo.style.display = p.friend ? "" : "none";
     s.tabs.duo.textContent = p.friend ? "With " + p.friendName : "";
