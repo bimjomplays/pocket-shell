@@ -336,12 +336,22 @@
     const c = decoded && decoded.content;
     const kase = c && c.$case;
     let kind = CASE_KIND[kase] || (mc.snapDisplayInfo ? "snap" : "unknown");
+    let media;
     let text;
+    if (kase === "sticker") {
+      // main.js sticker renderer: included Bitmoji stickers have stickerId "comicId:?:avatarId[:friendAvatarId]" and are
+      // drawn from https://cf-st.sc-cdn.net/3d/render/<comicId>-<avatarId>[-<friendAvatarId>]-v1.webp?scale=1&ua=2
+      // (Snapchat's own host, so the page lets it load); emoji stickers are just the emoji
+      const st = c.sticker && c.sticker.sticker;
+      if (st && st.$case === "included" && st.included && typeof st.included.stickerId === "string") {
+        const p = st.included.stickerId.split(":");
+        if (p.length >= 3) media = [{ type: "image", url: "https://cf-st.sc-cdn.net/3d/render/" + [p[0], p[2], p[3]].filter(Boolean).join("-") + "-v1.webp?scale=1&ua=2" }];
+      } else if (st && st.$case === "emoji") { kind = "text"; text = st.emoji; }
+    }
     if (kase === "text") text = c.text && c.text.text;
     else if (kase === "snapReply") text = c.snapReply && (c.snapReply.text || (c.snapReply.content && c.snapReply.content.text));
     else if (kase === "storyReply") text = c.storyReply && c.storyReply.text;
     else if (kase === "url") text = c.url && (c.url.url || c.url.text);
-    let media;
     if (kase === "creativeToolItem") {
       const it = c.creativeToolItem;
       const json = safe("gif-json", () => JSON.stringify(it, (k, v) => (typeof v === "bigint" ? String(v) : v instanceof Uint8Array ? undefined : v)), "") || "";

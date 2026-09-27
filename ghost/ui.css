@@ -1209,3 +1209,10 @@ input, textarea {
 @media (prefers-reduced-motion: reduce) {
   .gh-screen.gh-anim, .gh-sheet.gh-anim, .gh-shade.gh-anim, .gh-msg-swipe.gh-anim, .gh-press, .gh-msg-pop { transition-duration: 0.001s !important; animation-duration: 0.001s !important; }
 }
+
+/* The open chat must never pan sideways (device report): only vertical scrolling inside it; wide content (reply
+   hints, long links, media) is clipped instead of widening the scroller. */
+:host { overflow: hidden; overscroll-behavior: none; }
+.gh-messages { overflow-x: hidden !important; touch-action: pan-y; overscroll-behavior-x: none; }
+.gh-screen, .gh-conv, .gh-home { overflow-x: hidden; }
+.gh-bubble { max-width: 100%; overflow-wrap: anywhere; }

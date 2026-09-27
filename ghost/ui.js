@@ -404,9 +404,9 @@
       if (!state.homeReady) {
         try { await loadInitialData(ctx); } catch (e) { uiTrail("first load failed: " + (e && e.message || e)); }
       }
-      boot.classList.add("gh-boot-fade");
       state.homeReady = true;
-      markReady(true);
+      ctx.revealHome = () => { boot.classList.add("gh-boot-fade"); markReady(true); };
+      if (state.listShown) ctx.revealHome();
     }
     // Until logged in, keep asking (a `ready` from the page world can be missed, and login finishes after load).
     setInterval(() => { if (!state.loggedIn) api.status().then(handleReady).catch(() => {}); }, 1500);
@@ -469,7 +469,25 @@
     } catch (e) { /* home just stays empty; the "conversations" event may still arrive */ }
   }
 
+  // Right after launch Snapchat's list arrives before the names do (device report: "empty conversations for a
+  // little"): keep the loading screen up until most chats have a real name, or 4s have passed.
+  const unnamed = (c) => !c.title || c.title === "Unknown" || c.title === "Conversation" || /^Unknown(, Unknown)*$/.test(c.title);
+  function listLooksReady(list) {
+    if (!list.length) return false;
+    return list.filter(unnamed).length / list.length < 0.25;
+  }
   function applyConversations(ctx, list) {
+    if (!ctx.state.listShown) {
+      if (!ctx.state.listWaitStart) {
+        ctx.state.listWaitStart = performance.now();
+        setTimeout(() => { if (!ctx.state.listShown && ctx.state.pendingList) { ctx.state.listShown = true; applyConversations(ctx, ctx.state.pendingList); ctx.revealHome && ctx.revealHome(); } }, 4000);
+      }
+      ctx.state.pendingList = list;
+      if (!listLooksReady(list)) return;
+      ctx.state.listShown = true;
+      ctx.revealHome && ctx.revealHome();
+    }
+    // chats whose names still haven't arrived go to the end rather than sitting between real ones
     ctx.state.conversations = list.slice().sort((a, b) => (b.lastActivityTs || 0) - (a.lastActivityTs || 0));
     ctx.state.convById = new Map(ctx.state.conversations.map((c) => [c.id, c]));
     renderHomeList(ctx);
