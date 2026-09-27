@@ -31,8 +31,18 @@
   // shows them as pop-ups (an internal hiccup isn't something the user can act on).
   function trail(where, message, type = "log") {
     try { console.log("[ghost]", where, message); } catch { /* ignore */ }
-    const text = message && message.message ? message.message + (message.stack ? " | " + String(message.stack).split("\n")[0] : "") : String(message);
+    const text = message && message.message ? message.message + (message.stack ? " | " + String(message.stack).split("\n")[0] : "")
+      : message && typeof message === "object" ? (message.name || "error") + " " + safeJson(message) : String(message);
     post({ ghost: "event", type, data: { where, message: text } });
+  }
+
+  function safeJson(o) {
+    try { return JSON.stringify(o, (k, v) => (typeof v === "bigint" ? String(v) : v instanceof Uint8Array ? "u8" : v)).slice(0, 300); } catch (e) { return "?"; }
+  }
+  function errText(err) {
+    if (err && err.message) return err.message;
+    if (err && typeof err === "object") return (err.name || "error") + (err.callbackStatus != null ? " status " + err.callbackStatus : "") + " " + safeJson(err);
+    return String(err);
   }
 
   function safe(where, fn, fallback) {
@@ -213,12 +223,13 @@
   // few field-name variants actually seen while reading the bundle (see BRIDGE_NOTES.md), never a throw.
   // ------------------------------------------------------------------------------------------------
 
-  // Bitmoji head render, exactly as Snapchat Web builds it for chat avatars (main.js, search
-  // "images.bitmoji.com/3d/avatar/${t}-${e}"): `/3d/avatar/{sceneId}-{avatarId}-v1.webp?ua=2`, called with
-  // (user.bitmoji_avatar_id, user.bitmoji_scene_id || "859643639"); a "-wc" suffix on the scene id is dropped.
-  // (An earlier version put avatarId first with the selfie id, which 404s - no Bitmoji ever showed.)
-  function bitmojiUrl(avatarId, sceneId) {
+  // Bitmoji for avatars. With a selfie id (the pose the person picked as their Bitmoji selfie) the head-and-
+  // shoulders render is `/3d/render/{selfieId}-{avatarId}-v1.webp?ua=2` (250x250, device-checked 2026-09-27) - what
+  // round avatars want. Without one, Snapchat's own full-body builder (main.js, search
+  // "images.bitmoji.com/3d/avatar/${t}-${e}"): `/3d/avatar/{sceneId||859643639}-{avatarId}-v1.webp?ua=2`.
+  function bitmojiUrl(avatarId, selfieId, sceneId) {
     if (!avatarId) return undefined;
+    if (selfieId) return `https://images.bitmoji.com/3d/render/${selfieId}-${avatarId}-v1.webp?ua=2`;
     let scene = sceneId || "859643639";
     if (scene.endsWith("-wc")) scene = scene.slice(0, -3);
     return `https://images.bitmoji.com/3d/avatar/${scene}-${avatarId}-v1.webp?ua=2`;
@@ -241,13 +252,14 @@
     // userDisplayName: state.friendStories.stories[key].userMetadata's own name field (device sample 2026-09-27).
     const name = firstString(raw.displayName, raw.userDisplayName, username, raw.name) || username || id;
     const avatarId = firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId, raw.avatarId);
+    const selfieId = firstString(raw.bitmoji_selfie_id, raw.bitmojiSelfieId, raw.selfieId);
     const sceneId = firstString(raw.bitmoji_scene_id, raw.bitmojiSceneId, raw.sceneId);
     return {
       id,
       name,
       username,
       avatarUrl: undefined, // no separate non-bitmoji avatar CDN found while reading the bundle
-      bitmojiUrl: bitmojiUrl(avatarId, sceneId),
+      bitmojiUrl: bitmojiUrl(avatarId, selfieId, sceneId),
       color: undefined,
     };
   }
@@ -322,6 +334,26 @@
   // fetches mediaReference.contentObject/resolvedUrl/localCacheKey, and unzips media+overlay bundles, returning
   // dataUrls (blob: URLs whose Blob already carries the RIGHT sniffed MIME type - device-verified below) - so we
   // call it directly instead of reimplementing any crypto/network/unzip ourselves, exactly as the task asked.
+  let lastStory = null;
+  let storyThumbFnCache;
+  function storyThumbFn() {
+    if (storyThumbFnCache !== undefined) return storyThumbFnCache;
+    storyThumbFnCache = null;
+    safe("story-thumb-fn", () => {
+      const factories = webpackRequire && webpackRequire.m;
+      if (!factories) return;
+      for (const id of Object.keys(factories)) {
+        if (!String(factories[id]).includes("friend_stories_sync_resolve_thumb_failure")) continue;
+        const exp = webpackRequire(id);
+        for (const k of Object.keys(exp)) {
+          const fn = safe("story-thumb-export", () => exp[k], null);
+          if (typeof fn === "function" && String(fn).includes("friend_stories_sync_resolve_thumb_failure")) { storyThumbFnCache = fn; return; }
+        }
+      }
+      trail("story-thumb", "resolver not found", "error");
+    });
+    return storyThumbFnCache;
+  }
   let mediaResolverFn;
   function mediaResolver() {
     if (mediaResolverFn !== undefined) return mediaResolverFn;
@@ -560,7 +592,7 @@
     if (viaSnap && typeof viaSnap === "object") {
       const name = firstString(viaSnap.display_name, viaSnap.displayName, viaSnap.display, viaSnap.mutable_username, viaSnap.username);
       if (name) return { id, name, username: firstString(viaSnap.mutable_username, viaSnap.username), avatarUrl: undefined,
-        bitmojiUrl: bitmojiUrl(firstString(viaSnap.bitmoji_avatar_id, viaSnap.bitmojiAvatarId), firstString(viaSnap.bitmoji_scene_id, viaSnap.bitmojiSceneId)) };
+        bitmojiUrl: bitmojiUrl(firstString(viaSnap.bitmoji_avatar_id, viaSnap.bitmojiAvatarId), firstString(viaSnap.bitmoji_selfie_id, viaSnap.bitmojiSelfieId), firstString(viaSnap.bitmoji_scene_id, viaSnap.bitmojiSceneId)) };
     }
     const s = state();
     const map = s && s.user && s.user.publicUsers;
@@ -581,7 +613,7 @@
       name: name || id,
       username: firstString(raw.mutable_username, raw.username),
       avatarUrl: undefined,
-      bitmojiUrl: bitmojiUrl(firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId), firstString(raw.bitmoji_scene_id, raw.bitmojiSceneId)),
+      bitmojiUrl: bitmojiUrl(firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId), firstString(raw.bitmoji_selfie_id, raw.bitmojiSelfieId), firstString(raw.bitmoji_scene_id, raw.bitmojiSceneId)),
     };
   }
   // Every id in Snapchat's state is an object { id: Uint8Array(16), str: "<uuid>" } (device sample 2026-09-26);
@@ -782,6 +814,27 @@
   }, 150);
 
   const lastMsgRef = new Map(); // conversationId -> the messages Map last sent (Snapchat replaces it on every change)
+  // Read receipts, the way Snapchat's own chat pane does it (main.js, search "displayedMessages:p}=(0,G.P)(zi"): every time
+  // the open chat's messages change, displayedMessages(conversationId, newest-by-orderKey.descriptor.messageId). Ghost
+  // used to send it once on open with the last Map key, before new messages had loaded - so friends' messages stayed
+  // unread. Only for the chat on screen, and not while Ghost is in the background.
+  const lastDisplayed = new Map();
+  function markDisplayed(conversationId) {
+    if (document.hidden || !openConversations.has(conversationId)) return;
+    const entry = conversationEntry(conversationId);
+    const msgs = entry && entry.messages;
+    if (!msgs || typeof msgs.values !== "function") return;
+    let newest = null;
+    for (const m of msgs.values()) if (m && m.descriptor && (!newest || toNum(m.orderKey) > toNum(newest.orderKey))) newest = m;
+    const id = newest && newest.descriptor.messageId;
+    if (id === undefined || id === null || lastDisplayed.get(conversationId) === String(id)) return;
+    const m = messaging();
+    if (typeof m.displayedMessages !== "function") return;
+    lastDisplayed.set(conversationId, String(id));
+    Promise.resolve(m.displayedMessages(convIdObj(conversationId), id)).catch((e) => { lastDisplayed.delete(conversationId); trail("displayed", e, "error"); });
+  }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) for (const id of openConversations) safe("displayed", () => markDisplayed(id)); });
+
   const emitMessagesFor = throttle((conversationId) => {
     safe("messages-event", () => {
       const entry = (messaging().conversations || {})[conversationId];
@@ -796,6 +849,7 @@
       }
       list.sort((a, b) => a.ts - b.ts);
       post({ ghost: "event", type: "messages", data: { conversationId, messages: list, hasMore: !!entry.hasMoreMessages } });
+      markDisplayed(conversationId);
     });
   }, 150);
 
@@ -837,6 +891,33 @@
     presenceConv = null; presenceCleanup = null;
   }
 
+  // Who else is looking at the chat I have open: Snapchat's presence session (only exists while "Show me in chats"
+  // has one open - see setPresence) keeps `state` = [{userId, state: {type: "chat_visible"|"chat_hidden"|"peeking"|...,
+  // typingState: {state, activityType}, platform}}] (main.js, search 'sessionStateObservable.pipe'). Emitted as a
+  // "here" event only when it changes.
+  const HERE_TYPES = new Set(["chat_visible", "using_reply_camera", "viewing_chat_media", "in_game", "peeking"]);
+  let lastHereSig = "", lastHereConv = null;
+  function checkHere() {
+    const sess = (state() || {}).presence && state().presence.presenceSession;
+    const cid = sess ? idOf(sess.conversationId) : presenceConv;
+    const users = [];
+    for (const e of (sess && Array.isArray(sess.state) ? sess.state : [])) {
+      const st = e && e.state;
+      if (!st || !HERE_TYPES.has(st.type)) continue;
+      const uid = idOf(e.userId);
+      if (!uid) continue;
+      const ts = st.typingState && st.typingState.state;
+      users.push({ id: uid, state: st.type, platform: st.platform, typing: !!(ts && ts !== "none"), voice: !!(st.typingState && st.typingState.activityType === "voice_note") });
+    }
+    const sig = (cid || "") + ":" + users.map((u) => u.id + u.state + u.typing).join(",");
+    if (sig === lastHereSig) return;
+    lastHereSig = sig;
+    // left the chat (session gone): clear the old one so nobody stays "here" forever
+    if (lastHereConv && lastHereConv !== cid) post({ ghost: "event", type: "here", data: { conversationId: lastHereConv, users: [] } });
+    lastHereConv = cid || null;
+    if (cid) post({ ghost: "event", type: "here", data: { conversationId: cid, users } });
+  }
+
   function meUser() {
     const id = meId();
     if (id) return personFor(id);
@@ -867,6 +948,7 @@
       emitConversations();
       for (const id of openConversations) emitMessagesFor(id);
       safe("typing", checkTyping);
+      safe("here", checkHere);
     }), null);
     emitConversations();
     post({ ghost: "event", type: "ready", data: { loggedIn: loggedIn(), me: meUser() } });
@@ -922,10 +1004,8 @@
       const entry = conversationEntry(conversationId);
       // ...and it reports the newest message as seen via displayedMessages(conversationId, messageId) = read receipt,
       // exactly once per open like the real chat screen (only for the chat you actually opened)
-      safe("displayed", () => {
-        let lastId; if (entry && entry.messages && typeof entry.messages.keys === "function") for (const k of entry.messages.keys()) lastId = k;
-        if (lastId !== undefined && typeof m.displayedMessages === "function") Promise.resolve(m.displayedMessages(convIdObj(conversationId), lastId)).catch((e) => trail("displayed", e, "error"));
-      });
+      lastDisplayed.delete(conversationId);
+      safe("displayed", () => markDisplayed(conversationId));
       const list = [];
       if (entry && entry.messages && typeof entry.messages.entries === "function") {
         for (const [id, msg] of entry.messages.entries()) { const n = toMessage(conversationId, id, msg); if (n) list.push(n); }
@@ -959,7 +1039,17 @@
       requireStore();
       const m = messaging();
       if (typeof m.sendTextMessage !== "function") throw new Error("sendTextMessage action missing");
-      const replyOpts = opts && opts.replyToMessageId ? { messageId: opts.replyToMessageId } : undefined;
+      // Replies: Snapchat's own composer passes {messageId: quoted.descriptor.messageId (a BIGINT), initiationType,
+      // AnalyticsMessageId} (main.js, search 'initiationType:"MESSAGE_ACTION_MENU"'). Our ids cross as strings, and a
+      // string messageId made the send fail silently - map it back to the real message first.
+      let replyOpts;
+      if (opts && opts.replyToMessageId) {
+        const entry = conversationEntry(conversationId);
+        const quoted = entry && entry.messages && findRaw(entry.messages, opts.replyToMessageId);
+        const realId = (quoted && quoted.descriptor && quoted.descriptor.messageId) ?? realKey(entry && entry.messages, opts.replyToMessageId);
+        replyOpts = { messageId: typeof realId === "bigint" ? realId : BigInt(String(realId)), initiationType: "MESSAGE_ACTION_MENU",
+          AnalyticsMessageId: (quoted && quoted.messageAnalytics && quoted.messageAnalytics.analyticsMessageId) || "" };
+      }
       const cid = convIdObj(conversationId);
       await (replyOpts ? m.sendTextMessage(cid, text, replyOpts) : m.sendTextMessage(cid, text));
       return {};
@@ -969,12 +1059,11 @@
       requireStore();
       const m = messaging();
       if (typeof m.sendMediaMessage !== "function") throw new Error("sendMediaMessage action missing");
-      // Verified (main.js, search "sendMediaMessage:async(e,n)"): takes the destinations object and a
-      // plain array of File/Blob - it runs them through Snapchat's own validation/optimisation pipeline
-      // itself, so this is the ONE send path here we're confident stays fully native-looking on the
-      // recipient's side without any extra wrapping from us.
       const file = blob instanceof File ? blob : new File([blob], `ghost.${(opts && opts.kind) || "bin"}`, { type: blob.type });
-      await m.sendMediaMessage({ conversations: [convIdObj(conversationId)], stories: [] }, [file]);
+      // Snapchat's composer: `await sendMediaMessage([conversationId], files)` - a plain ARRAY of conversation ids
+      // (main.js, search "message_composer_file_sent_count"). It wraps that as {conversations: ...} itself; passing
+      // the wrapped object (as before 2026-09-27) made every photo/GIF send fail.
+      await m.sendMediaMessage([convIdObj(conversationId)], [file]);
       return {};
     },
 
@@ -982,34 +1071,25 @@
       requireStore();
       const m = messaging();
       if (typeof m.sendSnap !== "function") throw new Error("sendSnap action missing");
-      // LOW CONFIDENCE - see BRIDGE_NOTES.md "sendSnap". The real `capturedSnap` snapshot Snapchat's own
-      // camera passes here is a structured object (mediaType, optional overlayMedia/hasAudio/loopPlayback,
-      // and an already-processed local media reference), not a bare Blob - camhook.js/recorder.js produce
-      // that shape from a live camera session. We approximate the minimum shape actually read inside
-      // `sendSnap` (mediaType, and the blob itself under `data`, matching how audio notes are built via
-      // the sibling `createLocalMediaReference`-style helper a few lines away) rather than inventing an
-      // unverified full shape. First device test MUST confirm this either sends a normal-looking snap or
-      // fails loudly (caught below) rather than sending something malformed.
-      const kind = (opts && opts.kind) || (blob.type && blob.type.startsWith("video") ? "video" : "image");
-      const capturedSnap = {
-        mediaType: kind === "video" ? "Video" : "Image",
-        data: blob,
-        hasAudio: kind === "video",
-        loopPlayback: false,
-        overlayMedia: undefined,
-        durationSec: (opts && opts.durationSec) || undefined,
-      };
-      const destinations = { conversations: conversationIds, stories: [] };
+      // Exactly what Snapchat's own camera hands sendSnap (main.js):
+      //  - the snap: getSnapToSend() (search 'Not ready to send a snap yet') = {media: Blob, dimensions: {width, height},
+      //    mediaType: "Image"|"Video", hasAudio, loopPlayback[, videoCodec, overlayMedia]}  (MediaType values are strings)
+      //  - sendSnap(destinations, snap, cameraFeature, onStart, onSuccess, onError, source) - callbacks, errors swallowed
+      //  - destinations from the send-to page: {conversations: [idObj], stories: [], phoneNumbers: [], massSnaps: []}
+      const video = (opts && opts.kind === "video") || (blob.type && blob.type.startsWith("video"));
+      const dimensions = { width: Math.round((opts && opts.width) || 1080), height: Math.round((opts && opts.height) || 1920) };
+      const capturedSnap = video
+        ? { media: blob, dimensions, mediaType: "Video", hasAudio: opts && opts.hasAudio === false ? false : true, loopPlayback: false, overlayMedia: undefined }
+        : { media: blob, dimensions, mediaType: "Image", hasAudio: false, loopPlayback: false };
+      const ids = (Array.isArray(conversationIds) ? conversationIds : [conversationIds]).map(convIdObj);
+      const destinations = { conversations: ids, stories: [], phoneNumbers: [], massSnaps: [] };
       await new Promise((resolve, reject) => {
-        m.sendSnap(
-          destinations,
-          capturedSnap,
-          "GHOST",
-          () => resolve(),
-          () => resolve(), // onQueued
-          (err) => reject(err instanceof Error ? err : new Error(String(err || "sendSnap failed"))),
-          "GHOST",
-        );
+        const t = setTimeout(() => reject(new Error("snap send timed out")), 110000);
+        Promise.resolve(m.sendSnap(destinations, capturedSnap, "LandingPage",
+          () => {},                                                          // onSnapSendStart
+          () => { clearTimeout(t); resolve(); },                             // onSnapSendSuccess
+          () => { clearTimeout(t); reject(new Error("Snapchat couldn't send the snap")); }, // onSnapSendError
+          "send_to_page")).catch((e) => { clearTimeout(t); reject(e); });
       });
       return true;
     },
@@ -1126,17 +1206,54 @@
         bundle = safe("story-playback", () => fs.playbackData.get(key), null);
       }
       const items = (bundle && bundle.bundle && bundle.bundle.items) || [];
+      // all snaps at once (was one after another - slow to open), each tagged with its snap index for replies
+      const perItem = await Promise.all(items.map((item) => resolveMediaInfos((item && item.mediaLayers) || [], undefined, "ghost_story").catch(() => [])));
       const media = [];
-      for (const item of items) {
-        const infos = (item && item.mediaLayers) || []; // already {mediaMetadata,mediaReference} pairs - device-verified
-        for (const m of await resolveMediaInfos(infos, undefined, "ghost_story")) media.push(m);
-      }
+      perItem.forEach((list, i) => { for (const m of list) { m.item = i; media.push(m); } });
+      lastStory = { userId, items, conversationId: (bundle && (bundle.conversationId || (bundle.bundle && bundle.bundle.bundleMetadata && bundle.bundle.bundleMetadata.conversationId))) };
       // NOT marking watched: the real write (setFriendStorySnapWatchState) needs a snapOwnerId {highBits,lowBits}
       // shape we could not pin down safely without risking a malformed write to the account - see BRIDGE_NOTES.md
       // "openStory". Fetching the media itself does not mark it seen (device-verified: playbackData for several
       // friends was already populated before this session touched anything, i.e. Snapchat itself preloads it for
       // the story rail's thumbnails without counting as a view).
       return { items: media };
+    },
+
+    // Swipe-up reply to a friend's story snap: Snapchat's composer does
+    // sendStorySnapTextReplyMessage(conversationId, snapDoc, snapId, text) (main.js, search '"friendStorySnap"===O?.type'),
+    // with the snap's itemMetadata.snapDoc / snapId from the story playback bundle and the 1:1 chat with the poster.
+    async replyToStory(userId, itemIndex, text) {
+      requireStore();
+      const m = messaging();
+      if (typeof m.sendStorySnapTextReplyMessage !== "function") throw new Error("story reply action missing");
+      if (!lastStory || lastStory.userId !== userId) await methods.openStory(userId);
+      const item = lastStory && lastStory.items[itemIndex || 0];
+      const meta = item && item.itemMetadata;
+      if (!meta || !meta.snapDoc) throw new Error("story snap not loaded");
+      let conv = lastStory.conversationId;
+      if (!conv && typeof m.getOneOnOneConversationId === "function") {
+        const me = meId();
+        const r = await m.getOneOnOneConversationId([convIdObj(me), idObjs.get(userId) || convIdObj(userId)]);
+        const hit = r && typeof r.get === "function" && (r.get(idObjs.get(userId)) || [...r.values()][0]);
+        conv = hit && hit.conversationId;
+      }
+      if (!conv) throw new Error("no chat with this friend");
+      await m.sendStorySnapTextReplyMessage(typeof conv === "string" ? convIdObj(conv) : conv, meta.snapDoc, meta.snapId, text);
+      return true;
+    },
+
+    // Thumbnail for the story rail, exactly like Snapchat's own rail (main.js module with
+    // "friend_stories_sync_resolve_thumb_failure"): resolve story.thumbnail with context "friend_stories".
+    async storyThumb(userId) {
+      requireStore();
+      const fs = (state() || {}).friendStories;
+      if (!fs || typeof fs.stories.get !== "function") return { url: null };
+      let story = fs.stories.get(idObjs.get(userId) || userId);
+      if (!story) for (const [k, v] of fs.stories.entries()) if (idOf(k) === userId) { story = v; break; }
+      const fn = storyThumbFn();
+      if (!story || !fn) return { url: null };
+      const url = await fn(story);
+      return { url: url || null };
     },
 
     async newConversation(userIds) {
@@ -1309,7 +1426,7 @@
       .then((result) => post({ ghost: "res", id, ok: true, result }))
       .catch((err) => {
         trail(`method:${method}`, err);
-        post({ ghost: "res", id, ok: false, error: String((err && err.message) || err) });
+        post({ ghost: "res", id, ok: false, error: errText(err) });
       });
   });
 

@@ -163,12 +163,12 @@
         if (set) for (const fn of Array.from(set)) { try { fn(msg.data); } catch (err) { /* one bad listener shouldn't break others */ } }
       }
     });
-    function call(method, args) {
+    function call(method, args, timeoutMs) {
       return new Promise((resolve, reject) => {
         const id = "g" + (++seq);
         const timer = setTimeout(() => {
           if (pending.delete(id)) reject(new Error("ghost bridge timeout: " + method));
-        }, 15000);
+        }, timeoutMs || 15000);
         pending.set(id, {
           resolve: (v) => { clearTimeout(timer); resolve(v); },
           reject: (e) => { clearTimeout(timer); reject(e); },
@@ -192,8 +192,8 @@
     closeConversation: (id) => bridge.call("closeConversation", [id]),
     loadOlder: (id) => bridge.call("loadOlder", [id]),
     sendText: (id, text, opts) => bridge.call("sendText", [id, text, opts || {}]),
-    sendMedia: (id, blob, opts) => bridge.call("sendMedia", [id, blob, opts || {}]),
-    sendSnap: (ids, blob, opts) => bridge.call("sendSnap", [ids, blob, opts || {}]),
+    sendMedia: (id, blob, opts) => bridge.call("sendMedia", [id, blob, opts || {}], 120000), // uploads can be slow on cellular
+    sendSnap: (ids, blob, opts) => bridge.call("sendSnap", [ids, blob, opts || {}], 120000),
     react: (id, messageId, emoji) => bridge.call("react", [id, messageId, emoji]),
     saveMessage: (id, messageId, saved) => bridge.call("saveMessage", [id, messageId, saved]),
     openSnap: (id, messageId) => bridge.call("openSnap", [id, messageId]),
@@ -203,6 +203,8 @@
     searchFriends: (q) => bridge.call("searchFriends", [q]),
     debugShape: () => bridge.call("debugShape"),
     loadMedia: (convId, msgId) => bridge.call("loadMedia", [convId, msgId]),
+    storyThumb: (userId) => bridge.call("storyThumb", [userId], 30000),
+    replyToStory: (userId, item, text) => bridge.call("replyToStory", [userId, item, text], 30000),
     setPresence: (convId) => bridge.call("setPresence", [convId]),
   };
 
@@ -449,6 +451,7 @@
     });
     bridge.on("messages", (data) => { applyMessages(ctx, data); });
     bridge.on("typing", (data) => { applyTyping(ctx, data); });
+    bridge.on("here", (data) => { applyHere(ctx, data); });
     // bridge progress notes and internal failures go to the phone's log (trail.txt), not on screen
     const toTrail = (kind) => (data) => {
       try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST " + kind + " " + (data && data.where || "") + ": " + String(data && data.message || "").slice(0, 400) }).catch(() => {}); } catch (e) {}
@@ -490,6 +493,15 @@
     // exposed for the test harness / debugging only
     host.__ghost = ctx;
     document.addEventListener("visibilitychange", () => syncPresence(ctx));
+    // double-tap a chat row: the first tap already opened the chat, so the second one lands on the chat screen
+    // sliding in - catch it here (capture phase, before anything in the chat reacts) and open the camera for them
+    root.addEventListener("click", (e) => {
+      const rt = ctx.state.rowTap;
+      if (!rt || nowMs() - rt.t > 330) return;
+      ctx.state.rowTap = null;
+      e.stopPropagation(); e.preventDefault();
+      openCamera(ctx, { to: rt.id });
+    }, true);
     try { if (typeof window.dgOnSettings === "function") window.dgOnSettings(() => syncPresence(ctx)); } catch (e) {}
   }
 
@@ -566,6 +578,24 @@
     const arrived = !prev || (newLast !== prevLast && entry.messages.length >= prev.messages.length);
     renderMessageList(ctx, ctx.conv, entry, arrived ? { stick: true } : {});
   }
+  // friends currently looking at the open chat (bridge "here" event, from Snapchat's presence session)
+  function applyHere(ctx, data) {
+    if (!data) return;
+    ctx.state.hereByConv = ctx.state.hereByConv || new Map();
+    ctx.state.hereByConv.set(data.conversationId, data.users || []);
+    const typing = (data.users || []).filter((u) => u.typing).map((u) => u.id);
+    ctx.state.typingByConv.set(data.conversationId, new Set(typing));
+    if (ctx.state.currentConvId === data.conversationId) {
+      updateTypingIndicator(ctx);
+      const cd = ctx.state.convById.get(data.conversationId);
+      if (cd) updateConvHeader(ctx, cd);
+    }
+  }
+  function hereUsers(ctx, convId) {
+    const list = (ctx.state.hereByConv && ctx.state.hereByConv.get(convId)) || [];
+    const cd = ctx.state.convById.get(convId) || {};
+    return list.map((u) => Object.assign({}, (cd.participants || []).find((p) => p.id === u.id) || { id: u.id, name: "Someone" }, { typing: u.typing, voice: u.voice }));
+  }
   function applyTyping(ctx, data) {
     if (!data) return;
     ctx.state.typingByConv.set(data.conversationId, new Set(data.userIds || []));
@@ -611,7 +641,8 @@
     const tabChats = screen.querySelector('[data-tab="chats"]');
     tabChats.append(icon("chatsTab", 25), Object.assign(document.createElement("span"), { textContent: "Chats" }));
     const tabStories = screen.querySelector('[data-tab="stories"]');
-    tabStories.append(icon("storiesTab", 25), Object.assign(document.createElement("span"), { textContent: "Stories" }));
+    tabStories.append(icon("camera", 25), Object.assign(document.createElement("span"), { textContent: "Camera" }));
+    tabStories.setAttribute("aria-label", "Camera");
     const tabSettings = screen.querySelector('[data-tab="settings"]');
     tabSettings.append(icon("settingsTab", 25), Object.assign(document.createElement("span"), { textContent: "Settings" }));
     const search = screen.querySelector(".gh-search");
@@ -650,17 +681,7 @@
       tabChats.dataset.active = "1";
       list.scrollTo({ top: 0, behavior: "smooth" });
     });
-    tabStories.addEventListener("click", () => {
-      haptic();
-      for (const t of [tabChats, tabStories, tabSettings]) t.dataset.active = "0";
-      tabStories.dataset.active = "1";
-      list.scrollTo({ top: 0, behavior: "smooth" });
-      const st = ctx.state.stories || [];
-      const next = st.find((x) => !x.viewed) || st[0];
-      if (next) openStoryViewer(ctx, next);
-      else { ctx.showToast("No stories right now"); refreshStories(ctx); }
-      setTimeout(() => { if (tabStories.dataset.active === "1") { tabStories.dataset.active = "0"; tabChats.dataset.active = "1"; } }, 400);
-    });
+    tabStories.addEventListener("click", () => { openCamera(ctx, {}); }); // the middle tab is the snap camera now
     input.addEventListener("input", () => { home.query = input.value.trim().toLowerCase(); renderHomeList(ctx); });
     // iOS search-bar behaviour: a "Cancel" button slides in beside the field while it's active (focused or
     // holds text) and slides back out once it's empty and unfocused again.
@@ -690,6 +711,13 @@
     return home;
   }
 
+  // Story rail: each friend's latest story as a round preview (Snapchat's own thumbnail), their Bitmoji as a badge.
+  const storyThumbs = new Map(); // userId|count -> Promise<url|null>
+  function storyThumbFor(st) {
+    const key = st.user.id + "|" + st.count;
+    if (!storyThumbs.has(key)) storyThumbs.set(key, api.storyThumb(st.user.id).then((r) => (r && r.url) || null, () => null));
+    return storyThumbs.get(key);
+  }
   function renderStories(ctx) {
     const home = ctx.home;
     const wrap = home.storiesEl;
@@ -699,8 +727,19 @@
       item.dataset.unviewed = s.viewed ? "0" : "1";
       item.setAttribute("role", "button");
       const ring = el("div", "gh-story-ring");
-      const av = makeAvatar(s.user, 58);
-      ring.appendChild(av);
+      const thumb = el("div", "gh-story-thumb");
+      thumb.appendChild(makeAvatar(s.user, 58)); // until the preview arrives (or if it can't)
+      ring.appendChild(thumb);
+      const badge = el("div", "gh-story-badge");
+      badge.appendChild(makeAvatar(s.user, 24));
+      ring.appendChild(badge);
+      storyThumbFor(s).then((url) => {
+        if (!url) return;
+        const img = el("img", "gh-story-img");
+        img.alt = "";
+        img.onload = () => { thumb.innerHTML = ""; thumb.appendChild(img); ring.dataset.preview = "1"; };
+        img.src = url;
+      });
       const name = el("span", "gh-story-name");
       name.textContent = s.user && s.user.name ? s.user.name.split(" ")[0] : "?";
       item.setAttribute("aria-label", (s.user && s.user.name ? s.user.name + "'s story" : "Story"));
@@ -836,7 +875,12 @@
     const avatarWrap = rowEl.querySelector(".gh-row-avatar-wrap");
     const avatarUser = conv.isGroup ? { name: conv.title, avatarUrl: conv.avatarUrl } : (conv.participants && conv.participants[0]) || { name: conv.title };
     avatarWrap.insertBefore(makeAvatar(avatarUser, 52), avatarWrap.firstChild);
-    rowEl.addEventListener("click", () => openConversationScreen(ctx, conv.id));
+    // tap = open the chat; double-tap = snap camera for this person (like Snapchat). The chat opens at once on the
+    // first tap (no waiting to see if a second one comes); the camera then slides up over it.
+    rowEl.addEventListener("click", () => {
+      ctx.state.rowTap = { id: conv.id, t: nowMs() }; // a 2nd tap lands on the chat screen - see the root listener
+      openConversationScreen(ctx, conv.id);
+    });
     const row = { el: rowEl, id: conv.id };
     updateHomeRow(row, conv);
     return row;
@@ -1041,10 +1085,17 @@
     if (typingSet && typingSet.size) {
       conv.subEl.innerHTML = "";
       conv.subEl.append(document.createTextNode("typing"), (() => { const d = el("span", "gh-row-dots"); d.innerHTML = "<span></span><span></span><span></span>"; return d; })());
-      conv.subEl.dataset.typing = "1";
+      conv.subEl.dataset.typing = "1"; conv.subEl.dataset.here = "0";
+      conv.subEl.style.display = "";
+    } else if (hereUsers(ctx, convData.id).length) {
+      const here = hereUsers(ctx, convData.id);
+      conv.subEl.dataset.typing = "0";
+      conv.subEl.dataset.here = "1";
+      conv.subEl.textContent = convData.isGroup ? here.map((u) => (u.name || "").split(" ")[0]).join(", ") + " in chat" : "in chat";
       conv.subEl.style.display = "";
     } else {
       conv.subEl.dataset.typing = "0";
+      conv.subEl.dataset.here = "0";
       // The bridge has no presence/"last seen" data (API.md) — showing one would be fabricated, so a 1:1
       // chat's subtitle is simply omitted (matches Telegram's own behaviour when it has nothing to say).
       // A group's member count IS real data (conv.participants, already part of the contract).
@@ -1690,6 +1741,22 @@
     const convId = ctx.state.currentConvId;
     const set = convId && ctx.state.typingByConv.get(convId);
     const row = ctx.conv.typingRow;
+    const here = convId ? hereUsers(ctx, convId) : [];
+    if (here.length) {
+      // like Snapchat's Bitmoji at the bottom of the chat: who's here right now, with dots while they type
+      row.style.display = "flex";
+      row.innerHTML = "";
+      row.dataset.here = "1";
+      for (const u of here.slice(0, 4)) {
+        const a = el("div", "gh-here-av");
+        a.appendChild(makeAvatar(u, 30));
+        row.appendChild(a);
+      }
+      if (here.some((u) => u.typing)) { const b = el("div", "gh-typing-bubble"); b.innerHTML = "<span></span><span></span><span></span>"; row.appendChild(b); }
+      else { const t = el("div", "gh-here-label"); t.textContent = here.length === 1 ? ((here[0].name || "").split(" ")[0] + " is here") : here.length + " here"; row.appendChild(t); }
+      return;
+    }
+    row.dataset.here = "0";
     if (set && set.size) {
       row.style.display = "flex";
       row.innerHTML = "";
@@ -1937,7 +2004,7 @@
     }
     backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
     sheet.querySelector('[data-act="photo"]').addEventListener("click", () => closeInstant(() => ctx.conv.fileInput.click()));
-    sheet.querySelector('[data-act="camera"]').addEventListener("click", () => closeInstant(() => openCamera(ctx, { mode: "snap" })));
+    sheet.querySelector('[data-act="camera"]').addEventListener("click", () => closeInstant(() => openCamera(ctx, { to: ctx.state.currentConvId })));
     sheet.querySelector('[data-act="gif"]').addEventListener("click", () => closeInstant(() => openGifSheet(ctx)));
     return { backdrop, sheet };
   }
@@ -2164,7 +2231,11 @@
       </div>
       <div class="gh-viewer-media"></div>
       <div class="gh-viewer-tapzone"><div data-z="prev"></div><div data-z="next"></div></div>
-      <div class="gh-viewer-hint">Tap to advance · hold to pause · swipe down to close</div>
+      <div class="gh-viewer-hint"><span class="gh-viewer-up"></span>Reply</div>
+      <div class="gh-viewer-reply">
+        <input type="text" placeholder="Send a chat" autocomplete="off" enterkeyhint="send">
+        <button class="gh-viewer-reply-send gh-hit" aria-label="Send reply"></button>
+      </div>
     `;
     wrap.querySelector(".gh-viewer-close").appendChild(icon("close", 20));
     wrap.querySelector(".gh-viewer-close").setAttribute("aria-label", "Close");
@@ -2174,42 +2245,65 @@
       items: [], idx: 0, timer: null, startedAt: 0, elapsedAtPause: 0, paused: false, single: false,
     };
     wrap.querySelector(".gh-viewer-close").addEventListener("click", () => { haptic("light"); closeViewer(ctx); });
-    wrap.querySelector('[data-z="prev"]').addEventListener("click", () => viewerStep(ctx, -1));
-    wrap.querySelector('[data-z="next"]').addEventListener("click", () => viewerStep(ctx, 1));
+    // a tap that ends a hold (or a swipe) must not also count as "next": swallow the click that follows
+    let swallowClick = false;
+    const zoneClick = (dir) => () => { if (swallowClick) { swallowClick = false; return; } if (v.replyOpen) { closeStoryReply(ctx); return; } viewerStep(ctx, dir); };
+    wrap.querySelector('[data-z="prev"]').addEventListener("click", zoneClick(-1));
+    wrap.querySelector('[data-z="next"]').addEventListener("click", zoneClick(1));
 
-    let holdTimer = null, startY = 0, dragging = false;
+    v.reply = wrap.querySelector(".gh-viewer-reply");
+    v.replyInput = v.reply.querySelector("input");
+    v.hint = wrap.querySelector(".gh-viewer-hint");
+    v.hint.querySelector(".gh-viewer-up").appendChild(icon("chevronDown", 16));
+    const sendBtn = v.reply.querySelector(".gh-viewer-reply-send");
+    sendBtn.appendChild(icon("send", 20));
+    sendBtn.addEventListener("click", () => sendStoryReply(ctx));
+    v.replyInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); sendStoryReply(ctx); } });
+    v.hint.addEventListener("click", () => openStoryReply(ctx));
+
+    let holdTimer = null, startX = 0, startY = 0, mode = null, held = false;
     wrap.addEventListener("touchstart", (e) => {
-      if (e.touches.length !== 1) return;
-      startY = e.touches[0].clientY; dragging = false;
-      holdTimer = setTimeout(() => { pauseViewer(ctx, true); }, 180);
+      if (e.touches.length !== 1 || v.replyOpen && e.target.closest(".gh-viewer-reply")) return;
+      startX = e.touches[0].clientX; startY = e.touches[0].clientY; mode = null; held = false;
+      holdTimer = setTimeout(() => { held = true; pauseViewer(ctx, true); }, 200);
     }, { passive: true });
     wrap.addEventListener("touchmove", (e) => {
-      if (e.touches.length !== 1) return;
-      const dy = e.touches[0].clientY - startY;
-      if (dy > 12) {
-        dragging = true;
-        clearTimeout(holdTimer);
-        wrap.style.transform = `translateY(${dy}px)`;
-        wrap.style.opacity = String(clamp(1 - dy / 400, 0.4, 1));
+      if (e.touches.length !== 1 || v.replyOpen) return;
+      const dx = e.touches[0].clientX - startX, dy = e.touches[0].clientY - startY;
+      if (!mode && Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { mode = dy > 0 ? "down" : "up"; clearTimeout(holdTimer); }
+      if (mode === "down") {
+        wrap.style.transform = `translateY(${Math.max(0, dy)}px) scale(${clamp(1 - dy / 2000, 0.85, 1)})`;
+        wrap.style.opacity = String(clamp(1 - dy / 500, 0.4, 1));
+      } else if (mode === "up") {
+        v.media.style.transform = `translateY(${Math.max(-60, dy / 3)}px)`;
       }
     }, { passive: true });
-    wrap.addEventListener("touchend", (e) => {
+    const end = (e) => {
       clearTimeout(holdTimer);
-      const dy = (e.changedTouches[0].clientY - startY);
-      if (dragging && dy > 100) { closeViewer(ctx); return; }
+      const t = e.changedTouches && e.changedTouches[0];
+      const dy = t ? t.clientY - startY : 0;
+      v.media.style.transform = "";
+      if (mode === "down" && dy > 100) { swallowClick = true; closeViewer(ctx); return; }
       wrap.style.transform = ""; wrap.style.opacity = "";
-      if (v.paused) pauseViewer(ctx, false);
-    }, { passive: true });
+      if (mode === "up" && dy < -50 && !v.single) { swallowClick = true; openStoryReply(ctx); return; }
+      if (held || mode) { swallowClick = true; setTimeout(() => { swallowClick = false; }, 400); }
+      if (held && v.paused && !v.replyOpen) pauseViewer(ctx, false);
+      held = false; mode = null;
+    };
+    wrap.addEventListener("touchend", end, { passive: true });
+    wrap.addEventListener("touchcancel", end, { passive: true });
     return v;
   }
   function openViewerSingle(ctx, mediaRef) {
     const v = ctx.viewer;
+    v.story = null;
     v.single = true; v.items = [mediaRef]; v.idx = 0;
     v.el.dataset.open = "1"; v.bars.style.display = "none"; v.avatarSlot.style.display = "none";
     paintViewerItem(ctx);
   }
   function openViewerSequence(ctx, items, opts) {
     const v = ctx.viewer;
+    v.story = null;
     v.single = false; v.items = items || []; v.idx = 0;
     v.el.dataset.open = "1"; v.bars.style.display = "flex"; v.avatarSlot.style.display = "flex";
     v.nameEl.textContent = (opts && opts.title) || "";
@@ -2238,6 +2332,8 @@
       if (!items.length) { closeViewer(ctx); ctx.showToast("That story isn't available right now"); return; }
       story.viewed = true;
       openViewerSequence(ctx, items, { title: story.user.name });
+      v.story = story;
+      v.el.dataset.story = "1";
     }).catch((e) => { gtrail("story open failed " + (e && e.message || e)); closeViewer(ctx); ctx.showToast("Couldn't open that story"); });
   }
   function paintViewerItem(ctx) {
@@ -2285,12 +2381,19 @@
       clearTimeout(v.timer);
       v.elapsedAtPause = nowMs() - v.startedAt;
       if (video) video.pause();
-      if (!v.single) { const fill = v.bars.querySelectorAll(".gh-viewer-bar-fill")[v.idx]; if (fill) fill.style.animationPlayState = "paused"; }
+      if (!v.single) { // freeze the bar exactly where it is (it's a width transition, so pin the current width)
+        const fill = v.bars.querySelectorAll(".gh-viewer-bar-fill")[v.idx];
+        if (fill) { const w = fill.getBoundingClientRect().width, pw = fill.parentElement.getBoundingClientRect().width || 1; fill.style.transitionDuration = "0ms"; fill.style.width = (100 * w / pw) + "%"; }
+      }
     } else {
       if (video) video.play().catch(() => {});
       const remaining = Math.max(200, (v.dur || 5000) - v.elapsedAtPause);
       v.startedAt = nowMs() - v.elapsedAtPause;
       v.timer = setTimeout(() => viewerStep(ctx, 1), remaining);
+      if (!v.single) {
+        const fill = v.bars.querySelectorAll(".gh-viewer-bar-fill")[v.idx];
+        if (fill) requestAnimationFrame(() => { fill.style.transitionDuration = remaining + "ms"; fill.style.width = "100%"; });
+      }
     }
   }
   function viewerStep(ctx, dir) {
@@ -2302,8 +2405,40 @@
     if (v.idx >= v.items.length) { closeViewer(ctx); return; }
     paintViewerItem(ctx);
   }
+  function openStoryReply(ctx) {
+    const v = ctx.viewer;
+    if (v.single || !v.story) return;
+    haptic("light");
+    v.replyOpen = true;
+    if (!v.paused) pauseViewer(ctx, true);
+    v.el.dataset.reply = "1";
+    v.replyInput.value = "";
+    v.replyInput.placeholder = "Reply to " + ((v.story.user && v.story.user.name || "").split(" ")[0] || "story");
+    v.replyInput.focus();
+  }
+  function closeStoryReply(ctx) {
+    const v = ctx.viewer;
+    if (!v.replyOpen) return;
+    v.replyOpen = false;
+    v.el.dataset.reply = "0";
+    v.replyInput.blur();
+    if (v.paused && v.el.dataset.open === "1") pauseViewer(ctx, false);
+  }
+  async function sendStoryReply(ctx) {
+    const v = ctx.viewer;
+    const text = v.replyInput.value.trim();
+    if (!text || !v.story) return;
+    const ref = v.items[v.idx] || {};
+    haptic();
+    v.replyInput.value = "";
+    closeStoryReply(ctx);
+    try { await api.replyToStory(v.story.user.id, ref.item || 0, text); ctx.showToast("Reply sent"); }
+    catch (e) { gtrail("story reply failed " + (e && e.message || e)); ctx.showToast("Couldn't send your reply"); }
+  }
   function closeViewer(ctx) {
     const v = ctx.viewer;
+    v.el.dataset.story = "0";
+    if (v.replyOpen) { v.replyOpen = false; v.el.dataset.reply = "0"; v.replyInput.blur(); }
     v.loadToken = (v.loadToken || 0) + 1;
     clearTimeout(v.timer);
     v.el.dataset.open = "0";
@@ -2314,83 +2449,134 @@
   // =====================================================================================================
   // Camera (device required — see notes below)
   // =====================================================================================================
+  // Snap camera: full-screen preview, tap = photo, hold = video (up to 60s, ring fills), double-tap = flip, library
+  // button. Then a full-screen preview and a "Send To" sheet with search + multi-select (someone may already be
+  // picked when the camera was opened from a chat or by double-tapping their row). Sends as a real Snap (bridge sendSnap).
+  const MAX_VIDEO_MS = 60000;
   function buildCamera(ctx) {
     const wrap = el("div", "gh-camera");
     wrap.innerHTML = `
-      <div class="gh-camera-preview"><div class="gh-camera-note">Camera preview needs a real device (getUserMedia).</div></div>
+      <div class="gh-cam-live"><div class="gh-camera-note">Starting camera…</div></div>
       <div class="gh-camera-top">
-        <button class="gh-icon-btn gh-hit" data-act="close"></button>
-        <button class="gh-icon-btn gh-hit" data-act="flip"></button>
+        <button class="gh-cam-btn gh-hit" data-act="close"></button>
+        <div class="gh-cam-to"></div>
+        <button class="gh-cam-btn gh-hit" data-act="flip"></button>
       </div>
-      <div class="gh-camera-bottom"><button class="gh-shutter"></button></div>
-      <div class="gh-camera-preview-screen">
-        <div class="gh-camera-preview" style="flex:1;"></div>
-        <div class="gh-header" style="background:transparent;border:none;">
-          <button class="gh-icon-btn gh-hit" data-act="preview-close" style="color:#fff;"></button>
-          <div class="gh-header-title" style="color:#fff;">Send to…</div>
+      <div class="gh-camera-bottom">
+        <button class="gh-cam-btn gh-cam-lib gh-hit" data-act="library"></button>
+        <button class="gh-shutter" aria-label="Take photo, hold for video">
+          <svg class="gh-shutter-ring" viewBox="0 0 88 88"><circle cx="44" cy="44" r="40"/></svg>
+        </button>
+        <div class="gh-cam-spacer"></div>
+      </div>
+      <input type="file" accept="image/*,video/*" hidden>
+      <div class="gh-cam-review">
+        <div class="gh-cam-review-media"></div>
+        <div class="gh-camera-top"><button class="gh-cam-btn gh-hit" data-act="retake"></button></div>
+        <div class="gh-cam-review-bottom"><button class="gh-cam-sendto" data-act="sendto"><span>Send To</span></button></div>
+      </div>
+      <div class="gh-cam-picker">
+        <div class="gh-cam-picker-head">
+          <button class="gh-cam-picker-back gh-hit" data-act="picker-back"></button>
+          <div class="gh-cam-picker-title">Send To</div>
+          <div style="width:44px"></div>
         </div>
-        <div class="gh-send-to-list gh-scroll" style="flex:1;min-height:0;background:var(--gh-bg-2);"></div>
-        <button class="gh-newchat-create" style="margin:8px 16px calc(12px + var(--gh-safe-b));" data-act="send">Send</button>
+        <div class="gh-cam-search"><input type="search" placeholder="Search" autocapitalize="off" autocomplete="off" spellcheck="false"></div>
+        <div class="gh-cam-list gh-scroll"></div>
+        <div class="gh-cam-sendbar">
+          <div class="gh-cam-chosen"></div>
+          <button class="gh-cam-send" data-act="send" aria-label="Send"></button>
+        </div>
       </div>
     `;
-    wrap.querySelector('[data-act="close"]').appendChild(icon("close"));
-    wrap.querySelector('[data-act="close"]').setAttribute("aria-label", "Close camera");
-    wrap.querySelector('[data-act="flip"]').appendChild(icon("flip"));
-    wrap.querySelector('[data-act="flip"]').setAttribute("aria-label", "Flip camera");
-    wrap.querySelector('[data-act="preview-close"]').appendChild(icon("back"));
-    wrap.querySelector('[data-act="preview-close"]').setAttribute("aria-label", "Back to camera");
-    wrap.querySelector(".gh-shutter").setAttribute("aria-label", "Take photo (hold for video)");
+    const q = (sel) => wrap.querySelector(sel);
+    q('[data-act="close"]').appendChild(icon("close", 22)); q('[data-act="close"]').setAttribute("aria-label", "Close camera");
+    q('[data-act="flip"]').appendChild(icon("flip", 22)); q('[data-act="flip"]').setAttribute("aria-label", "Flip camera");
+    q('[data-act="library"]').appendChild(icon("gallery", 22)); q('[data-act="library"]').setAttribute("aria-label", "Choose from library");
+    q('[data-act="retake"]').appendChild(icon("close", 22)); q('[data-act="retake"]').setAttribute("aria-label", "Discard");
+    q('[data-act="sendto"]').appendChild(icon("send", 18));
+    q('[data-act="picker-back"]').appendChild(icon("back", 22)); q('[data-act="picker-back"]').setAttribute("aria-label", "Back");
+    q('[data-act="send"]').appendChild(icon("send", 22));
 
     const c = {
-      el: wrap,
-      previewHost: wrap.querySelector(".gh-camera-preview"),
-      shutter: wrap.querySelector(".gh-shutter"),
-      previewScreen: wrap.querySelector(".gh-camera-preview-screen"),
-      sendToList: wrap.querySelector(".gh-send-to-list"),
-      stream: null, video: null, facing: "user", recording: false, recorder: null, chunks: [], capturedBlob: null, picked: new Set(),
+      el: wrap, live: q(".gh-cam-live"), shutter: q(".gh-shutter"), ring: q(".gh-shutter-ring circle"), toEl: q(".gh-cam-to"),
+      review: q(".gh-cam-review"), reviewMedia: q(".gh-cam-review-media"), picker: q(".gh-cam-picker"), list: q(".gh-cam-list"),
+      search: q(".gh-cam-search input"), chosen: q(".gh-cam-chosen"), sendBtn: q('[data-act="send"]'), file: q('input[type="file"]'),
+      stream: null, video: null, facing: "user", recording: false, recorder: null, chunks: [], recStart: 0, recTimer: null,
+      captured: null, picked: new Set(), preselect: null, sending: false,
     };
-    wrap.querySelector('[data-act="close"]').addEventListener("click", () => { haptic("light"); closeCamera(ctx); });
-    wrap.querySelector('[data-act="flip"]').addEventListener("click", () => flipCamera(ctx));
-    wrap.querySelector('[data-act="preview-close"]').addEventListener("click", () => { haptic("light"); c.previewScreen.dataset.open = "0"; startCameraStream(ctx); });
-    wrap.querySelector('[data-act="send"]').addEventListener("click", () => sendSnapNow(ctx));
+    q('[data-act="close"]').addEventListener("click", () => { haptic("light"); closeCamera(ctx); });
+    q('[data-act="flip"]').addEventListener("click", () => flipCamera(ctx));
+    q('[data-act="library"]').addEventListener("click", () => { haptic("light"); c.file.click(); });
+    c.file.addEventListener("change", () => {
+      const f = c.file.files && c.file.files[0];
+      c.file.value = "";
+      if (f) openReview(ctx, f, f.type.startsWith("video") ? "video" : "image", false);
+    });
+    q('[data-act="retake"]').addEventListener("click", () => { haptic("light"); closeReview(ctx); startCameraStream(ctx); });
+    q('[data-act="sendto"]').addEventListener("click", () => { haptic(); openPicker(ctx); });
+    q('[data-act="picker-back"]').addEventListener("click", () => { haptic("light"); c.picker.dataset.open = "0"; });
+    q('[data-act="send"]').addEventListener("click", () => sendSnapNow(ctx));
+    c.search.addEventListener("input", () => renderPicker(ctx));
 
-    let pressTimer = null;
-    c.shutter.addEventListener("touchstart", (e) => {
-      e.preventDefault();
-      pressTimer = setTimeout(() => startRecording(ctx), 320);
-    }, { passive: false });
-    c.shutter.addEventListener("touchend", () => {
+    // double-tap the preview to flip, like Snapchat
+    let lastTap = 0;
+    c.live.addEventListener("click", () => { const t = nowMs(); if (t - lastTap < 300) { flipCamera(ctx); lastTap = 0; } else lastTap = t; });
+
+    let pressTimer = null, pressed = false;
+    const down = (e) => { e.preventDefault(); pressed = true; pressTimer = setTimeout(() => { if (pressed) startRecording(ctx); }, 300); };
+    const up = () => {
+      if (!pressed) return;
+      pressed = false;
       clearTimeout(pressTimer);
       if (c.recording) stopRecording(ctx); else takePhoto(ctx);
-    });
+    };
+    c.shutter.addEventListener("touchstart", down, { passive: false });
+    c.shutter.addEventListener("touchend", up);
+    c.shutter.addEventListener("touchcancel", up);
+    c.shutter.addEventListener("mousedown", down);
+    c.shutter.addEventListener("mouseup", up);
     return c;
   }
   function openCamera(ctx, opts) {
+    const c = ctx.camera;
     haptic();
-    ctx.camera.el.dataset.open = "1";
+    c.preselect = (opts && opts.to) || null;
+    const conv = c.preselect && ctx.state.convById.get(c.preselect);
+    c.toEl.textContent = conv ? conv.title : "";
+    c.toEl.style.display = conv ? "" : "none";
+    closeReview(ctx);
+    c.el.dataset.open = "1";
+    requestAnimationFrame(() => { c.el.dataset.shown = "1"; });
     startCameraStream(ctx);
   }
   function closeCamera(ctx) {
-    ctx.camera.el.dataset.open = "0";
+    const c = ctx.camera;
+    if (c.recording) { try { c.recorder.stop(); } catch (e) {} c.recording = false; }
+    c.el.dataset.shown = "0";
     stopCameraStream(ctx);
+    setTimeout(() => { if (c.el.dataset.shown !== "1") { c.el.dataset.open = "0"; closeReview(ctx); } }, 280);
   }
   async function startCameraStream(ctx) {
     const c = ctx.camera;
     stopCameraStream(ctx);
-    // DEVICE CHECK: getUserMedia is patched by the app's camhook.js to a canvas-based stream (front camera
-    // default) — on a plain desktop/WebKit test rig with no camera it will reject, which is expected; the
-    // note element (gh-camera-note) stays visible in that case instead of a broken <video>.
-    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) return;
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) { c.live.innerHTML = '<div class="gh-camera-note">No camera here</div>'; return; }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: c.facing }, audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: c.facing, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: true })
+        .catch(() => navigator.mediaDevices.getUserMedia({ video: { facingMode: c.facing }, audio: false }));
+      if (ctx.camera.el.dataset.open !== "1") { stream.getTracks().forEach((t) => t.stop()); return; }
       c.stream = stream;
-      c.previewHost.innerHTML = "";
+      c.live.innerHTML = "";
       const video = el("video");
       video.autoplay = true; video.playsInline = true; video.muted = true;
       video.srcObject = stream;
-      c.previewHost.appendChild(video);
+      video.dataset.mirror = c.facing === "user" ? "1" : "0";
+      c.live.appendChild(video);
       c.video = video;
-    } catch (e) { /* no camera available here — the static note stays up */ }
+    } catch (e) {
+      gtrail("camera failed " + (e && (e.name || e.message)));
+      c.live.innerHTML = '<div class="gh-camera-note">Camera unavailable. Allow camera access for Ghost in Settings.</div>';
+    }
   }
   function stopCameraStream(ctx) {
     const c = ctx.camera;
@@ -2399,75 +2585,148 @@
   }
   function flipCamera(ctx) {
     haptic("light");
-    ctx.camera.facing = ctx.camera.facing === "user" ? "environment" : "user";
+    const c = ctx.camera;
+    if (c.recording) return;
+    c.facing = c.facing === "user" ? "environment" : "user";
     startCameraStream(ctx);
   }
   function takePhoto(ctx) {
     const c = ctx.camera;
-    haptic();
-    if (!c.video) { ctx.showToast("No camera on this device"); return; }
+    haptic("medium");
+    const v = c.video;
+    if (!v || !v.videoWidth) { ctx.showToast("Camera isn't ready yet"); return; }
+    // what you saw is what you send: crop the frame to the screen's shape (like the live preview), mirror selfies
+    const W = v.videoWidth, H = v.videoHeight, target = c.live.clientWidth / Math.max(1, c.live.clientHeight);
+    let sw = W, sh = H;
+    if (W / H > target) sw = Math.round(H * target); else sh = Math.round(W / target);
     const canvas = document.createElement("canvas");
-    canvas.width = c.video.videoWidth || 720; canvas.height = c.video.videoHeight || 1280;
-    canvas.getContext("2d").drawImage(c.video, 0, 0, canvas.width, canvas.height);
-    canvas.toBlob((blob) => { if (blob) openSendPreview(ctx, blob, "image"); }, "image/jpeg", 0.92);
+    canvas.width = sw; canvas.height = sh;
+    const g = canvas.getContext("2d");
+    if (c.facing === "user") { g.translate(sw, 0); g.scale(-1, 1); }
+    g.drawImage(v, (W - sw) / 2, (H - sh) / 2, sw, sh, 0, 0, sw, sh);
+    c.el.classList.add("gh-cam-flash");
+    setTimeout(() => c.el.classList.remove("gh-cam-flash"), 160);
+    canvas.toBlob((blob) => { if (blob) openReview(ctx, blob, "image", true, { width: sw, height: sh }); }, "image/jpeg", 0.9);
   }
   function startRecording(ctx) {
     const c = ctx.camera;
-    if (!c.stream || typeof MediaRecorder === "undefined") return; // DEVICE CHECK: needs MediaRecorder + a real stream
+    if (!c.stream || typeof MediaRecorder === "undefined") { ctx.showToast("Video isn't available here"); return; }
     haptic("medium");
     c.chunks = [];
     try {
-      c.recorder = new MediaRecorder(c.stream);
-      c.recorder.ondataavailable = (e) => { if (e.data.size) c.chunks.push(e.data); };
-      c.recorder.onstop = () => { const blob = new Blob(c.chunks, { type: "video/mp4" }); openSendPreview(ctx, blob, "video"); };
-      c.recorder.start();
-      c.recording = true;
+      const type = ["video/mp4;codecs=avc1", "video/mp4", "video/webm"].find((t) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t));
+      c.recorder = type ? new MediaRecorder(c.stream, { mimeType: type }) : new MediaRecorder(c.stream);
+      const mime = (c.recorder.mimeType || type || "video/mp4").split(";")[0];
+      const dims = { width: c.video ? c.video.videoWidth : 1080, height: c.video ? c.video.videoHeight : 1920 };
+      c.recorder.ondataavailable = (e) => { if (e.data && e.data.size) c.chunks.push(e.data); };
+      c.recorder.onstop = () => {
+        const blob = new Blob(c.chunks, { type: mime });
+        if (nowMs() - c.recStart < 500 || !blob.size) { takePhotoFallback(ctx); return; }
+        openReview(ctx, blob, "video", true, dims);
+      };
+      c.recorder.start(250);
+      c.recording = true; c.recStart = nowMs();
       c.shutter.dataset.recording = "1";
-    } catch (e) { c.recording = false; }
+      const tick = () => {
+        if (!c.recording) return;
+        const p = Math.min(1, (nowMs() - c.recStart) / MAX_VIDEO_MS);
+        c.ring.style.strokeDashoffset = String(251.3 * (1 - p));
+        if (p >= 1) { stopRecording(ctx); return; }
+        requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (e) { c.recording = false; gtrail("recorder failed " + (e && e.message)); ctx.showToast("Couldn't start recording"); }
   }
+  function takePhotoFallback(ctx) { startCameraStream(ctx).then(() => {}); } // a hold that ended almost at once
   function stopRecording(ctx) {
     const c = ctx.camera;
     c.shutter.dataset.recording = "0";
-    if (c.recording && c.recorder) { c.recorder.stop(); c.recording = false; }
+    c.ring.style.strokeDashoffset = "";
+    if (c.recording && c.recorder) { c.recording = false; haptic("light"); try { c.recorder.stop(); } catch (e) {} }
   }
-  function openSendPreview(ctx, blob, kind) {
+  function openReview(ctx, blob, kind, fromCamera, dims) {
     const c = ctx.camera;
-    c.capturedBlob = blob; c.capturedKind = kind;
+    c.captured = { blob, kind, width: dims && dims.width, height: dims && dims.height };
     stopCameraStream(ctx);
-    c.previewScreen.querySelector(".gh-camera-preview").innerHTML = "";
+    c.reviewMedia.innerHTML = "";
     const url = URL.createObjectURL(blob);
+    c.captured.url = url;
     const media = kind === "video" ? el("video") : el("img");
     media.src = url;
-    if (kind === "video") { media.autoplay = true; media.loop = true; media.muted = true; media.playsInline = true; }
-    media.style.position = "absolute"; media.style.inset = "0"; media.style.width = "100%"; media.style.height = "100%"; media.style.objectFit = "cover";
-    c.previewScreen.querySelector(".gh-camera-preview").appendChild(media);
-    c.picked = new Set();
-    c.sendToList.innerHTML = "";
-    for (const conv of ctx.state.conversations.slice(0, 20)) {
+    if (kind === "video") {
+      media.autoplay = true; media.loop = true; media.playsInline = true; media.muted = false;
+      media.addEventListener("loadedmetadata", () => { if (!c.captured.width) { c.captured.width = media.videoWidth; c.captured.height = media.videoHeight; } }, { once: true });
+      media.play().catch(() => { media.muted = true; media.play().catch(() => {}); });
+    } else if (!c.captured.width) {
+      media.addEventListener("load", () => { c.captured.width = media.naturalWidth; c.captured.height = media.naturalHeight; }, { once: true });
+    }
+    c.reviewMedia.appendChild(media);
+    c.review.dataset.open = "1";
+    c.picked = new Set(c.preselect ? [c.preselect] : []);
+  }
+  function closeReview(ctx) {
+    const c = ctx.camera;
+    c.review.dataset.open = "0";
+    c.picker.dataset.open = "0";
+    const v = c.reviewMedia.querySelector("video"); if (v) v.pause();
+    c.reviewMedia.innerHTML = "";
+    if (c.captured && c.captured.url) URL.revokeObjectURL(c.captured.url);
+    c.captured = null;
+  }
+  function openPicker(ctx) {
+    const c = ctx.camera;
+    c.search.value = "";
+    renderPicker(ctx);
+    c.picker.dataset.open = "1";
+  }
+  function renderPicker(ctx) {
+    const c = ctx.camera;
+    const qv = c.search.value.trim().toLowerCase();
+    c.list.innerHTML = "";
+    const all = ctx.state.conversations.filter((conv) => !qv || (conv.title || "").toLowerCase().includes(qv));
+    // picked first, then most recent
+    const rows = [...all.filter((x) => c.picked.has(x.id)), ...all.filter((x) => !c.picked.has(x.id))].slice(0, qv ? 80 : 60);
+    const head = el("div", "gh-cam-section"); head.textContent = qv ? "Results" : "Recents"; c.list.appendChild(head);
+    for (const conv of rows) {
       const row = el("div", "gh-friend-row gh-press");
+      row.dataset.picked = c.picked.has(conv.id) ? "1" : "0";
       const avatarUser = conv.isGroup ? { name: conv.title } : (conv.participants && conv.participants[0]) || { name: conv.title };
-      row.appendChild(makeAvatar(avatarUser, 40));
+      row.appendChild(makeAvatar(avatarUser, 44));
       const name = el("div", "gh-friend-name"); name.textContent = conv.title;
-      const check = el("div", "gh-friend-check");
+      const check = el("div", "gh-friend-check"); check.appendChild(icon("check", 14));
       row.append(name, check);
       row.addEventListener("click", () => {
         haptic("light");
         if (c.picked.has(conv.id)) c.picked.delete(conv.id); else c.picked.add(conv.id);
         row.dataset.picked = c.picked.has(conv.id) ? "1" : "0";
+        paintChosen(ctx);
       });
-      c.sendToList.appendChild(row);
+      c.list.appendChild(row);
     }
-    c.previewScreen.dataset.open = "1";
+    paintChosen(ctx);
+  }
+  function paintChosen(ctx) {
+    const c = ctx.camera;
+    const names = [...c.picked].map((id) => (ctx.state.convById.get(id) || {}).title || "").filter(Boolean);
+    c.chosen.textContent = names.length ? names.join(", ") : "Pick friends";
+    c.sendBtn.disabled = !names.length || c.sending;
+    c.picker.dataset.has = names.length ? "1" : "0";
   }
   async function sendSnapNow(ctx) {
     const c = ctx.camera;
-    if (!c.picked.size || !c.capturedBlob) { ctx.showToast("Pick who to send to"); return; }
+    if (!c.picked.size || !c.captured || c.sending) return;
     haptic();
+    c.sending = true; c.sendBtn.dataset.sending = "1"; paintChosen(ctx);
+    const cap = c.captured, ids = Array.from(c.picked);
     try {
-      await api.sendSnap(Array.from(c.picked), c.capturedBlob, { kind: c.capturedKind });
+      await api.sendSnap(ids, cap.blob, { kind: cap.kind, width: cap.width, height: cap.height });
+      haptic("success");
       closeCamera(ctx);
-      c.previewScreen.dataset.open = "0";
-    } catch (e) { ctx.showToast("Couldn't send that Snap"); }
+      ctx.showToast(ids.length > 1 ? `Snap sent to ${ids.length} chats` : "Snap sent");
+    } catch (e) {
+      gtrail("snap send failed " + (e && e.message || e));
+      ctx.showToast("Couldn't send that Snap");
+    } finally { c.sending = false; c.sendBtn.dataset.sending = "0"; paintChosen(ctx); }
   }
 
   // =====================================================================================================
