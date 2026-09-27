@@ -1197,7 +1197,25 @@
         const gid = ref && ref.url && (ref.url.match(/giphy\.com\/media\/([A-Za-z0-9]+)\//) || [])[1];
         if (gid) ref = { type: "image", url: "" };
         const media = mediaEl(ref, { autoplay: true, ctx, message: m });
-        if (gid) giphyPreviewUrl(gid).then((r) => { const img = media.querySelector("img"); if (img && r && r.dataUrl) img.src = r.dataUrl; else gtrail("gif show failed " + gid + " " + (r && r.error)); });
+        // play it as a looping muted video (GIPHY's 200w.mp4): animated images stayed on their first frame on the
+        // phone; the still WebP is the fallback
+        if (gid) (async () => {
+          const img = media.querySelector("img");
+          try {
+            const bytes = await gmBytes(giphyMedia(gid, "200w.mp4"));
+            const v = el("video");
+            v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true;
+            v.setAttribute("playsinline", ""); v.setAttribute("muted", "");
+            v.src = URL.createObjectURL(new Blob([bytes], { type: "video/mp4" }));
+            v.addEventListener("loadeddata", () => { if (img) img.remove(); v.play().catch(() => {}); }, { once: true });
+            v.addEventListener("error", () => { gtrail("gif video failed " + gid); v.remove(); giphyPreviewUrl(gid).then((r) => { if (img && r && r.dataUrl) img.src = r.dataUrl; }); }, { once: true });
+            media.insertBefore(v, media.firstChild);
+          } catch (e) {
+            gtrail("gif mp4 fetch failed " + gid + " " + (e && e.message));
+            const r = await giphyPreviewUrl(gid);
+            if (img && r && r.dataUrl) img.src = r.dataUrl;
+          }
+        })();
         media.appendChild(tickMetaEl(m, isMe, "gh-media-meta"));
         b.appendChild(media);
         return b;

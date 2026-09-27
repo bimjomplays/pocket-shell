@@ -1216,3 +1216,9 @@ input, textarea {
 .gh-messages { overflow-x: hidden !important; touch-action: pan-y; overscroll-behavior-x: none; }
 .gh-screen, .gh-conv, .gh-home { overflow-x: hidden; }
 .gh-bubble { max-width: 100%; overflow-wrap: anywhere; }
+
+/* Bubble tails off: the masked tail shape drew a visible glitch at the bubbles' bottom-left corner on the phone
+   (device screenshot 2026-09-27). The last bubble of a run just gets a tighter corner on the sender's side. */
+.gh-bubble[data-tail="1"]::before { display: none !important; }
+.gh-group[data-me="0"] .gh-bubble[data-tail="1"] { border-bottom-left-radius: 6px; }
+.gh-group[data-me="1"] .gh-bubble[data-tail="1"] { border-bottom-right-radius: 6px; border-bottom-left-radius: var(--gh-radius-md); }
