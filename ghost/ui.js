@@ -197,7 +197,8 @@
     sendSnap: (ids, blob, opts) => bridge.call("sendSnap", [ids, blob, opts || {}], 120000),
     react: (id, messageId, emoji) => bridge.call("react", [id, messageId, emoji]),
     saveMessage: (id, messageId, saved) => bridge.call("saveMessage", [id, messageId, saved]),
-    openSnap: (id, messageId) => bridge.call("openSnap", [id, messageId]),
+    openSnap: (id, messageId) => bridge.call("openSnap", [id, messageId], 45000),
+    closeSnap: (id, messageId) => bridge.call("closeSnap", [id, messageId]),
     listStories: () => bridge.call("listStories"),
     openStory: (userId) => bridge.call("openStory", [userId]),
     newConversation: (userIds) => bridge.call("newConversation", [userIds]),
@@ -1066,6 +1067,9 @@
     screen.querySelector(".gh-reply-bar-close").addEventListener("click", () => { haptic("light"); setReplyTo(ctx, null); });
     conv.jump.addEventListener("click", () => scrollConvToBottom(ctx, true));
     conv.messages.addEventListener("scroll", () => onConvScroll(ctx), { passive: true });
+    const touched = () => { conv.userTouched = true; };
+    conv.messages.addEventListener("touchstart", touched, { passive: true });
+    conv.messages.addEventListener("wheel", touched, { passive: true });
     // Tapping anywhere in the message list, or starting a scroll drag, dismisses the keyboard exactly like
     // Messages/Telegram - the composer textarea is the only thing that should keep focus once you touch the
     // list itself (a tap that lands on an actual control there, e.g. a reaction pill, still works as normal;
@@ -1126,6 +1130,7 @@
 
   async function openConversationScreen(ctx, conversationId) {
     haptic("light");
+    ctx.conv.peekId = null;
     ctx.state.currentConvId = conversationId;
     const convData = ctx.state.convById.get(conversationId);
     if (convData) updateConvHeader(ctx, convData);
@@ -1143,6 +1148,7 @@
     // after the fact (once marked read, unreadCount is gone). Reset every time a chat is (re)opened.
     conv.unreadBoundaryIndex = null;
     conv.unreadBoundaryComputed = false;
+    conv.pinUntil = nowMs() + 4000; conv.userTouched = false; conv.atBottom = true;
     conv.pendingUnreadForDivider = (convData && convData.unreadCount) || 0;
     let entry = ctx.state.messagesByConv.get(conversationId);
     if (!entry) {
@@ -1272,6 +1278,15 @@
       frag.appendChild(groupEl);
     }
     conv.messages.replaceChildren(conv.topSpacer, frag, conv.bottomSpacer);
+    // photos/stickers/voice notes finish loading after this and grow the list: stay at the bottom if you were
+    if (typeof ResizeObserver === "function") {
+      if (!conv.ro) conv.ro = new ResizeObserver(() => {
+        if (!ctx.state.currentConvId) return;
+        if (conv.atBottom || pinnedToBottom(conv)) { conv.messages.scrollTop = conv.messages.scrollHeight; conv.atBottom = true; }
+      });
+      conv.ro.disconnect();
+      for (const child of conv.messages.children) conv.ro.observe(child);
+    }
     // measure & size spacers off the just-painted content
     requestAnimationFrame(() => {
       const rendered = end - start;
@@ -1475,27 +1490,41 @@
     return wrap;
   }
 
+  // Snaps look like Snapchat's own chat rows: a small coloured square (red = photo / silent video, purple = video
+  // with sound), filled while new, outlined once opened, plus a short status. Tap a new one you received to view it.
   function snapTileEl(ctx, m, isMe) {
-    const b = el("div", "gh-snap-tile");
+    const b = el("div", "gh-snap-row");
     b.dataset.opened = m.opened ? "1" : "0";
-    b.appendChild(icon(m.opened ? "camera" : "lock", 20));
-    const label = el("div");
-    label.textContent = m.opened ? "Snap · Opened" : "Snap · Tap to view";
-    b.appendChild(label);
-    b.classList.add("gh-press");
-    b.addEventListener("click", async () => {
-      if (m.opened) return;
-      haptic();
-      try {
-        const res = await api.openSnap(ctx.state.currentConvId, m.id);
-        m.opened = true;
-        b.dataset.opened = "1";
-        label.textContent = "Snap · Opened";
-        b.replaceChild(icon("camera", 20), b.firstChild);
-        const items = (res && res.media) || [];
-        if (items.length) openViewerSequence(ctx, items, { title: (m.from && m.from.name) || "Snap" });
-      } catch (e) { ctx.showToast("Couldn't open that Snap"); }
-    });
+    b.dataset.sound = m.snapSound ? "1" : "0";
+    b.dataset.me = isMe ? "1" : "0";
+    const mark = el("span", "gh-snap-mark");
+    const label = el("span", "gh-snap-label");
+    const paint = () => {
+      b.dataset.opened = m.opened ? "1" : "0";
+      label.textContent = isMe ? (m.opened ? "Opened" : "Delivered") : (m.opened ? "Opened" : "New Snap");
+    };
+    paint();
+    const time = el("span", "gh-snap-time"); time.textContent = fmtClock(m.ts);
+    b.append(mark, label, time);
+    if (!isMe && !m.opened) {
+      b.classList.add("gh-press");
+      b.setAttribute("role", "button");
+      b.setAttribute("aria-label", "View Snap");
+      b.addEventListener("click", async () => {
+        if (m.opened || b.dataset.loading === "1") return;
+        haptic();
+        b.dataset.loading = "1";
+        label.textContent = "Loading…";
+        try {
+          const res = await api.openSnap(m.conversationId || ctx.state.currentConvId, m.id);
+          const items = (res && res.media) || [];
+          if (!items.length) throw new Error("empty");
+          openViewerSequence(ctx, items, { title: (m.from && m.from.name) || "Snap" });
+          ctx.viewer.snap = { convId: m.conversationId || ctx.state.currentConvId, msgId: m.id, onClose: () => { m.opened = true; paint(); } };
+        } catch (e) { gtrail("snap open failed " + (e && e.message || e)); ctx.showToast("Couldn't load that Snap"); paint(); }
+        finally { delete b.dataset.loading; if (!m.opened) paint(); }
+      });
+    }
     return b;
   }
 
@@ -1686,11 +1715,33 @@
     conv._scrollScheduled = true;
     requestAnimationFrame(() => { conv._scrollScheduled = false; handleWindowScroll(ctx); });
   }
+  // Paint a chat's header + whatever messages we already have, without opening it (no read receipt, no
+  // presence) - used while a row is being swiped open; openConversationScreen does the real open on release.
+  function peekConversation(ctx, id) {
+    const conv = ctx.conv;
+    if (conv.peekId === id && ctx.state.currentConvId !== id) return;
+    conv.peekId = id;
+    const cd = ctx.state.convById.get(id);
+    if (cd) updateConvHeader(ctx, cd);
+    conv.rendered.forEach((elm) => elm.remove());
+    conv.rendered.clear();
+    const entry = ctx.state.messagesByConv.get(id);
+    conv.unreadBoundaryIndex = null; conv.unreadBoundaryComputed = true;
+    conv.pinUntil = nowMs() + 4000; conv.userTouched = false; conv.atBottom = true;
+    if (entry) { conv.messages.classList.remove("gh-loading-skel"); renderMessageList(ctx, conv, entry, { initial: true }); }
+    else { conv.messages.replaceChildren(conv.topSpacer, conv.bottomSpacer); conv.messages.classList.add("gh-loading-skel"); }
+  }
+  function pinnedToBottom(conv) { return !conv.userTouched && nowMs() < (conv.pinUntil || 0); }
   function handleWindowScroll(ctx) {
     const conv = ctx.conv;
     const m = conv.messages;
     const total = (conv._all || []).length;
     if (!total) return;
+    // Right after a chat opens, swapping in its messages makes the list shrink and the scroll position snap
+    // to the top for a moment; that used to count as "you scrolled up", which revealed + fetched older
+    // messages and kept you up there (device 2026-09-27: "jumps me way far up"). Until you touch the list
+    // yourself, the chat stays pinned to the newest message instead.
+    if (pinnedToBottom(conv)) return;
     if (m.scrollTop < 240) {
       // Sliding the LOCAL window back (more already-fetched messages to reveal) and fetching MORE history
       // from the bridge (loadOlder) are two different things that both happen "near the top" - a freshly
@@ -2507,6 +2558,7 @@
       v.media.appendChild(img);
       startViewerTimer(ctx, 5000);
     }
+    if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); } // snap caption/drawing
     if (!v.single) {
       const fills = v.bars.querySelectorAll(".gh-viewer-bar-fill");
       fills.forEach((f, i) => { f.classList.remove("gh-anim"); f.style.width = i < v.idx ? "100%" : "0%"; });
@@ -2587,6 +2639,7 @@
   }
   function closeViewer(ctx) {
     const v = ctx.viewer;
+    if (v.snap) { const sn = v.snap; v.snap = null; api.closeSnap(sn.convId, sn.msgId).catch(() => {}); if (sn.onClose) sn.onClose(); }
     v.el.dataset.story = "0";
     if (v.replyOpen) { v.replyOpen = false; v.el.dataset.reply = "0"; v.replyInput.blur(); }
     v.loadToken = (v.loadToken || 0) + 1;
@@ -2922,6 +2975,8 @@
         if (Math.abs(g.dx) < 8 && Math.abs(g.dy) < 8) return;
         g.locked = Math.abs(g.dx) > Math.abs(g.dy) * 1.2 ? "x" : "y";
         if (g.locked !== "x") { g = null; return; }
+        // swiping a row open: show THAT person's chat under your finger (it still showed the last chat you had open)
+        if (g.kind === "open" && g.rowId) peekConversation(ctx, g.rowId);
       }
       e.preventDefault();
       const w = widthPx();

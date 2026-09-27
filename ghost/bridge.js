@@ -487,8 +487,13 @@
     for (const mi of mediaInfos) {
       let layers;
       try { layers = await V(mi, context || "ghost"); } catch (e) { trail("load-media", e, "error"); continue; }
-      for (const layer of layers || []) {
+      const list = layers || [];
+      for (let li = 0; li < list.length; li++) {
+        const layer = list[li];
         if (!layer || !layer.dataUrl) continue;
+        // a zipped snap comes back as [media, overlay]: the overlay (caption/drawing, a transparent image) belongs ON
+        // the media, not after it as a second item
+        if (li > 0 && out.length) { out[out.length - 1].overlay = layer.dataUrl; continue; }
         let type = hintType;
         if (!type) {
           try {
@@ -604,7 +609,11 @@
       }, { messageId: "" }) : undefined,
       reactions: reactions.length ? reactions : undefined,
       saved: (md.savedBy || []).length > 0,
-      opened: others(md.openedBy).length > 0 || others(md.seenBy).length > 0,
+      // Snapchat's own rule (main.js, search 'viewedByCurrentUser'): a snap YOU received is opened only when
+      // YOUR id is in openedBy (the sender is always in it - that's why every received snap said "Opened");
+      // one you sent is opened when anyone else is.
+      opened: (me && senderId === me) ? others(md.openedBy).length > 0 : (md.openedBy || []).some((u) => idOf(u) === me),
+      snapSound: kind === "snap" ? !!(mc.snapDisplayInfo && mc.snapDisplayInfo.hasAudio) : undefined,
       pending: raw.state === 0 || raw.state === 1 ? undefined : undefined,
       failed: false,
       fromMe: !!(me && senderId === me),
@@ -1192,35 +1201,42 @@
       return true;
     },
 
+    // Opening a snap, in the same order as Snapchat's own viewer (main.js, search 'lightbox_media_loaded'):
+    // snapDownloadStatusChanged(INITIATED) -> fetch + decrypt -> (SUCCEEDED + startedViewingSnap) or FAILED; and
+    // finishedViewingSnap only when you close it (closeSnap). Before, both "viewing" calls went out BEFORE the file
+    // was fetched, so the snap got marked opened and then couldn't be loaded.
     async openSnap(conversationId, messageId) {
       requireStore();
       const m = messaging();
-      // Verified (main.js, search "getSnapManager().onSnapInteraction"): opening/replaying a snap in
-      // Snapchat's own lightbox calls onSnapInteraction(VIEWING_INITIATED, ...) then (VIEWING_FINISHED,
-      // ...) through these same store actions - this is the actual "mark viewed" mechanism, not a
-      // separate flag we set ourselves. UNCHANGED from before this pass.
-      if (typeof m.startedViewingSnap === "function") await m.startedViewingSnap(convIdObj(conversationId), realKey(conversationEntry(conversationId) && conversationEntry(conversationId).messages, messageId));
-      if (typeof m.finishedViewingSnap === "function") await m.finishedViewingSnap(convIdObj(conversationId), realKey(conversationEntry(conversationId) && conversationEntry(conversationId).messages, messageId));
       const entry = conversationEntry(conversationId);
-      const raw = entry && entry.messages && typeof entry.messages.get === "function" && findRaw(entry.messages, messageId);
-      // Real media, reusing the exact same snapdoc/remoteMediaReferences/resolver pipeline as loadMedia() below
-      // (module search "snap_viewing_resolving_snap_doc": a plain Snap's decoded content is
-      // {$case:"snapdoc", snapdoc:<the same playback/playbackLayers shape as chat media>}). Device-verified
-      // end-to-end against a real friend's story photo (same resolver, see BRIDGE_NOTES.md); NOT exercised here
-      // against a real Snap message per the task's "don't open an unopened snap while testing" rule.
+      const key = realKey(entry && entry.messages, messageId);
+      const raw = entry && entry.messages && findRaw(entry.messages, messageId);
+      if (!raw) throw new Error("snap not loaded");
+      const cid = convIdObj(conversationId);
+      const status = (s) => safe("snap-status", () => typeof m.snapDownloadStatusChanged === "function" && Promise.resolve(m.snapDownloadStatusChanged(s, cid, key)).catch(() => {}), null);
+      status(0); // INITIATED
       let media = [];
-      if (raw) {
-        media = await safe("open-snap-media", async () => {
-          const decoded = decodeContent(raw.messageContent);
-          const c = decoded && decoded.content;
-          const kase = c && c.$case;
-          const snapdoc = kase === "snapdoc" ? c.snapdoc : c && c[kase] && c[kase].snapdoc;
-          const rmr = raw.messageContent && raw.messageContent.remoteMediaReferences && raw.messageContent.remoteMediaReferences[0];
-          if (!snapdoc || !rmr) return [];
-          return resolveMediaInfos(mediaInfosFromSnapdoc(snapdoc, rmr), undefined, "ghost_snap");
-        }, Promise.resolve([]));
-      }
+      try {
+        const decoded = decodeContent(raw.messageContent);
+        const c = decoded && decoded.content;
+        const kase = c && c.$case;
+        const snapdoc = kase === "snapdoc" ? c.snapdoc : c && c[kase] && c[kase].snapdoc;
+        const rmr = raw.messageContent && raw.messageContent.remoteMediaReferences && raw.messageContent.remoteMediaReferences[0];
+        if (snapdoc && rmr) media = await resolveMediaInfos(mediaInfosFromSnapdoc(snapdoc, rmr), undefined, "snap");
+      } catch (e) { trail("open-snap", e, "error"); }
+      if (!media.length) { status(2); throw new Error("couldn't load this snap"); } // FAILED
+      status(1); // SUCCEEDED
+      if (typeof m.startedViewingSnap === "function") Promise.resolve(m.startedViewingSnap(cid, key)).catch((e) => trail("snap-started", e, "error"));
       return { media };
+    },
+
+    async closeSnap(conversationId, messageId) {
+      requireStore();
+      const m = messaging();
+      const entry = conversationEntry(conversationId);
+      const raw = entry && entry.messages && findRaw(entry.messages, messageId);
+      if (typeof m.finishedViewingSnap === "function") await m.finishedViewingSnap(convIdObj(conversationId), realKey(entry && entry.messages, messageId), raw);
+      return true;
     },
 
     listStories() {
