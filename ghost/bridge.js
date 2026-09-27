@@ -464,7 +464,8 @@
     if (f) return { conversationId: convIdObj(conversationId), conversationType: f.conversationType, participants: f.participants || [] };
     throw new Error("chat not loaded");
   }
-  function wantMic(on) { window.__ghostWantsMic = !!on; } // camhook.js: calls get the real microphone, not the silent stand-in
+  let callIntentUntil = 0; // start/answer in flight: the session may not be in the store yet, keep the real mic promised
+  function wantMic(on) { window.__ghostWantsMic = !!on; if (on) callIntentUntil = Date.now() + 20000; else callIntentUntil = 0; } // camhook.js: calls get the real microphone, not the silent stand-in
   function callsSnapshot() {
     const media = (state() || {}).media || {};
     const local = media.local || {};
@@ -490,7 +491,8 @@
   function checkCalls() {
     const calls = callsSnapshot();
     const active = calls.filter((c) => c.state !== "none" || c.remote.some((r) => r.state === "outgoing"));
-    if (!active.length) wantMic(false);
+    if (active.length) callIntentUntil = 0;              // the call is real now; it keeps the mic while it lasts
+    else if (Date.now() > callIntentUntil) window.__ghostWantsMic = false;
     const sig = JSON.stringify(active.map((c) => [c.conversationId, c.state, c.micOn, c.cameraOn, c.remote.map((r) => [r.userId, r.state, r.video, r.audio])]));
     if (sig !== lastCallsSig) { lastCallsSig = sig; post({ ghost: "event", type: "calls", data: { calls: active } }); }
     attachCallMedia(active.length > 0);

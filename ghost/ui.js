@@ -2838,11 +2838,13 @@
     setIc("speaker", "speakerIc"); setIc("camera", "videoCall"); setIc("mute", "mic"); setIc("flip", "flip"); setIc("end", "callEnd");
     setIc("decline", "callEnd"); setIc("accept-voice", "call"); setIc("accept-video", "videoCall");
     q(".gh-call-min").appendChild(icon("chevronDown", 26));
-    const c = { el: wrap, speaker: false, openedFor: null, dismissedIncoming: new Set(), liveSince: new Map(), timer: null };
+    const c = { el: wrap, speaker: false, openedFor: null, ignored: new Set(), liveSince: new Map(), timer: null };
+    // calls you hung up / declined: late engine updates about them must not reopen the screen
+    const ignore = (k) => { if (!k) return; c.ignored.add(k.sessionId || ("pending|" + k.conversationId)); if (c.ignored.size > 50) c.ignored.delete(c.ignored.values().next().value); };
     const cur = () => ctx.state.activeCall;
     const act = (name, fn) => q(`[data-act="${name}"]`).addEventListener("click", (e) => { e.stopPropagation(); haptic(name === "end" || name === "decline" ? "medium" : "light"); fn(); });
-    act("end", () => { const k = cur(); if (k) api.endCall(k.conversationId).catch(() => {}); closeCallScreen(ctx, true); });
-    act("decline", () => { const k = cur(); if (k) { c.dismissedIncoming.add(k.conversationId + "|" + k.startedAt); api.endCall(k.conversationId).catch(() => {}); } closeCallScreen(ctx, true); });
+    act("end", () => { const k = cur(); if (k) { ignore(k); api.endCall(k.conversationId).catch(() => {}); } closeCallScreen(ctx, true); });
+    act("decline", () => { const k = cur(); if (k) { ignore(k); api.endCall(k.conversationId).catch(() => {}); } closeCallScreen(ctx, true); });
     act("accept-voice", () => { const k = cur(); if (k) api.answerCall(k.conversationId, false).catch((e) => ctx.showToast("Couldn't answer: " + (e && e.message || e))); stopRing(); });
     act("accept-video", () => { const k = cur(); if (k) api.answerCall(k.conversationId, true).catch((e) => ctx.showToast("Couldn't answer: " + (e && e.message || e))); stopRing(); });
     act("mute", () => { const k = cur(); if (k) api.setMicOn(!k.micOn).catch(() => {}); });
@@ -2851,7 +2853,12 @@
     act("speaker", () => {
       c.speaker = !c.speaker;
       q('[data-act="speaker"]').dataset.on = c.speaker ? "1" : "0";
-      try { window.webkit.messageHandlers.dg.postMessage({ op: "speaker", on: c.speaker }).catch(() => {}); } catch (e) {}
+      const btn = q('[data-act="speaker"]');
+      try {
+        window.webkit.messageHandlers.dg.postMessage({ op: "speaker", on: c.speaker }).catch(() => {
+          c.speaker = !c.speaker; btn.dataset.on = c.speaker ? "1" : "0"; ctx.showToast("Speaker isn't available yet - try again once the call connects");
+        });
+      } catch (e) {}
     });
     q(".gh-call-min").addEventListener("click", () => { haptic("light"); wrap.dataset.open = "0"; updateCallBar(ctx); });
     // tap the video to hide/show the controls, like FaceTime
@@ -2910,11 +2917,13 @@
     const c = ctx.callScreen, wrap = c.el;
     const prev = ctx.state.activeCall;
     // incoming beats everything; then the call you're in
-    const incoming = calls.find((k) => k.state === "incoming" || (k.state === "none" && k.remote.some((r) => r.state === "outgoing")));
-    const live = calls.find((k) => k.state === "incall" || k.state === "answered" || k.state === "outgoing");
+    const fresh = calls.filter((k) => !c.ignored.has(k.sessionId) && !(c.ignored.has("pending|" + k.conversationId) && k.state !== "incall"));
+    const incoming = fresh.find((k) => k.state === "incoming" || (k.state === "none" && k.remote.some((r) => r.state === "outgoing")));
+    const live = fresh.find((k) => k.state === "incall" || k.state === "answered" || k.state === "outgoing");
     const call = live || incoming || null;
     ctx.state.activeCall = call;
     if (!call) {
+      if (!calls.length) for (const k of [...c.ignored]) if (k.startsWith("pending|")) c.ignored.delete(k); // engine confirms it's over
       stopRing();
       if (prev && c.liveSince.has(prev.conversationId)) ctx.showToast("Call ended · " + fmtCallTime(Date.now() - c.liveSince.get(prev.conversationId)));
       c.liveSince.clear();
@@ -2922,7 +2931,6 @@
       return;
     }
     const mode = call === live ? (call.state === "outgoing" ? "outgoing" : "live") : "incoming";
-    if (mode === "incoming" && c.dismissedIncoming.has(call.conversationId + "|" + call.startedAt)) return;
     const { who, name } = callPeer(ctx, call);
     if (mode === "live" && !c.liveSince.has(call.conversationId)) c.liveSince.set(call.conversationId, Date.now());
     if (mode === "incoming") startRing(); else stopRing();
@@ -2964,7 +2972,7 @@
   }
   function updateCallBar(ctx) {
     const bar = ctx.callBar, k = ctx.state.activeCall, c = ctx.callScreen;
-    const show = !!k && c.el.dataset.open !== "1" && k.state !== "none";
+    const show = !!k && c.el.dataset.open !== "1";
     bar.dataset.show = show ? "1" : "0";
     if (show) {
       const since = c.liveSince.get(k.conversationId);
@@ -2974,8 +2982,11 @@
   async function startCallFrom(ctx, video) {
     const convId = ctx.state.currentConvId;
     if (!convId) return;
+    const busy = ctx.state.activeCall;
+    if (busy) { ctx.callScreen.el.dataset.open = "1"; updateCallBar(ctx); if (busy.conversationId !== convId) ctx.showToast("You're already in a call"); return; }
     haptic("medium");
     const c = ctx.callScreen;
+    c.ignored.delete("pending|" + convId);
     // show the screen right away; the engine's state catches up in a moment
     ctx.state.activeCall = { conversationId: convId, state: "outgoing", remote: [], micOn: true, cameraOn: !!video, startedAt: Date.now() };
     c.openedFor = null;
