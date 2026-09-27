@@ -2071,6 +2071,12 @@
       const decoded = decodeContent(mc);
       const c = decoded && decoded.content;
       const kase = c && c.$case;
+      // a snap you may look at again (your own sent snap, or one saved in chat): just fetch it - no viewing/opened
+      // receipts, unlike openSnap
+      const snapdoc = kase === "snapdoc" ? c.snapdoc : (c && c[kase] && c[kase].snapdoc && !Array.isArray(c[kase].snapdoc) ? c[kase].snapdoc : null);
+      if (snapdoc && mc.remoteMediaReferences && mc.remoteMediaReferences[0]) {
+        return { media: await resolveMediaInfos(mediaInfosFromSnapdoc(snapdoc, mc.remoteMediaReferences[0]), undefined, "snap") };
+      }
       if (kase === "externalMedia" || kase === "chatMedia" || kase === "externalMediaMessageContent") {
         const snapdocs = (c.externalMedia && c.externalMedia.snapdoc) || [];
         const rmrs = mc.remoteMediaReferences || [];

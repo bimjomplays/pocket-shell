@@ -54,6 +54,7 @@
   const ICONS = {
     back: '<path d="M15 18l-6-6 6-6"/>',
     addFriend: '<circle cx="10" cy="8" r="4"/><path d="M3 20c.8-3.6 3.6-6 7-6s6.2 2.4 7 6"/><path d="M19 8v6M16 11h6"/>',
+    bookmark: '<path d="M6.5 3.5h11v17l-5.5-4-5.5 4z"/>',
     person: '<circle cx="12" cy="8" r="4"/><path d="M4.5 20c.8-3.6 3.9-6 7.5-6s6.7 2.4 7.5 6"/>',
     flame: '<path d="M12 3c1 3.5 5 5.5 5 10a5 5 0 01-10 0c0-2 1-3.5 2-4.5.3 1.6 1.2 2.5 2 2.5-.6-2.8 0-5.5 1-8z"/>',
     pin: '<path d="M9 4h6l-1 6 3 3H7l3-3-1-6z"/><path d="M12 13v7"/>',
@@ -1790,15 +1791,47 @@
     const label = el("span", "gh-snap-label");
     const paint = () => {
       b.dataset.opened = m.opened ? "1" : "0";
-      label.textContent = isMe ? (m.opened ? "Opened" : "Delivered") : (m.opened ? (m.replayable ? "Opened · Tap to replay" : "Opened") : "New Snap");
+      b.dataset.saved = m.saved ? "1" : "0";
+      label.textContent = m.saved && (isMe || m.opened) ? "Saved in Chat"
+        : isMe ? (m.opened ? "Opened" : "Delivered") : (m.opened ? (m.replayable ? "Opened · Tap to replay" : "Opened") : "New Snap");
+      if (saveBtn) { saveBtn.dataset.on = m.saved ? "1" : "0"; saveBtn.setAttribute("aria-label", m.saved ? "Unsave in Chat" : "Save in Chat"); }
     };
+    // Save in Chat, like Snapchat Web's own button: your own snaps any time, received ones once opened
+    let saveBtn = null;
+    if (isMe || m.opened) {
+      saveBtn = el("button", "gh-snap-save gh-hit");
+      saveBtn.appendChild(icon("bookmark", 16));
+      saveBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        haptic("light");
+        const next = !m.saved;
+        m.saved = next; paint();
+        try { await api.saveMessage(m.conversationId || ctx.state.currentConvId, m.id, next); ctx.showToast(next ? "Saved in chat" : "Unsaved"); }
+        catch (err) { m.saved = !next; paint(); ctx.showToast("Couldn't " + (next ? "save" : "unsave") + " that Snap"); }
+      });
+    }
     paint();
     const time = el("span", "gh-snap-time"); time.textContent = fmtClock(m.ts);
     b.append(mark, label, time);
+    if (saveBtn) b.appendChild(saveBtn);
+    // a saved snap can be watched again (no receipts - bridge loadMedia)
+    if (isMe || m.opened) {
+      b.addEventListener("click", async () => {
+        if (!m.saved || b.dataset.loading === "1") return;
+        haptic(); b.dataset.loading = "1";
+        try {
+          const res = await api.loadMedia(m.conversationId || ctx.state.currentConvId, m.id);
+          const items = (res && res.media) || [];
+          if (!items.length) throw new Error("empty");
+          openViewerSequence(ctx, items, { title: isMe ? "Your Snap" : (m.from && m.from.name) || "Snap" });
+        } catch (e) { ctx.showToast("Couldn't load that Snap"); }
+        finally { delete b.dataset.loading; }
+      });
+    }
     if (!isMe && m.opened && m.replayable) { // one replay, like Snapchat
       b.classList.add("gh-press");
       b.addEventListener("click", async () => {
-        if (b.dataset.loading === "1" || !m.replayable) return;
+        if (b.dataset.loading === "1" || !m.replayable || m.saved) return;
         haptic(); b.dataset.loading = "1";
         try {
           const res = await api.replaySnap(m.conversationId || ctx.state.currentConvId, m.id);

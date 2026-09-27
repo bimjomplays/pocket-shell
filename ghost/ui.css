@@ -1723,3 +1723,14 @@ input, textarea {
   background: var(--gh-bg-panel-2); color: var(--gh-text); border: 0; border-radius: 8px; padding: 5px 10px; font-size: 16px;
   font-variant-numeric: tabular-nums; -webkit-appearance: none; appearance: none;
 }
+/* Save in Chat on snap rows */
+.gh-snap-save {
+  margin: -6px 0 -6px auto; width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  color: var(--gh-text-tertiary); background: none; flex-shrink: 0;
+}
+.gh-snap-save[data-on="1"] { color: var(--gh-accent); }
+.gh-snap-save[data-on="1"] svg path { fill: currentColor; }
+.gh-snap-row:has(.gh-snap-save) { padding-right: 6px; }
+.gh-snap-row[data-saved="1"] { border-color: color-mix(in srgb, var(--gh-accent) 55%, transparent); }
+.gh-snap-row[data-saved="1"] .gh-snap-label { color: var(--gh-text); }
+.gh-snap-label, .gh-snap-time { white-space: nowrap; }
