@@ -1386,3 +1386,7 @@ input, textarea {
 .gh-story-name { max-width: 70px; }
 /* a photo/GIF still loading (or still uploading, if you just sent it) keeps a visible placeholder */
 .gh-media[data-loading="1"] { width: 200px; height: 150px; }
+/* stickers keep their own shape (custom stickers are often wide); a soft placeholder while one downloads */
+.gh-sticker img { width: auto; height: auto; max-width: 150px; max-height: 150px; min-width: 60px; object-fit: contain; }
+.gh-sticker[data-loading="1"] img { width: 120px; height: 120px; border-radius: 16px; background: rgba(255,255,255,0.06); }
+.gh-sticker[data-broken="1"] img { visibility: hidden; width: 120px; height: 40px; }

@@ -1418,7 +1418,13 @@
         const b = el("div", "gh-bubble gh-sticker");
         const ref = m.media && m.media[0];
         const img = el("img");
-        img.src = (ref && (ref.url || (ref.blob && URL.createObjectURL(ref.blob)))) || "";
+        const src = (ref && (ref.url || (ref.blob && URL.createObjectURL(ref.blob)))) || "";
+        if (src) img.src = src;
+        else { // custom / GIF-style stickers are downloaded + decrypted on demand, like photos
+          b.dataset.loading = "1";
+          fetchMediaFor(m).then((list) => { const r = list[0]; if (r && (r.url || r.blob)) { img.src = r.url || URL.createObjectURL(r.blob); delete b.dataset.loading; } });
+        }
+        img.addEventListener("error", () => { b.dataset.broken = "1"; }, { once: true });
         b.appendChild(img);
         b.appendChild(tickMetaEl(m, isMe, "gh-sticker-meta"));
         return b;

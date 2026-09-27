@@ -334,6 +334,34 @@
   // fetches mediaReference.contentObject/resolvedUrl/localCacheKey, and unzips media+overlay bundles, returning
   // dataUrls (blob: URLs whose Blob already carries the RIGHT sniffed MIME type - device-verified below) - so we
   // call it directly instead of reimplementing any crypto/network/unzip ourselves, exactly as the task asked.
+  // Snapchat's own helpers for stickers, found by strings inside them (module ids change between Snapchat builds)
+  let stickerHelperCache;
+  function exportBySource(needle) {
+    const factories = webpackRequire && webpackRequire.m;
+    if (!factories) return null;
+    for (const id of Object.keys(factories)) {
+      if (!String(factories[id]).includes(needle)) continue;
+      const exp = safe("export-by-source", () => webpackRequire(id), null);
+      if (!exp) continue;
+      for (const k of Object.keys(exp)) {
+        const fn = safe("export-by-source-get", () => exp[k], null);
+        if (typeof fn === "function" && String(fn).includes(needle)) return fn;
+      }
+    }
+    return null;
+  }
+  function stickerHelpers() {
+    if (stickerHelperCache) return stickerHelperCache;
+    stickerHelperCache = {
+      resolveBolt: exportBySource("resolver_does_not_exist"),      // bolt content object -> URL
+      importKey: exportBySource("decrypt_media_key_length_error"), // (key, iv) -> {key: CryptoKey, iv}
+      download: exportBySource("media_download_total_latency"),    // (bolt, context, key) -> decrypted ArrayBuffer
+      unzip: exportBySource("file(/^overlay~/i)"),                  // media~/overlay~ zip -> {mediaArrayBuffer}
+    };
+    const missing = Object.keys(stickerHelperCache).filter((k) => !stickerHelperCache[k]);
+    if (missing.length) trail("sticker-helpers", "missing " + missing.join(","), "error");
+    return stickerHelperCache;
+  }
   let lastStory = null;
   let storyThumbFnCache;
   function storyThumbFn() {
@@ -491,6 +519,7 @@
         const p = st.included.stickerId.split(":");
         if (p.length >= 3) media = [{ type: "image", url: "https://cf-st.sc-cdn.net/3d/render/" + [p[0], p[2], p[3]].filter(Boolean).join("-") + "-v1.webp?scale=1&ua=2" }];
       } else if (st && st.$case === "emoji") { kind = "text"; text = st.emoji; }
+      // st.$case "custom": a custom sticker whose file is a normal media reference - loaded via loadMedia
     }
     if (kase === "note") {
       // content.note.note = {$case: "audio", audio: {note: {mediaDurationMs, ...}}} (main.js voice-note encoder,
@@ -504,7 +533,20 @@
     else if (kase === "snapReply") text = c.snapReply && (c.snapReply.text || (c.snapReply.content && c.snapReply.content.text));
     else if (kase === "storyReply") text = c.storyReply && c.storyReply.text;
     else if (kase === "url") text = c.url && (c.url.url || c.url.text);
-    if (kase === "creativeToolItem") {
+    const ent = kase === "creativeToolItem" && c.creativeToolItem && c.creativeToolItem.item && c.creativeToolItem.item.entity && c.creativeToolItem.item.entity.entityOneof;
+    if (ent && ent.$case === "bitmojiSticker") {
+      // Bitmoji sticker from the phone app (main.js, search 'function T6({bitmojiSticker'): the item's metadata has a
+      // ready contentUrl, else the comic render from comicId + avatar ids (same cf-st.sc-cdn.net host as included stickers)
+      kind = "sticker";
+      const md = c.creativeToolItem.metadata && c.creativeToolItem.metadata.metadataType;
+      const bm = md && md.$case === "bitmojiStickerMetadata" ? md.bitmojiStickerMetadata : null;
+      const comic = ent.bitmojiSticker && ent.bitmojiSticker.comicId;
+      const url = (bm && bm.mediaContent && bm.mediaContent.contentUrl) ||
+        (comic && bm && bm.avatarId ? "https://cf-st.sc-cdn.net/3d/render/" + [comic, bm.avatarId, bm.friendAvatarId].filter(Boolean).join("-") + "-v1.webp?scale=1&ua=2" : null);
+      if (url) media = [{ type: "image", url }];
+    } else if (ent && (ent.$case === "customSticker" || ent.$case === "gfycat")) {
+      kind = "sticker"; // file comes via loadMedia (encrypted custom sticker / gfycat bolt object)
+    } else if (kase === "creativeToolItem") {
       const it = c.creativeToolItem;
       const json = safe("gif-json", () => JSON.stringify(it, (k, v) => (typeof v === "bigint" ? String(v) : v instanceof Uint8Array ? undefined : v)), "") || "";
       const m = json.match(/giphy[^"]*?\/media\/(?:v1\.[^/"]+\/)?([A-Za-z0-9]{6,64})\//i) || json.match(/"(?:giphyId|gifId|id)"\s*:\s*"([A-Za-z0-9]{10,40})"/);
@@ -1330,6 +1372,36 @@
           for (const m of await resolveMediaInfos(infos, undefined, "ghost_chat_media")) media.push(m);
         }
         return { media };
+      }
+      const ent = kase === "creativeToolItem" && c.creativeToolItem && c.creativeToolItem.item && c.creativeToolItem.item.entity && c.creativeToolItem.item.entity.entityOneof;
+      if (ent && ent.$case === "customSticker") {
+        // exactly Snapchat's I6 (main.js, search 'custom_sticker'): import the AES key+iv, download+decrypt the bolt
+        // object, unzip if it's a media~ bundle, show as a blob
+        const cs = ent.customSticker, bolt = cs.mediaContent && cs.mediaContent.contentBoltObject;
+        const h = stickerHelpers();
+        if (!bolt || !h.importKey || !h.download) return { media: [] };
+        const enc = new TextEncoder();
+        const key = await h.importKey(enc.encode(cs.encKey), enc.encode(cs.encIv));
+        const buf = await h.download(bolt, "custom_sticker", key);
+        const z = h.unzip ? await h.unzip(buf) : null;
+        const url = URL.createObjectURL(new Blob([new Uint8Array(z ? z.mediaArrayBuffer : buf)]));
+        return { media: [{ type: "image", url, width: cs.width || undefined, height: cs.height || undefined }] };
+      }
+      if (ent && ent.$case === "gfycat") {
+        const a = ent.gfycat.mediaAssets && ent.gfycat.mediaAssets[0];
+        const bolt = a && a.mediaContent && a.mediaContent.contentBoltObject;
+        const h = stickerHelpers();
+        if (!bolt || !h.resolveBolt) return { media: [] };
+        const url = await h.resolveBolt(bolt, "gfycat_stickers");
+        return { media: url ? [{ type: "image", url, width: a.width, height: a.height }] : [] };
+      }
+      if (kase === "sticker" && c.sticker && c.sticker.sticker && c.sticker.sticker.$case === "custom") {
+        const cm = c.sticker.sticker.custom;
+        const rmr = mc.remoteMediaReferences && mc.remoteMediaReferences[0];
+        const ref = rmr && mediaReferenceFromRaw(rmr.mediaReferences && rmr.mediaReferences[0]);
+        const meta = cm && cm.sticker;
+        if (!ref || !meta) return { media: [] };
+        return { media: await resolveMediaInfos([{ mediaMetadata: { encryptionInfo: meta.encryptionInfo, dimensions: meta.dimensions, hasSound: false, zipped: !!meta.zipped }, mediaReference: ref }], "image", "custom_sticker") };
       }
       if (kase === "note" || kase === "voiceNote") {
         // Same as Snapchat's own voice-note player (main.js, search 'Invalid audio note - no media metadata'):
