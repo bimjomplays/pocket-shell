@@ -1542,3 +1542,13 @@ input, textarea {
 .gh-set-about-logo { width: 88px; height: 88px; border-radius: 22px; display: flex; align-items: center; justify-content: center; color: #fff; background: linear-gradient(135deg, #5865f2, var(--gh-accent)); box-shadow: 0 10px 30px color-mix(in srgb, var(--gh-accent) 40%, transparent); }
 .gh-set-about-name { font-size: 24px; font-weight: 800; margin-top: 8px; }
 .gh-set-about-ver { color: var(--gh-text-secondary); }
+
+/* chat sheet (tap a chat's name) + photo wallpaper tiles */
+.gh-chat-sheet { max-height: 80%; overflow-y: auto; padding: 0 16px calc(var(--gh-safe-b) + 18px); display: flex; flex-direction: column; }
+.gh-chat-sheet-head { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0 4px; }
+.gh-chat-sheet-head .gh-avatar { width: 64px !important; height: 64px !important; }
+.gh-chat-sheet-name { font-size: 19px; font-weight: 700; }
+.gh-chat-walls { padding: 4px 0 10px; }
+.gh-wall-photo-ico { position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%); color: var(--gh-text-secondary); }
+.gh-wall-default span { color: var(--gh-text) !important; }
+.gh-conv-title-row, .gh-conv-header-avatar { cursor: pointer; }

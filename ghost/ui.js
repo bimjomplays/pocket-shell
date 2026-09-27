@@ -391,6 +391,7 @@
     root.appendChild(overlays);
     ctx.actionSheet = buildActionSheet(ctx, overlays);
     ctx.gifSheet = buildGifSheet(ctx, overlays);
+    ctx.chatSheet = buildChatSheet(ctx, overlays);
     ctx.stickerSheet = buildStickerSheet(ctx, overlays);
     ctx.newChatSheet = buildNewChatSheet(ctx, overlays);
     ctx.attachSheet = buildAttachSheet(ctx, overlays);
@@ -1080,6 +1081,9 @@
     conv.textarea.addEventListener("input", () => updateMentions(ctx));
     conv.textarea.addEventListener("click", () => updateMentions(ctx));
     conv.textarea.addEventListener("blur", () => setTimeout(() => hideMentions(ctx), 150));
+    // tap the name or picture at the top of a chat: that chat's options (wallpaper)
+    screen.querySelector(".gh-conv-title-row").addEventListener("click", () => openChatSheet(ctx));
+    screen.querySelector(".gh-conv-header-avatar").addEventListener("click", () => openChatSheet(ctx));
     const touched = () => { conv.userTouched = true; };
     conv.messages.addEventListener("touchstart", touched, { passive: true });
     conv.messages.addEventListener("wheel", touched, { passive: true });
@@ -1144,6 +1148,7 @@
   async function openConversationScreen(ctx, conversationId) {
     haptic("light");
     ctx.conv.peekId = null;
+    applyChatWallpaper(ctx, conversationId);
     ctx.state.currentConvId = conversationId;
     const convData = ctx.state.convById.get(conversationId);
     if (convData) updateConvHeader(ctx, convData);
@@ -1746,6 +1751,7 @@
     const conv = ctx.conv;
     if (conv.peekId === id && ctx.state.currentConvId !== id) return;
     conv.peekId = id;
+    applyChatWallpaper(ctx, id);
     const cd = ctx.state.convById.get(id);
     if (cd) updateConvHeader(ctx, cd);
     conv.rendered.forEach((elm) => elm.remove());
@@ -2195,6 +2201,7 @@
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true,
     doubleTapCamera: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
+    wallDim: 0.25, chatWalls: {},
   };
   let prefs = Object.assign({}, PREF_DEFAULTS);
   function pref(k) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : PREF_DEFAULTS[k]; }
@@ -2230,6 +2237,7 @@
     flag("data-no-stories", !pref("showStoriesRail"));
     flag("data-hide-previews", !!pref("hidePreviews"));
     flag("data-no-times", !pref("showTimes"));
+    if (ctx.state && ctx.state.currentConvId) applyChatWallpaper(ctx, ctx.state.currentConvId);
     // the app's own background (seen for a moment while the keyboard moves) follows the theme
     try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST theme " + pref("theme") + "/" + pref("accent") }).catch(() => {}); } catch (e) {}
     if (ctx.lastRR !== !!pref("readReceipts")) { ctx.lastRR = !!pref("readReceipts"); api.setReadReceipts(ctx.lastRR).catch(() => {}); }
@@ -2393,17 +2401,46 @@
         sw.appendChild(b);
       }
       g.appendChild(sw);
-      g = setGroup(body, "Chat Wallpaper");
+      g = setGroup(body, "Chat Wallpaper", "Your default for every chat. Tap a chat's name to give that chat its own - it keeps it whatever you pick here.");
       const walls = el("div", "gh-set-cards");
-      for (const [key, w] of Object.entries(WALLPAPERS)) {
-        const c = el("button", "gh-set-wall gh-press");
-        c.style.backgroundImage = w.css; c.style.backgroundSize = w.size; c.style.backgroundPosition = w.pos;
-        const n = el("span"); n.textContent = w.name; c.appendChild(n);
-        c.dataset.on = pref("wallpaper") === key ? "1" : "0";
-        c.addEventListener("click", () => { haptic("light"); setPref(ctx, "wallpaper", key); for (const x of walls.children) x.dataset.on = "0"; c.dataset.on = "1"; });
-        walls.appendChild(c);
-      }
+      const dimHost = el("div");
+      const paintWalls = async () => {
+        walls.innerHTML = "";
+        const photo = await wallUrl("default");
+        const pc = el("button", "gh-set-wall gh-press");
+        if (photo) { pc.style.backgroundImage = `url("${photo}")`; pc.style.backgroundSize = "cover"; pc.style.backgroundPosition = "center"; }
+        else pc.appendChild(icon("photo", 26, "gh-wall-photo-ico"));
+        const pn = el("span"); pn.textContent = photo ? "Photo" : "Choose Photo"; pc.appendChild(pn);
+        pc.dataset.on = pref("wallpaper") === "photo" ? "1" : "0";
+        pc.addEventListener("click", async () => {
+          haptic("light");
+          if (photo && pref("wallpaper") !== "photo") { setPref(ctx, "wallpaper", "photo"); paintWalls(); return; }
+          const f = await pickPhoto(); if (!f) return;
+          try { await saveWallPhoto("default", f); setPref(ctx, "wallpaper", "photo"); paintWalls(); }
+          catch (e) { ctx.showToast("Couldn't use that photo"); }
+        });
+        walls.appendChild(pc);
+        for (const [key, w] of Object.entries(WALLPAPERS)) {
+          const c = el("button", "gh-set-wall gh-press");
+          c.style.backgroundImage = w.css; c.style.backgroundSize = w.size; c.style.backgroundPosition = w.pos;
+          const n = el("span"); n.textContent = w.name; c.appendChild(n);
+          c.dataset.on = pref("wallpaper") === key ? "1" : "0";
+          c.addEventListener("click", () => { haptic("light"); setPref(ctx, "wallpaper", key); paintWalls(); });
+          walls.appendChild(c);
+        }
+        dimHost.innerHTML = "";
+        if (pref("wallpaper") === "photo") {
+          const cap = el("div", "gh-set-group-title"); cap.textContent = "Darken Photo";
+          const dg = el("div", "gh-set-group");
+          setSlider(dg, { min: 0, max: 0.7, step: 0.05, minLabel: "☀︎", maxLabel: "☾", get: () => pref("wallDim"), set: (v) => setPref(ctx, "wallDim", v) });
+          const change = el("div", "gh-set-group");
+          setRow(change, { label: "Change Photo…", onClick: async () => { const f = await pickPhoto(); if (!f) return; try { await saveWallPhoto("default", f); applyPrefs(ctx); paintWalls(); } catch (e) { ctx.showToast("Couldn't use that photo"); } } });
+          dimHost.append(cap, dg, change);
+        }
+      };
       g.appendChild(walls);
+      body.appendChild(dimHost);
+      paintWalls();
       g = setGroup(body, "Message Text Size");
       setSlider(g, { min: 0.85, max: 1.3, step: 0.05, minLabel: "A", maxLabel: "A", get: () => pref("textScale"), set: (v) => setPref(ctx, "textScale", v) });
       g = setGroup(body, "Bubble Corners");
@@ -2462,6 +2499,156 @@
     },
   };
   function refreshAllLists(ctx) { try { renderHomeList(ctx); renderStories(ctx); } catch (e) {} }
+
+  // =====================================================================================================
+  // Chat wallpapers: a default for every chat (a preset or your own photo) and per-chat overrides that always win
+  // over the default. Photos are shrunk to ~1600px and kept in IndexedDB (this page's own storage, survives
+  // restarts); the choice itself lives in prefs: wallpaper ("photo" or a preset) and chatWalls {convId: {kind, name}}.
+  // =====================================================================================================
+  const wallDB = {
+    db: null,
+    open() {
+      if (this.db) return this.db;
+      this.db = new Promise((res, rej) => {
+        const r = indexedDB.open("ghost-walls", 1);
+        r.onupgradeneeded = () => r.result.createObjectStore("walls");
+        r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+      });
+      return this.db;
+    },
+    async get(k) { const db = await this.open(); return new Promise((res) => { const q = db.transaction("walls").objectStore("walls").get(k); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); }); },
+    async put(k, v) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction("walls", "readwrite"); t.objectStore("walls").put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+    async del(k) { const db = await this.open(); return new Promise((res) => { const t = db.transaction("walls", "readwrite"); t.objectStore("walls").delete(k); t.oncomplete = res; t.onerror = res; }); },
+  };
+  const wallUrls = new Map(); // idb key -> object URL
+  async function wallUrl(key) {
+    if (wallUrls.has(key)) return wallUrls.get(key);
+    const blob = await wallDB.get(key).catch(() => null);
+    const url = blob ? URL.createObjectURL(blob) : null;
+    wallUrls.set(key, url);
+    return url;
+  }
+  async function saveWallPhoto(key, file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+      const max = 1600, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.86));
+      if (!blob) throw new Error("couldn't read that photo");
+      await wallDB.put(key, blob);
+      const old = wallUrls.get(key); if (old) URL.revokeObjectURL(old);
+      wallUrls.delete(key);
+    } finally { URL.revokeObjectURL(url); }
+  }
+  function pickPhoto() {
+    return new Promise((res) => {
+      const input = document.createElement("input");
+      input.type = "file"; input.accept = "image/*";
+      input.addEventListener("change", () => res((input.files && input.files[0]) || null), { once: true });
+      input.click();
+    });
+  }
+  // which wallpaper a chat gets: its own if you set one, else the default
+  function wallFor(convId) {
+    const own = convId && (pref("chatWalls") || {})[convId];
+    if (own) return Object.assign({ own: true, key: "chat:" + convId }, own);
+    const d = pref("wallpaper");
+    return d === "photo" ? { kind: "photo", key: "default", dim: pref("wallDim") } : { kind: "preset", name: d };
+  }
+  async function applyChatWallpaper(ctx, convId) {
+    const m = ctx.conv && ctx.conv.messages;
+    if (!m) return;
+    const w = wallFor(convId);
+    const token = (m._wallToken = (m._wallToken || 0) + 1);
+    if (w.kind === "photo") {
+      const url = await wallUrl(w.key);
+      if (m._wallToken !== token) return;
+      if (url) {
+        const dim = Math.max(0, Math.min(0.8, w.dim != null ? w.dim : pref("wallDim")));
+        m.style.backgroundImage = `linear-gradient(rgba(0,0,0,${dim}), rgba(0,0,0,${dim})), url("${url}")`;
+        m.style.backgroundSize = "cover"; m.style.backgroundPosition = "center";
+        return;
+      }
+    }
+    if (w.own && w.kind === "preset" && WALLPAPERS[w.name]) {
+      const p = WALLPAPERS[w.name];
+      m.style.backgroundImage = p.css === "none" ? "none" : p.css; m.style.backgroundSize = p.size; m.style.backgroundPosition = p.pos;
+      return;
+    }
+    m.style.backgroundImage = ""; m.style.backgroundSize = ""; m.style.backgroundPosition = ""; // the default preset (CSS vars)
+  }
+  function setChatWall(ctx, convId, value) {
+    const all = Object.assign({}, pref("chatWalls") || {});
+    if (value) all[convId] = value; else delete all[convId];
+    setPref(ctx, "chatWalls", all);
+    if (ctx.state.currentConvId === convId) applyChatWallpaper(ctx, convId);
+  }
+
+  // Chat sheet (tap the name/picture at the top of a chat): this chat's wallpaper.
+  function buildChatSheet(ctx, overlaysRoot) {
+    const backdrop = el("div", "gh-backdrop");
+    const sheet = el("div", "gh-sheet gh-chat-sheet");
+    sheet.style.display = "none";
+    overlaysRoot.append(backdrop, sheet);
+    backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
+    return { backdrop, sheet };
+  }
+  async function openChatSheet(ctx) {
+    const convId = ctx.state.currentConvId;
+    const cd = convId && ctx.state.convById.get(convId);
+    if (!cd) return;
+    haptic();
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const head = el("div", "gh-chat-sheet-head");
+    head.appendChild(makeAvatar(cd.isGroup ? { name: cd.title } : (cd.participants && cd.participants[0]) || { name: cd.title }, 64));
+    const nm = el("div", "gh-chat-sheet-name"); nm.textContent = cd.title || "Chat";
+    head.appendChild(nm);
+    s.sheet.appendChild(head);
+    const title = el("div", "gh-set-group-title"); title.textContent = "Chat Wallpaper"; s.sheet.appendChild(title);
+    const cards = el("div", "gh-set-cards gh-chat-walls");
+    s.sheet.appendChild(cards);
+    const foot = el("div", "gh-set-group-foot"); s.sheet.appendChild(foot);
+    const dimRow = el("div", "gh-chat-dim");
+    s.sheet.appendChild(dimRow);
+    const paint = async () => {
+      const own = (pref("chatWalls") || {})[convId];
+      foot.textContent = own ? "This chat has its own wallpaper - changing the default won't touch it." : "Using your default wallpaper (Settings > Appearance).";
+      cards.innerHTML = "";
+      const mk = (label, on, style, onClick) => {
+        const c = el("button", "gh-set-wall gh-press"); Object.assign(c.style, style || {});
+        const n = el("span"); n.textContent = label; c.appendChild(n);
+        c.dataset.on = on ? "1" : "0";
+        c.addEventListener("click", async () => { haptic("light"); await onClick(); paint(); });
+        cards.appendChild(c);
+        return c;
+      };
+      mk("Default", !own, { backgroundColor: "var(--gh-bg-app)" }, () => setChatWall(ctx, convId, null)).classList.add("gh-wall-default");
+      const photoUrl = own && own.kind === "photo" ? await wallUrl("chat:" + convId) : null;
+      const pc = mk(photoUrl ? "Photo" : "Choose Photo", !!(own && own.kind === "photo"), photoUrl ? { backgroundImage: `url("${photoUrl}")`, backgroundSize: "cover", backgroundPosition: "center" } : {}, async () => {
+        const f = await pickPhoto(); if (!f) return;
+        try { await saveWallPhoto("chat:" + convId, f); setChatWall(ctx, convId, { kind: "photo", dim: own && own.dim != null ? own.dim : 0.25 }); }
+        catch (e) { ctx.showToast("Couldn't use that photo"); }
+      });
+      if (!photoUrl) pc.appendChild(icon("photo", 26, "gh-wall-photo-ico"));
+      for (const [key, w] of Object.entries(WALLPAPERS)) {
+        mk(w.name, !!(own && own.kind === "preset" && own.name === key), { backgroundImage: w.css === "none" ? "none" : w.css, backgroundSize: w.size, backgroundPosition: w.pos }, () => setChatWall(ctx, convId, { kind: "preset", name: key }));
+      }
+      dimRow.innerHTML = "";
+      if (own && own.kind === "photo") {
+        const g = el("div", "gh-set-group");
+        setSlider(g, { min: 0, max: 0.7, step: 0.05, minLabel: "☀︎", maxLabel: "☾", get: () => own.dim != null ? own.dim : 0.25, set: (v) => { own.dim = v; setChatWall(ctx, convId, Object.assign({}, own, { dim: v })); } });
+        const cap = el("div", "gh-set-group-title"); cap.textContent = "Darken Photo";
+        dimRow.append(cap, g);
+      }
+    };
+    await paint();
+    openSheetGeneric(s.backdrop, s.sheet);
+  }
 
   // =====================================================================================================
   // Bitmoji stickers (the composer's smiley button). Catalog = Bitmoji's public sticker list (comic ids + tags, fetched
