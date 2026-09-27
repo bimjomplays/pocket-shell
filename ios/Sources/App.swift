@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import QuartzCore
+import AVFoundation
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -624,6 +625,14 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "trail":
             trail(body["text"] as? String ?? "")
             replyHandler(true, nil)
+        case "speaker": // Ghost's call screen: loudspeaker on/off (WebKit leaves calls on the earpiece)
+            let on = body["on"] as? Bool ?? false
+            do {
+                try AVAudioSession.sharedInstance().overrideOutputAudioPort(on ? .speaker : .none)
+                replyHandler(true, nil)
+            } catch {
+                replyHandler(nil, error.localizedDescription)
+            }
         case "haptic":
             let style: UIImpactFeedbackGenerator.FeedbackStyle
             switch body["style"] as? String {

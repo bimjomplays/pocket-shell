@@ -412,6 +412,118 @@
     });
     return storyReceiptCache;
   }
+  // =====================================================================================================
+  // Calls. Snapchat Web's own calling engine (main.js, module with "calling_outgoing_call_"): start / join / end /
+  // mute / camera are module-private functions, found from the module's source text like the story receipts are.
+  //   start(conversation, video, source)  join(conversation, video, source)  end(conversationIdKey)
+  //   mute: setAudio(enabled)             camera(sessionRecordId, on)
+  // Live state: state.talk.sessions (Map conversationIdKey -> {id, sessionState: {localParticipant: {callState},
+  // remoteParticipants: Map}}), media: state.media.remote.videoStreams / audioStreams, state.media.local.
+  // Ghost draws the call itself; this side puts the MediaStreams into <video>/<audio> elements inside Ghost's
+  // (open) shadow root, because MediaStream objects can't be handed across to Ghost's own script world.
+  // =====================================================================================================
+  const CALL_STATES = ["none", "outgoing", "incoming", "answered", "incall"];
+  let callFnCache;
+  function callFns() {
+    if (callFnCache !== undefined) return callFnCache;
+    callFnCache = null;
+    safe("call-fns", () => {
+      const factories = webpackRequire && webpackRequire.m;
+      for (const id of Object.keys(factories || {})) {
+        const src = String(factories[id]);
+        if (!src.includes("calling_outgoing_call_") || !src.includes("calling.join_call.from.")) continue;
+        const name = (re) => (re.exec(src) || [])[1];
+        const names = {
+          start: name(/async function ([\w$]+)\(e,t,n\)\{const i=t\?"video":"audio";[\w$]+\(\)\.increment\(\{metricsName:`calling_outgoing_call_/),
+          join: name(/async function ([\w$]+)\(e,t,n\)\{const i=t\?"video":"audio";[\w$]+\(\)\.increment\(\{metricsName:`calling\.join_call\.from\./),
+          end: name(/function ([\w$]+)\(e\)\{[\w$]+\(e,"endCall"\)/),
+          mute: name(/\}function ([\w$]+)\(e\)\{const\[t,n\]=\(0,[\w$]+\.[\w$]+\)\([\w$]+\.M\.getState\(\)\);n\(e\),[\w$]+\(\)\}/),
+          camera: name(/function ([\w$]+)\(e,t\)\{[\w$]+\(e,t\),[\w$]+\(\)\}/),
+        };
+        const exp = webpackRequire(id);
+        const fns = {};
+        for (const [k, local] of Object.entries(names)) { const key = local && localExport(src, local); fns[k] = key ? exp[key] : null; }
+        const missing = Object.keys(fns).filter((k) => typeof fns[k] !== "function");
+        if (missing.length) trail("calls", "missing " + missing.join(","), "error");
+        callFnCache = fns;
+        return;
+      }
+      trail("calls", "calling module not found", "error");
+    });
+    return callFnCache;
+  }
+  function talkSessions() { const t = (state() || {}).talk; return (t && t.sessions instanceof Map) ? t.sessions : new Map(); }
+  function sessionFor(conversationId) {
+    for (const [k, v] of talkSessions()) if (idOf(k) === conversationId || idOf(v && v.conversationId) === conversationId) return { key: k, rec: v };
+    return null;
+  }
+  function callConversation(conversationId) {
+    const entry = conversationEntry(conversationId);
+    if (entry && entry.conversation) return entry.conversation;
+    const f = (messaging().feed || {})[conversationId];
+    if (f) return { conversationId: convIdObj(conversationId), conversationType: f.conversationType, participants: f.participants || [] };
+    throw new Error("chat not loaded");
+  }
+  function wantMic(on) { window.__ghostWantsMic = !!on; } // camhook.js: calls get the real microphone, not the silent stand-in
+  function callsSnapshot() {
+    const media = (state() || {}).media || {};
+    const local = media.local || {};
+    const out = [];
+    for (const [k, rec] of talkSessions()) {
+      const ss = rec && rec.sessionState;
+      if (!ss) continue;
+      const lp = ss.localParticipant || {};
+      const remote = [];
+      const rp = ss.remoteParticipants;
+      if (rp && typeof rp.entries === "function") for (const [uid, p] of rp.entries()) {
+        const mps = p && p.mediaPublishStatus;
+        remote.push({ userId: idOf(uid) || idOf(p && p.snapchatUserId) || String(uid), state: CALL_STATES[p && p.callState] || "none",
+          video: !!(mps && mps.video && !mps.video.isPaused), audio: !!(mps && mps.audio && mps.audio.type !== "muted") });
+      }
+      out.push({ conversationId: idOf(k) || idOf(rec.conversationId), sessionId: rec.id, state: CALL_STATES[lp.callState] || "none",
+        isGroup: rec.conversationType === 1, remote, startedAt: rec.createdTimestamp ? Date.now() - (performance.now() - rec.createdTimestamp) : Date.now(),
+        micOn: !!(local.audio && local.audio.enabled), cameraOn: !!(local.video && local.video.enabled && local.cameraEnabledPrefs && local.cameraEnabledPrefs.size) });
+    }
+    return out;
+  }
+  let lastCallsSig = "";
+  function checkCalls() {
+    const calls = callsSnapshot();
+    const active = calls.filter((c) => c.state !== "none" || c.remote.some((r) => r.state === "outgoing"));
+    if (!active.length) wantMic(false);
+    const sig = JSON.stringify(active.map((c) => [c.conversationId, c.state, c.micOn, c.cameraOn, c.remote.map((r) => [r.userId, r.state, r.video, r.audio])]));
+    if (sig !== lastCallsSig) { lastCallsSig = sig; post({ ghost: "event", type: "calls", data: { calls: active } }); }
+    attachCallMedia(active.length > 0);
+  }
+  // media elements, kept stable by stream key so nothing re-renders mid-call
+  function attachCallMedia(on) {
+    const host = document.getElementById("ghost-app-root");
+    const root = host && host.shadowRoot;
+    if (!root) return;
+    const remoteBox = root.querySelector(".gh-call-remote"), localBox = root.querySelector(".gh-call-local"), audioBox = root.querySelector(".gh-call-audio");
+    if (!remoteBox || !localBox || !audioBox) return;
+    const media = (state() || {}).media || {};
+    const remote = (on && media.remote) || { videoStreams: {}, audioStreams: {} };
+    const sync = (box, streams, tag, extra) => {
+      const want = new Map(Object.entries(streams || {}).filter(([, s]) => s && typeof s.getTracks === "function"));
+      for (const node of [...box.children]) if (!want.has(node.dataset.key) || want.get(node.dataset.key) !== node.srcObject) { node.srcObject = null; node.remove(); }
+      for (const [key, stream] of want) {
+        if ([...box.children].some((n) => n.dataset.key === key)) continue;
+        const m = document.createElement(tag);
+        m.dataset.key = key; m.autoplay = true; m.setAttribute("playsinline", ""); m.playsInline = true;
+        if (extra) extra(m);
+        m.srcObject = stream;
+        box.appendChild(m);
+        m.play().catch(() => {});
+      }
+      box.dataset.count = String(box.children.length);
+    };
+    sync(remoteBox, remote.videoStreams, "video", (v) => { v.muted = true; }); // (sound comes from the audio elements)
+    sync(audioBox, remote.audioStreams, "audio");
+    const lv = on && media.local && media.local.video && media.local.video.stream;
+    sync(localBox, lv ? { local: lv } : {}, "video", (v) => { v.muted = true; });
+  }
+
   function uuidObj(str) { return { id: Uint8Array.from(String(str).replace(/-/g, "").match(/../g).map((x) => parseInt(x, 16))), str }; }
   let lastStory = null;
   let storyThumbFnCache;
@@ -1053,6 +1165,7 @@
       for (const id of openConversations) emitMessagesFor(id);
       safe("typing", checkTyping);
       safe("here", checkHere);
+      safe("calls", checkCalls);
     }), null);
     emitConversations();
     post({ ghost: "event", type: "ready", data: { loggedIn: loggedIn(), me: meUser() } });
@@ -1363,6 +1476,41 @@
       });
       return true;
     },
+
+    async startCall(conversationId, video) {
+      requireStore();
+      const f = callFns();
+      if (!f || !f.start) throw new Error("calling isn't available");
+      wantMic(true);
+      await f.start(callConversation(conversationId), !!video, "CHAT");
+      checkCalls();
+      return true;
+    },
+    async answerCall(conversationId, video) {
+      requireStore();
+      const f = callFns();
+      if (!f || !f.join) throw new Error("calling isn't available");
+      wantMic(true);
+      await f.join(callConversation(conversationId), !!video, "incoming_button");
+      checkCalls();
+      return true;
+    },
+    endCall(conversationId) {
+      requireStore();
+      const f = callFns(), s = sessionFor(conversationId);
+      if (s && f && f.end) f.end(s.key);
+      wantMic(false);
+      setTimeout(checkCalls, 300);
+      return true;
+    },
+    setMicOn(on) { const f = callFns(); if (!f || !f.mute) throw new Error("no mute"); f.mute(!!on); checkCalls(); return true; },
+    setCameraOn(conversationId, on) {
+      const f = callFns(), s = sessionFor(conversationId);
+      if (!f || !f.camera || !s) throw new Error("no call");
+      f.camera(s.rec.id, !!on); setTimeout(checkCalls, 300);
+      return true;
+    },
+    flipCamera() { const c = window.__dgCam; if (c && typeof c.flip === "function") { c.flip(); return true; } return false; },
 
     // Swipe-up reply to a friend's story snap: Snapchat's composer does
     // sendStorySnapTextReplyMessage(conversationId, snapDoc, snapId, text) (main.js, search '"friendStorySnap"===O?.type'),

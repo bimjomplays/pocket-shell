@@ -82,6 +82,8 @@
     speed: '<path d="M12 2v3M4.2 6.2l2.1 2.1M2 14h3M19 14h3M17.7 8.3l2.1-2.1"/><path d="M12 14l4-3"/><circle cx="12" cy="14" r="8"/>',
     call: '<path d="M22 16.9v2a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 013.1 4.2 2 2 0 015 2h2a2 2 0 012 1.7c.1.9.3 1.8.6 2.7a2 2 0 01-.4 2.1L8 9.9a16 16 0 006 6l1.4-1.2a2 2 0 012.1-.4c.9.3 1.8.5 2.7.6a2 2 0 011.8 2z"/>',
     videoCall: '<path d="M15 8l6-3v14l-6-3"/><rect x="1" y="6" width="14" height="12" rx="2"/>',
+    callEnd: '<path d="M3.6 13.6c4.6-4.1 12.2-4.1 16.8 0 .6.5.6 1.4.1 2l-1.4 1.6c-.5.5-1.3.6-1.9.2l-2.1-1.4c-.5-.3-.7-.9-.6-1.5l.3-1.4a11.4 11.4 0 00-5.6 0l.3 1.4c.1.6-.1 1.2-.6 1.5l-2.1 1.4c-.6.4-1.4.3-1.9-.2l-1.4-1.6c-.5-.6-.5-1.5.1-2z" fill="currentColor"/>',
+    speakerIc: '<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/>',
     attach: '<path d="M20.5 11.5L12 20a5 5 0 01-7-7l8.5-8.5a3.5 3.5 0 015 5L10 18a2 2 0 01-3-3l7-7"/>',
     compose: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>',
     lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/>',
@@ -214,6 +216,12 @@
     replyToStory: (userId, item, text) => bridge.call("replyToStory", [userId, item, text], 30000),
     setPresence: (convId) => bridge.call("setPresence", [convId]),
     setReadReceipts: (on) => bridge.call("setReadReceipts", [on]),
+    startCall: (id, video) => bridge.call("startCall", [id, video], 30000),
+    answerCall: (id, video) => bridge.call("answerCall", [id, video], 30000),
+    endCall: (id) => bridge.call("endCall", [id]),
+    setMicOn: (on) => bridge.call("setMicOn", [on]),
+    setCameraOn: (id, on) => bridge.call("setCameraOn", [id, on]),
+    flipCamera: () => bridge.call("flipCamera"),
   };
 
   // =====================================================================================================
@@ -403,6 +411,12 @@
     root.appendChild(ctx.viewer.el);
     ctx.camera = buildCamera(ctx);
     root.appendChild(ctx.camera.el);
+    ctx.callScreen = buildCallScreen(ctx);
+    root.appendChild(ctx.callScreen.el);
+    ctx.callBar = el("button", "gh-call-bar");
+    ctx.callBar.innerHTML = '<span class="gh-call-bar-dot"></span><span class="gh-call-bar-text"></span><span class="gh-call-bar-hint">Tap to return</span>';
+    ctx.callBar.addEventListener("click", () => { haptic("light"); ctx.callScreen.el.dataset.open = "1"; updateCallBar(ctx); });
+    root.appendChild(ctx.callBar);
     ctx.settings = buildSettings(ctx);
     root.appendChild(ctx.settings.el);
     loadPrefs(ctx);
@@ -459,6 +473,7 @@
     bridge.on("messages", (data) => { applyMessages(ctx, data); });
     bridge.on("typing", (data) => { applyTyping(ctx, data); });
     bridge.on("here", (data) => { applyHere(ctx, data); });
+    bridge.on("calls", (data) => { applyCalls(ctx, data); });
     // bridge progress notes and internal failures go to the phone's log (trail.txt), not on screen
     const toTrail = (kind) => (data) => {
       try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST " + kind + " " + (data && data.where || "") + ": " + String(data && data.message || "").slice(0, 400) }).catch(() => {}); } catch (e) {}
@@ -1064,6 +1079,10 @@
           </div>
           <div class="gh-conv-sub"></div>
         </div>
+        <div class="gh-conv-calls">
+          <button class="gh-icon-btn gh-hit" data-act="voice-call" aria-label="Voice call"></button>
+          <button class="gh-icon-btn gh-hit" data-act="video-call" aria-label="Video call"></button>
+        </div>
         <div class="gh-conv-header-avatar"></div>
       </div>
       <div class="gh-messages gh-scroll">
@@ -1166,6 +1185,10 @@
     conv.textarea.addEventListener("blur", () => setTimeout(() => hideMentions(ctx), 150));
     // tap the name or picture at the top of a chat: that chat's options (wallpaper)
     screen.querySelector(".gh-conv-title-row").addEventListener("click", () => openChatSheet(ctx));
+    screen.querySelector('[data-act="voice-call"]').appendChild(icon("call", 21));
+    screen.querySelector('[data-act="video-call"]').appendChild(icon("videoCall", 23));
+    screen.querySelector('[data-act="voice-call"]').addEventListener("click", () => startCallFrom(ctx, false));
+    screen.querySelector('[data-act="video-call"]').addEventListener("click", () => startCallFrom(ctx, true));
     screen.querySelector(".gh-conv-header-avatar").addEventListener("click", () => openChatSheet(ctx));
     const touched = () => { conv.userTouched = true; };
     conv.messages.addEventListener("touchstart", touched, { passive: true });
@@ -2778,6 +2801,187 @@
     };
     await paint();
     openSheetGeneric(s.backdrop, s.sheet);
+  }
+
+  // =====================================================================================================
+  // Calls (voice + video), Ghost's own screen over Snapchat's calling engine (bridge startCall / answerCall /
+  // endCall / setMicOn / setCameraOn / flipCamera, and the "calls" event). The bridge drops the live
+  // <video>/<audio> elements into .gh-call-remote / .gh-call-local / .gh-call-audio below.
+  // =====================================================================================================
+  function buildCallScreen(ctx) {
+    const wrap = el("div", "gh-call");
+    wrap.innerHTML = `
+      <div class="gh-call-bg"></div>
+      <div class="gh-call-remote"></div>
+      <div class="gh-call-audio"></div>
+      <div class="gh-call-center"><div class="gh-call-av"></div><div class="gh-call-name"></div><div class="gh-call-status"></div></div>
+      <div class="gh-call-top">
+        <button class="gh-call-min gh-hit" aria-label="Minimise call"></button>
+        <div class="gh-call-top-text"><div class="gh-call-top-name"></div><div class="gh-call-top-status"></div></div>
+        <div style="width:44px"></div>
+      </div>
+      <div class="gh-call-local"></div>
+      <div class="gh-call-controls">
+        <button class="gh-call-btn" data-act="speaker"><span class="gh-call-btn-ic"></span><span>Speaker</span></button>
+        <button class="gh-call-btn" data-act="camera"><span class="gh-call-btn-ic"></span><span>Camera</span></button>
+        <button class="gh-call-btn" data-act="mute"><span class="gh-call-btn-ic"></span><span>Mute</span></button>
+        <button class="gh-call-btn" data-act="flip"><span class="gh-call-btn-ic"></span><span>Flip</span></button>
+        <button class="gh-call-btn gh-call-end" data-act="end"><span class="gh-call-btn-ic"></span><span>End</span></button>
+      </div>
+      <div class="gh-call-incoming">
+        <button class="gh-call-btn gh-call-end" data-act="decline"><span class="gh-call-btn-ic"></span><span>Decline</span></button>
+        <button class="gh-call-btn gh-call-accept" data-act="accept-voice"><span class="gh-call-btn-ic"></span><span>Voice</span></button>
+        <button class="gh-call-btn gh-call-accept" data-act="accept-video"><span class="gh-call-btn-ic"></span><span>Video</span></button>
+      </div>`;
+    const q = (s) => wrap.querySelector(s);
+    const setIc = (act, name) => { const b = q(`[data-act="${act}"] .gh-call-btn-ic`); b.innerHTML = ""; b.appendChild(icon(name, 26)); };
+    setIc("speaker", "speakerIc"); setIc("camera", "videoCall"); setIc("mute", "mic"); setIc("flip", "flip"); setIc("end", "callEnd");
+    setIc("decline", "callEnd"); setIc("accept-voice", "call"); setIc("accept-video", "videoCall");
+    q(".gh-call-min").appendChild(icon("chevronDown", 26));
+    const c = { el: wrap, speaker: false, openedFor: null, dismissedIncoming: new Set(), liveSince: new Map(), timer: null };
+    const cur = () => ctx.state.activeCall;
+    const act = (name, fn) => q(`[data-act="${name}"]`).addEventListener("click", (e) => { e.stopPropagation(); haptic(name === "end" || name === "decline" ? "medium" : "light"); fn(); });
+    act("end", () => { const k = cur(); if (k) api.endCall(k.conversationId).catch(() => {}); closeCallScreen(ctx, true); });
+    act("decline", () => { const k = cur(); if (k) { c.dismissedIncoming.add(k.conversationId + "|" + k.startedAt); api.endCall(k.conversationId).catch(() => {}); } closeCallScreen(ctx, true); });
+    act("accept-voice", () => { const k = cur(); if (k) api.answerCall(k.conversationId, false).catch((e) => ctx.showToast("Couldn't answer: " + (e && e.message || e))); stopRing(); });
+    act("accept-video", () => { const k = cur(); if (k) api.answerCall(k.conversationId, true).catch((e) => ctx.showToast("Couldn't answer: " + (e && e.message || e))); stopRing(); });
+    act("mute", () => { const k = cur(); if (k) api.setMicOn(!k.micOn).catch(() => {}); });
+    act("camera", () => { const k = cur(); if (k) api.setCameraOn(k.conversationId, !k.cameraOn).catch(() => ctx.showToast("Camera isn't available")); });
+    act("flip", () => { api.flipCamera().catch(() => {}); });
+    act("speaker", () => {
+      c.speaker = !c.speaker;
+      q('[data-act="speaker"]').dataset.on = c.speaker ? "1" : "0";
+      try { window.webkit.messageHandlers.dg.postMessage({ op: "speaker", on: c.speaker }).catch(() => {}); } catch (e) {}
+    });
+    q(".gh-call-min").addEventListener("click", () => { haptic("light"); wrap.dataset.open = "0"; updateCallBar(ctx); });
+    // tap the video to hide/show the controls, like FaceTime
+    wrap.addEventListener("click", (e) => { if (wrap.dataset.mode === "live" && wrap.dataset.video === "1" && !e.target.closest("button, .gh-call-local")) wrap.dataset.chrome = wrap.dataset.chrome === "0" ? "1" : "0"; });
+    // your own picture: drag it anywhere, it snaps to the nearest corner
+    const pip = q(".gh-call-local");
+    let drag = null;
+    pip.addEventListener("touchstart", (e) => { const t = e.touches[0], r = pip.getBoundingClientRect(); drag = { dx: t.clientX - r.left, dy: t.clientY - r.top }; pip.style.transition = "none"; }, { passive: true });
+    pip.addEventListener("touchmove", (e) => {
+      if (!drag) return; e.preventDefault();
+      const t = e.touches[0], W = wrap.clientWidth, H = wrap.clientHeight, w = pip.offsetWidth, h = pip.offsetHeight;
+      pip.style.left = clamp(t.clientX - drag.dx, 8, W - w - 8) + "px"; pip.style.top = clamp(t.clientY - drag.dy, 8, H - h - 8) + "px"; pip.style.right = "auto"; pip.style.bottom = "auto";
+    }, { passive: false });
+    pip.addEventListener("touchend", () => {
+      if (!drag) return; drag = null;
+      const W = wrap.clientWidth, H = wrap.clientHeight, r = pip.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+      const left = r.left - wr.left + r.width / 2 < W / 2, top = r.top - wr.top + r.height / 2 < H / 2;
+      pip.style.transition = "";
+      pip.style.left = left ? "14px" : (W - r.width - 14) + "px";
+      pip.style.top = top ? "calc(var(--gh-safe-t) + 64px)" : (H - r.height - 150) + "px";
+    }, { passive: true });
+    pip.addEventListener("click", (e) => { e.stopPropagation(); api.flipCamera().catch(() => {}); }); // tap your picture to flip
+    return c;
+  }
+  // ringtone for incoming calls: a soft two-tone ring made on the spot (no sound files), plus haptics
+  let ring = null;
+  function startRing() {
+    if (ring) return;
+    ring = { t: null, ac: null };
+    const beat = () => {
+      haptic("heavy");
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        ring.ac = ring.ac || new AC();
+        const ac = ring.ac, now = ac.currentTime;
+        for (const [f, at] of [[880, 0], [660, 0.18], [880, 0.5], [660, 0.68]]) {
+          const o = ac.createOscillator(), g = ac.createGain();
+          o.type = "sine"; o.frequency.value = f;
+          g.gain.setValueAtTime(0, now + at); g.gain.linearRampToValueAtTime(0.18, now + at + 0.02); g.gain.linearRampToValueAtTime(0, now + at + 0.16);
+          o.connect(g).connect(ac.destination); o.start(now + at); o.stop(now + at + 0.18);
+        }
+      } catch (e) {}
+    };
+    beat();
+    ring.t = setInterval(beat, 2200);
+  }
+  function stopRing() { if (!ring) return; clearInterval(ring.t); try { ring.ac && ring.ac.close(); } catch (e) {} ring = null; }
+  function callPeer(ctx, call) {
+    const cd = ctx.state.convById.get(call.conversationId) || {};
+    const who = cd.isGroup ? { name: cd.title, convId: cd.id, members: cd.participants || [] } : ((cd.participants && cd.participants[0]) || { name: cd.title || "Call" });
+    return { cd, who, name: cd.title || who.name || "Call" };
+  }
+  function fmtCallTime(ms) { const s = Math.max(0, Math.floor(ms / 1000)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0"); }
+  function applyCalls(ctx, data) {
+    const calls = (data && data.calls) || [];
+    const c = ctx.callScreen, wrap = c.el;
+    const prev = ctx.state.activeCall;
+    // incoming beats everything; then the call you're in
+    const incoming = calls.find((k) => k.state === "incoming" || (k.state === "none" && k.remote.some((r) => r.state === "outgoing")));
+    const live = calls.find((k) => k.state === "incall" || k.state === "answered" || k.state === "outgoing");
+    const call = live || incoming || null;
+    ctx.state.activeCall = call;
+    if (!call) {
+      stopRing();
+      if (prev && c.liveSince.has(prev.conversationId)) ctx.showToast("Call ended · " + fmtCallTime(Date.now() - c.liveSince.get(prev.conversationId)));
+      c.liveSince.clear();
+      closeCallScreen(ctx, false);
+      return;
+    }
+    const mode = call === live ? (call.state === "outgoing" ? "outgoing" : "live") : "incoming";
+    if (mode === "incoming" && c.dismissedIncoming.has(call.conversationId + "|" + call.startedAt)) return;
+    const { who, name } = callPeer(ctx, call);
+    if (mode === "live" && !c.liveSince.has(call.conversationId)) c.liveSince.set(call.conversationId, Date.now());
+    if (mode === "incoming") startRing(); else stopRing();
+    const video = call.remote.some((r) => r.video) || call.cameraOn;
+    wrap.dataset.mode = mode;
+    wrap.dataset.video = video ? "1" : "0";
+    wrap.dataset.remoteVideo = mode === "live" && call.remote.some((r) => r.video) ? "1" : "0"; // (ringing: their picture, not a black box)
+    wrap.querySelector('[data-act="mute"]').dataset.on = call.micOn ? "0" : "1";
+    wrap.querySelector('[data-act="camera"]').dataset.on = call.cameraOn ? "1" : "0";
+    if (c.openedFor !== call.conversationId) {
+      c.openedFor = call.conversationId;
+      const av = wrap.querySelector(".gh-call-av"); av.innerHTML = ""; av.appendChild(makeAvatar(who, 132));
+      const bg = wrap.querySelector(".gh-call-bg"); const [g1, g2] = gradientFor({ id: call.conversationId }, name);
+      bg.style.background = `radial-gradient(circle at 50% 30%, ${g1}, transparent 70%), linear-gradient(180deg, ${g2}, #05070a)`;
+      wrap.querySelector(".gh-call-name").textContent = name;
+      wrap.querySelector(".gh-call-top-name").textContent = name;
+      wrap.dataset.open = "1"; wrap.dataset.chrome = "1";
+    }
+    if (mode === "incoming" && wrap.dataset.open !== "1") wrap.dataset.open = "1";
+    const status = () => {
+      const k = ctx.state.activeCall; if (!k) return "";
+      const m = wrap.dataset.mode;
+      if (m === "incoming") return (k.remote.some((r) => r.video) ? "Incoming video call" : "Incoming call") + "…";
+      if (m === "outgoing") return k.remote.some((r) => r.state === "incoming" || r.state === "outgoing") ? "Ringing…" : "Calling…";
+      const since = c.liveSince.get(k.conversationId);
+      return since ? fmtCallTime(Date.now() - since) : "Connecting…";
+    };
+    const paint = () => { const t = status(); wrap.querySelector(".gh-call-status").textContent = t; wrap.querySelector(".gh-call-top-status").textContent = t; updateCallBar(ctx); };
+    paint();
+    clearInterval(c.timer); c.timer = setInterval(paint, 1000);
+  }
+  function closeCallScreen(ctx, userEnded) {
+    const c = ctx.callScreen;
+    stopRing();
+    clearInterval(c.timer);
+    c.el.dataset.open = "0"; c.openedFor = null;
+    if (userEnded) ctx.state.activeCall = null;
+    updateCallBar(ctx);
+  }
+  function updateCallBar(ctx) {
+    const bar = ctx.callBar, k = ctx.state.activeCall, c = ctx.callScreen;
+    const show = !!k && c.el.dataset.open !== "1" && k.state !== "none";
+    bar.dataset.show = show ? "1" : "0";
+    if (show) {
+      const since = c.liveSince.get(k.conversationId);
+      bar.querySelector(".gh-call-bar-text").textContent = callPeer(ctx, k).name + " · " + (since ? fmtCallTime(Date.now() - since) : "Calling…");
+    }
+  }
+  async function startCallFrom(ctx, video) {
+    const convId = ctx.state.currentConvId;
+    if (!convId) return;
+    haptic("medium");
+    const c = ctx.callScreen;
+    // show the screen right away; the engine's state catches up in a moment
+    ctx.state.activeCall = { conversationId: convId, state: "outgoing", remote: [], micOn: true, cameraOn: !!video, startedAt: Date.now() };
+    c.openedFor = null;
+    applyCalls(ctx, { calls: [ctx.state.activeCall] });
+    try { await api.startCall(convId, !!video); }
+    catch (e) { gtrail("call start failed " + (e && e.message || e)); ctx.showToast("Couldn't start the call"); closeCallScreen(ctx, true); }
   }
 
   // =====================================================================================================

@@ -1562,3 +1562,68 @@ input, textarea {
 .gh-avatar-group[data-n="3"] .gh-avatar-face[data-i="0"] { left: -14%; bottom: -2%; }
 .gh-avatar-group[data-n="3"] .gh-avatar-face[data-i="1"] { right: -14%; bottom: -2%; }
 .gh-avatar-group[data-n="3"] .gh-avatar-face[data-i="2"] { left: 19%; bottom: -10%; width: 64%; z-index: 1; }
+
+/* ---- calls ------------------------------------------------------------------------------------------------ */
+.gh-conv-calls { display: flex; align-items: center; gap: 0; margin-right: 2px; color: var(--gh-accent); }
+.gh-conv-calls .gh-icon-btn { min-width: 38px; }
+.gh-call {
+  position: absolute; inset: 0; z-index: 40; background: #05070a; color: #fff; overflow: hidden;
+  opacity: 0; pointer-events: none; transform: scale(1.04); transition: opacity 0.28s ease, transform 0.32s var(--gh-spring);
+}
+.gh-call[data-open="1"] { opacity: 1; pointer-events: auto; transform: none; }
+.gh-call-bg { position: absolute; inset: 0; filter: saturate(1.2); }
+.gh-call-bg::after { content: ""; position: absolute; inset: 0; background: radial-gradient(circle at 50% 110%, rgba(0,0,0,0.65), transparent 60%); }
+.gh-call-remote { position: absolute; inset: 0; display: grid; grid-template-columns: 1fr; gap: 2px; background: #000; opacity: 0; transition: opacity 0.3s ease; }
+.gh-call[data-remote-video="1"] .gh-call-remote { opacity: 1; }
+.gh-call-remote[data-count="2"] { grid-template-rows: 1fr 1fr; }
+.gh-call-remote[data-count="3"], .gh-call-remote[data-count="4"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.gh-call-remote video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+.gh-call-audio { position: absolute; width: 0; height: 0; overflow: hidden; }
+.gh-call-center { position: absolute; left: 0; right: 0; top: 22%; display: flex; flex-direction: column; align-items: center; gap: 10px; transition: opacity 0.3s ease; }
+.gh-call[data-remote-video="1"] .gh-call-center { opacity: 0; pointer-events: none; }
+.gh-call-av .gh-avatar { width: 132px !important; height: 132px !important; box-shadow: 0 16px 50px rgba(0,0,0,0.5); }
+.gh-call[data-mode="incoming"] .gh-call-av, .gh-call[data-mode="outgoing"] .gh-call-av { animation: gh-call-pulse 1.8s ease-in-out infinite; border-radius: 50%; }
+@keyframes gh-call-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.28); } 50% { box-shadow: 0 0 0 22px rgba(255,255,255,0); } }
+.gh-call-name { font-size: 30px; font-weight: 700; margin-top: 14px; text-shadow: 0 2px 10px rgba(0,0,0,0.4); }
+.gh-call-status { font-size: 17px; opacity: 0.8; font-variant-numeric: tabular-nums; }
+.gh-call-top { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; padding: calc(var(--gh-safe-t) + 4px) 8px 18px; background: linear-gradient(rgba(0,0,0,0.45), transparent); transition: opacity 0.25s ease; }
+.gh-call-min { color: #fff; }
+.gh-call-top-text { text-align: center; opacity: 0; transition: opacity 0.25s ease; }
+.gh-call[data-remote-video="1"] .gh-call-top-text { opacity: 1; }
+.gh-call-top-name { font-weight: 700; font-size: 16px; }
+.gh-call-top-status { font-size: 13px; opacity: 0.8; font-variant-numeric: tabular-nums; }
+.gh-call-local {
+  position: absolute; right: 14px; top: calc(var(--gh-safe-t) + 64px); width: 104px; height: 150px; border-radius: 16px; overflow: hidden;
+  background: #111; box-shadow: 0 10px 30px rgba(0,0,0,0.5); display: none; transition: left 0.3s var(--gh-spring), top 0.3s var(--gh-spring); z-index: 2; touch-action: none;
+}
+.gh-call-local[data-count="1"] { display: block; }
+.gh-call-local video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+.gh-call-controls, .gh-call-incoming {
+  position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: center; gap: 14px;
+  padding: 18px 12px calc(var(--gh-safe-b) + 22px); background: linear-gradient(transparent, rgba(0,0,0,0.55)); transition: opacity 0.25s ease, transform 0.3s var(--gh-spring);
+}
+.gh-call-incoming { gap: 34px; display: none; }
+.gh-call[data-mode="incoming"] .gh-call-incoming { display: flex; }
+.gh-call[data-mode="incoming"] .gh-call-controls, .gh-call[data-mode="incoming"] .gh-call-local { display: none; }
+.gh-call[data-chrome="0"] .gh-call-controls, .gh-call[data-chrome="0"] .gh-call-top { opacity: 0; pointer-events: none; }
+.gh-call[data-chrome="0"] .gh-call-controls { transform: translateY(30px); }
+.gh-call-btn { display: flex; flex-direction: column; align-items: center; gap: 7px; font-size: 12px; color: rgba(255,255,255,0.9); background: none; }
+.gh-call-btn-ic {
+  width: 58px; height: 58px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.18); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); transition: background 0.2s ease, color 0.2s ease, transform 0.15s ease;
+}
+.gh-call-btn:active .gh-call-btn-ic { transform: scale(0.9); }
+.gh-call-btn[data-on="1"] .gh-call-btn-ic { background: #fff; color: #111; }
+.gh-call-end .gh-call-btn-ic { background: #ff3b30; color: #fff; }
+.gh-call-accept .gh-call-btn-ic { background: #34c759; color: #fff; }
+.gh-call-incoming .gh-call-btn-ic { width: 68px; height: 68px; }
+.gh-call[data-mode="outgoing"] [data-act="flip"], .gh-call[data-video="0"] [data-act="flip"] { opacity: 0.45; }
+.gh-call-bar {
+  position: absolute; left: 10px; right: 10px; top: calc(var(--gh-safe-t) + 4px); z-index: 35; height: 38px; border-radius: 19px;
+  display: flex; align-items: center; gap: 8px; padding: 0 14px; background: #34c759; color: #fff; font-weight: 600; font-size: 14px;
+  transform: translateY(-80px); transition: transform 0.3s var(--gh-spring); box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+}
+.gh-call-bar[data-show="1"] { transform: none; }
+.gh-call-bar-dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; animation: gh-pulse 1.2s ease-in-out infinite; }
+.gh-call-bar-text { flex: 1; min-width: 0; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.gh-call-bar-hint { font-weight: 500; opacity: 0.85; font-size: 13px; }
