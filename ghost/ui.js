@@ -715,6 +715,9 @@
     for (const [id, row] of Array.from(home.rows)) {
       if (!seen.has(id)) { row.el.remove(); home.rows.delete(id); }
     }
+    // WebKit on iOS sometimes keeps showing the old pixels of a scrolling list after its rows change, until the
+    // list is scrolled (device report): a 1px scroll there and back forces the repaint, invisibly
+    requestAnimationFrame(() => { const t = list.scrollTop; list.scrollTop = t + 1; list.scrollTop = t; });
     if (!seen.size) {
       if (!list.querySelector(".gh-empty")) {
         const e = el("div", "gh-empty");
