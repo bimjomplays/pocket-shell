@@ -397,17 +397,17 @@
     safe("user-selector", () => {
       const factories = webpackRequire && webpackRequire.m, s = state();
       if (!factories || !s) return;
-      const probeId = meId();
       for (const id of Object.keys(factories)) {
         const src = String(factories[id]);
         if (!src.includes("mutualOutgoingAndBlockedFriends") || !src.includes("fetchPublicInfo") || !src.includes("publicUsers")) continue;
         const exp = webpackRequire(id);
+        // pick it by its shape, without calling the others (device run 9: calling every export threw):
+        // `e=>t=>e?u(t).get(e):void 0`
         for (const k of Object.keys(exp)) {
-          const fn = safe("sel-export", () => exp[k], null);
-          if (typeof fn !== "function" || fn.length !== 1) continue;
-          const r = safe("sel-probe", () => { const g = fn(probeId); return typeof g === "function" ? g(s) : undefined; }, undefined);
-          if (r && typeof r === "object" && ("display_name" in r || "mutable_username" in r || "username" in r)) {
-            userSelector = fn; trail("user-selector", "found in module " + id); return;
+          const fn = (() => { try { return exp[k]; } catch (e) { return null; } })();
+          const src2 = typeof fn === "function" ? String(fn) : "";
+          if (src2.length < 80 && /=>\s*\w+\s*=>/.test(src2) && src2.includes(".get(") && src2.includes("void 0")) {
+            userSelector = fn; trail("user-selector", "found in module " + id + " export " + k); return;
           }
         }
       }
@@ -417,7 +417,9 @@
   }
   function publicUser(id) {
     const sel = meId() ? snapUserSelector() : null;
-    const viaSnap = sel && safe("sel-get", () => sel(id)(state()), null);
+    // its Map may be keyed by the uuid string or by Snapchat's {id, str} object: try both
+    let viaSnap = sel && safe("sel-get", () => sel(id)(state()), null);
+    if (!viaSnap && sel && idObjs.get(id)) viaSnap = safe("sel-get-obj", () => sel(idObjs.get(id))(state()), null);
     if (viaSnap && typeof viaSnap === "object") {
       const name = firstString(viaSnap.display_name, viaSnap.displayName, viaSnap.display, viaSnap.mutable_username, viaSnap.username);
       if (name) return { id, name, username: firstString(viaSnap.mutable_username, viaSnap.username), avatarUrl: undefined,

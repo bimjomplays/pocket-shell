@@ -24,6 +24,7 @@
   window.__ghostUIBooted = true;
 
   const cssText = typeof GHOST_CSS !== "undefined" ? GHOST_CSS : "";
+  const gtrail = (text) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST gif " + String(text).slice(0, 300) }).catch(() => {}); } catch (e) {} };
 
   // =====================================================================================================
   // Small utilities
@@ -1140,7 +1141,13 @@
       }
       case "gif": {
         const b = el("div", "gh-bubble gh-gif-bubble");
-        const media = mediaEl(m.media && m.media[0], { autoplay: true, ctx, message: m });
+        // Snapchat's page only allows images from its own hosts, so a giphy.com URL is fetched by the app
+        // (native fetch, GIPHY hosts only) and shown as a data: URL, like the Snapchat-look app does
+        let ref = m.media && m.media[0];
+        const gid = ref && ref.url && (ref.url.match(/giphy\.com\/media\/([A-Za-z0-9]+)\//) || [])[1];
+        if (gid) ref = { type: "image", url: "" };
+        const media = mediaEl(ref, { autoplay: true, ctx, message: m });
+        if (gid) giphyPreviewUrl(gid).then((r) => { const img = media.querySelector("img"); if (img && r && r.dataUrl) img.src = r.dataUrl; else gtrail("gif show failed " + gid + " " + (r && r.error)); });
         media.appendChild(tickMetaEl(m, isMe, "gh-media-meta"));
         b.appendChild(media);
         return b;
@@ -1666,7 +1673,7 @@
       s.body.append(n, input, save);
       return;
     }
-    if (res.error) { s.body.innerHTML = ""; const n = el("div", "gh-gif-note"); n.textContent = res.error; s.body.appendChild(n); return; }
+    if (res.error) { gtrail("search error " + res.error); s.body.innerHTML = ""; const n = el("div", "gh-gif-note"); n.textContent = res.error; s.body.appendChild(n); return; }
     if (!res.results || !res.results.length) { s.body.innerHTML = ""; const n = el("div", "gh-gif-note"); n.textContent = "No GIFs found"; s.body.appendChild(n); return; }
     s.body.innerHTML = "";
     paintGifGrid(ctx, s, res.results);
@@ -1692,13 +1699,14 @@
     tile.addEventListener("click", async () => {
       haptic();
       const r = await giphyFileUrl(g.id);
+      gtrail("picked " + g.id + (r && r.dataUrl ? " loaded " + r.dataUrl.length : " load failed " + (r && r.error)));
       if (!r || !r.dataUrl) { ctx.showToast("Couldn't load that GIF"); return; }
       const convId = ctx.state.currentConvId;
       const bin = atob(r.dataUrl.slice(r.dataUrl.indexOf(",") + 1));
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       const blob = new Blob([bytes], { type: "image/gif" });
-      try { await api.sendMedia(convId, blob, { kind: "gif" }); } catch (e) { ctx.showToast("Couldn't send that GIF"); }
+      try { await api.sendMedia(convId, blob, { kind: "gif" }); gtrail("sent " + g.id); } catch (e) { gtrail("send failed " + (e && e.message || e)); ctx.showToast("Couldn't send that GIF"); }
       const recents = await storage.get("ghostGifRecents", []);
       await storage.set("ghostGifRecents", [{ id: g.id, w: g.w, h: g.h }, ...recents.filter((r2) => r2.id !== g.id)].slice(0, 40));
       closeSheetGeneric(s.backdrop, s.sheet);
