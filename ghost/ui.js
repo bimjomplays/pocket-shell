@@ -284,30 +284,55 @@
       storage._mem.set(key, value);
     },
   };
-  async function giphyGetJson(url) {
-    if (typeof window.__ghostGiphyMock === "function") return null; // callers check the mock first
-    try {
-      const bytes = await gmBytes(url);
-      return { json: JSON.parse(new TextDecoder().decode(bytes)) };
-    } catch (e) {
-      return { error: String(e && e.message || e), retryable: true };
-    }
+  // Tenor (the default GIF source since 2026-09-27). Tenor's public API was shut down on 2026-06-30, but tenor.com's
+  // own pages still carry their results as JSON in <script id="store-cache"> (search: universal.search[*].results,
+  // home page: gifs.featured.results), each with Tenor's media_formats (tinywebp, mediumgif, gif, mp4...). Fetched
+  // through the app's native fetch (tenor.com / *.tenor.com allowed) - if Tenor changes its site, this is the part
+  // to update.
+  const tenorCache = new Map();
+  function tenorItem(r) {
+    const f = (r && r.media_formats) || {};
+    const pv = f.tinywebp || f.tinygif || f.webp || f.gifpreview;
+    const small = (x) => x && x.url && (!x.size || x.size < 4e6);
+    const file = small(f.mediumgif) ? f.mediumgif : small(f.gif) ? f.gif : f.tinygif;
+    const dims = (pv && pv.dims) || (file && file.dims) || [200, 200];
+    return pv && file && r.id ? { src: "tenor", id: String(r.id), w: dims[0] || 200, h: dims[1] || 200, p: pv.url, f: file.url } : null;
   }
-  async function giphySearch(q, offset, rating) {
-    if (typeof window.__ghostGiphyMock === "function") return window.__ghostGiphyMock("search", { q, offset, rating });
-    const key = await storage.get("giphyKey", "");
-    if (!key) return { needKey: true };
-    const params = new URLSearchParams({ api_key: key, limit: "24", offset: String(offset || 0) });
-    if (q) params.set("q", q);
-    if (/^(g|pg|pg-13|r)$/.test(rating || "")) params.set("rating", rating);
-    const r = await giphyGetJson(`https://api.giphy.com/v1/gifs/${q ? "search" : "trending"}?${params}`);
-    if (!r || !r.json) return r || { error: "No response", retryable: true };
-    const results = (r.json.data || []).filter((g) => GIPHY_ID_RE.test(g.id)).map((g) => {
-      const f = (g.images && g.images.fixed_width) || {};
-      return { id: g.id, w: +f.width || 200, h: +f.height || 200 };
-    });
-    const p = r.json.pagination || {};
-    return { results, next: (p.offset || 0) + (p.count || results.length), total: p.total_count };
+  async function tenorSearch(q) {
+    if (typeof window.__ghostGiphyMock === "function") return window.__ghostGiphyMock("search", { q, offset: 0 });
+    const key = (q || "").toLowerCase().trim();
+    const hit = tenorCache.get(key);
+    if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.res;
+    const slug = key.split(/\s+/).filter(Boolean).map(encodeURIComponent).join("-");
+    const url = key ? "https://tenor.com/search/" + slug + "-gifs" : "https://tenor.com/";
+    let data;
+    try {
+      const html = new TextDecoder().decode(await gmBytes(url));
+      const m = /<script[^>]*id="store-cache"[^>]*>([\s\S]*?)<\/script>/.exec(html);
+      if (!m) throw new Error("Tenor changed its page (no results data)");
+      data = JSON.parse(m[1]);
+    } catch (e) { return { error: "Couldn't reach Tenor - " + String(e && e.message || e), retryable: true }; }
+    let raw = [];
+    if (key) { const sr = (data.universal && data.universal.search) || {}; for (const v of Object.values(sr)) if (v && Array.isArray(v.results)) { raw = v.results; break; } }
+    else raw = (data.gifs && data.gifs.featured && data.gifs.featured.results) || [];
+    const seen = new Set();
+    const results = raw.map(tenorItem).filter((g) => g && !seen.has(g.id) && seen.add(g.id));
+    const res = { results };
+    if (results.length) tenorCache.set(key, { at: Date.now(), res });
+    return res;
+  }
+  // preview/file for any saved GIF entry: Tenor ones carry their URLs, older GIPHY ones only an id
+  async function gifPreviewFor(g) {
+    if (g && g.src === "tenor" && typeof window.__ghostGiphyMock !== "function") {
+      try { return { dataUrl: bytesToDataUrl(await gmBytes(g.p), /\.gif(\?|$)/.test(g.p) ? "image/gif" : "image/webp") }; } catch (e) { return { error: String(e && e.message || e) }; }
+    }
+    return giphyPreviewUrl(g.id);
+  }
+  async function gifFileFor(g) {
+    if (g && g.src === "tenor" && typeof window.__ghostGiphyMock !== "function") {
+      try { return { dataUrl: bytesToDataUrl(await gmBytes(g.f), "image/gif") }; } catch (e) { return { error: String(e && e.message || e) }; }
+    }
+    return giphyFileUrl(g.id);
   }
   async function giphyPreviewUrl(id) {
     if (typeof window.__ghostGiphyMock === "function") return window.__ghostGiphyMock("preview", { id });
@@ -3139,8 +3164,6 @@
     media(ctx, body) {
       let g = setGroup(body);
       setRow(g, { label: "Autoplay GIFs", toggle: { get: () => !!pref("autoplayGifs"), set: (v) => setPref(ctx, "autoplayGifs", v) } });
-      g = setGroup(body, "GIF Content Rating");
-      setChoice(g, [["g", "G — everyone"], ["pg", "PG"], ["pg-13", "PG-13"], ["r", "R"]], () => nativeSetting("gifRating", "pg-13"), (v) => setNativeSetting("gifRating", v));
       g = setGroup(body);
       setRow(g, { label: "Clear Recent Stickers", danger: true, onClick: async () => { await storage.set("ghostStickerRecents", []); ctx.showToast("Recent stickers cleared"); } });
       setRow(g, { label: "Clear Recent GIFs", danger: true, onClick: async () => { await storage.set("ghostGifRecents", []); ctx.showToast("Recent GIFs cleared"); } });
@@ -4113,39 +4136,6 @@
       ctx.showToast("Added to Favorite Stickers");
     } catch (e) { ctx.showToast(e && e.message ? e.message : "Couldn't save that sticker"); }
   }
-  async function renderSavedStickers(ctx, s) {
-    const mine = s.tab === "mine";
-    const list = await storage.get(mine ? "ghostMyStickers" : "ghostStickerFavs", []);
-    if (!list.length) {
-      s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Hold a sticker someone sent you and tap \"Add to Favorite Stickers\"" }));
-      return;
-    }
-    for (const it of list) {
-      const tile = el("button", "gh-sticker-tile gh-press");
-      const img = el("img"); img.alt = "";
-      wallDB.get((mine ? "mysticker:" : "favsticker:") + it.id).then((b) => { if (b) img.src = URL.createObjectURL(b); }).catch(() => {});
-      tile.appendChild(img);
-      let held = null;
-      tile.addEventListener("touchstart", () => { held = setTimeout(async () => { // hold to remove
-        held = "fired"; haptic("medium");
-        const cur = await storage.get(mine ? "ghostMyStickers" : "ghostStickerFavs", []);
-        await storage.set(mine ? "ghostMyStickers" : "ghostStickerFavs", cur.filter((x) => x.id !== it.id));
-        wallDB.del((mine ? "mysticker:" : "favsticker:") + it.id);
-        tile.remove(); ctx.showToast("Removed");
-      }, 600); }, { passive: true });
-      tile.addEventListener("touchend", () => { if (held !== "fired") clearTimeout(held); }, { passive: true });
-      tile.addEventListener("click", async () => {
-        if (held === "fired") { held = null; return; }
-        const convId = ctx.state.currentConvId; if (!convId) return;
-        haptic(); closeSheetGeneric(s.backdrop, s.sheet);
-        try {
-          if (mine) { const b = await wallDB.get("mysticker:" + it.id); await api.sendMedia(convId, new File([b], "sticker.png", { type: "image/png" }), { kind: "sticker" }); }
-          else await api.sendStickerRaw(convId, it.content, it.contentType);
-        } catch (e) { gtrail("saved sticker send failed " + (e && e.message)); ctx.showToast("Couldn't send that sticker"); }
-      });
-      s.body.appendChild(tile);
-    }
-  }
   function buildStickerSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-gif-sheet gh-sticker-sheet");
@@ -4156,9 +4146,8 @@
       <div class="gh-gif-tabs">
         <button class="gh-gif-tab" data-tab="recent">Recent</button>
         <button class="gh-gif-tab" data-tab="favs">Favorites</button>
-        <button class="gh-gif-tab" data-tab="solo">Bitmoji</button>
-        <button class="gh-gif-tab" data-tab="duo">With friend</button>
         <button class="gh-gif-tab" data-tab="gifs">GIFs</button>
+        <button class="gh-gif-tab" data-tab="solo">Bitmoji</button>
       </div>
       <div class="gh-gif-body gh-sticker-grid gh-scroll"></div>
     `;
@@ -4176,7 +4165,11 @@
       b.addEventListener("click", () => { haptic("light"); s.tab = b.dataset.tab; renderStickers(ctx, s); });
     }
     let t;
-    input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { s.query = input.value.trim().toLowerCase(); renderStickers(ctx, s); }, s.tab === "gifs" ? 300 : 200); });
+    input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => {
+      s.query = input.value.trim().toLowerCase();
+      if (s.query && (s.tab === "recent" || s.tab === "favs")) s.tab = "gifs"; // typing in Recent/Favorites searches GIFs
+      renderStickers(ctx, s);
+    }, s.tab === "gifs" ? 300 : 200); });
     s.body.addEventListener("scroll", () => { if (s.tab !== "gifs" && s.body.scrollTop + s.body.clientHeight > s.body.scrollHeight - 400) moreStickers(ctx, s); }, { passive: true });
     return s;
   }
@@ -4196,11 +4189,9 @@
       p = stickerPeople(ctx);
     }
     if (!p.me) { ctx.showToast("Your Bitmoji hasn't loaded yet"); return; }
-    s.tabs.duo.style.display = p.friend ? "" : "none";
-    s.tabs.duo.textContent = p.friend ? "With " + p.friendName : "";
     s.query = ""; s.input.value = "";
-    const recents = await storage.get("ghostStickerRecents", []);
-    s.tab = recents.length ? "recent" : "solo";
+    const recents = (await storage.get("ghostStickerRecents", [])).length + (await storage.get("ghostGifRecents", [])).length;
+    s.tab = recents ? "recent" : "solo";
     openSheetGeneric(s.backdrop, s.sheet);
     renderStickers(ctx, s);
   }
@@ -4209,7 +4200,7 @@
     s.body.innerHTML = "";
     s.body.scrollTop = 0;
     if (s.gif) s.gif.seq++; // a GIF search still loading must not land in another tab
-    s.input.placeholder = s.tab === "gifs" ? "Search GIPHY" : "Search stickers";
+    s.input.placeholder = s.tab === "gifs" ? "Search Tenor" : s.tab === "solo" ? "Search stickers" : "Search GIFs";
     s.body.classList.toggle("gh-sticker-grid", s.tab !== "gifs");
     if (s.tab === "gifs") { // the GIF picker, inside the sticker sheet
       const gs = s.gif || (s.gif = { backdrop: s.backdrop, sheet: s.sheet, body: s.body, tabs: {}, tab: "trending", query: "", seq: 0, input: s.input });
@@ -4217,13 +4208,10 @@
       renderGifResults(ctx, gs);
       return;
     }
-    if (s.tab === "favs") { renderSavedStickers(ctx, s); return; }
+    if (s.tab === "favs" || s.tab === "recent") { renderMixed(ctx, s, s.tab); return; }
     const p = stickerPeople(ctx);
     let list = [];
-    if (s.tab === "recent") {
-      list = (await storage.get("ghostStickerRecents", [])).filter((r) => !r.duo || p.friend).map((r) => [r.c, "", r.duo]);
-      if (!list.length) { s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Stickers you send show up here" })); return; }
-    } else {
+    {
       let cat;
       try { cat = await loadStickerCatalog(); }
       catch (e) { gtrail("sticker catalog failed " + (e && e.message || e)); s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Couldn't load stickers" })); return; }
@@ -4247,7 +4235,8 @@
       img.src = stickerUrl(comic, p.me, duo ? p.friend : null);
       img.addEventListener("error", () => tile.remove(), { once: true }); // a few catalog stickers don't exist in 3D
       tile.appendChild(img);
-      tile.addEventListener("click", () => sendStickerNow(ctx, s, comic, duo));
+      const held = onHold(tile, () => toggleFav(ctx, "ghostBitmojiFavs", { c: comic, duo: !!duo }, (x) => x.c === comic && !!x.duo === !!duo));
+      tile.addEventListener("click", () => { if (held()) return; sendStickerNow(ctx, s, comic, duo); });
       frag.appendChild(tile);
     }
     s.shown += 48;
@@ -4262,13 +4251,100 @@
     try {
       await api.sendSticker(convId, { comicId: comic, myAvatarId: p.me, friendAvatarId: duo ? p.friend : undefined });
       const recents = await storage.get("ghostStickerRecents", []);
-      await storage.set("ghostStickerRecents", [{ c: comic, duo: !!duo }, ...recents.filter((r) => !(r.c === comic && !!r.duo === !!duo))].slice(0, 48));
+      await storage.set("ghostStickerRecents", [{ c: comic, duo: !!duo, t: Date.now() }, ...recents.filter((r) => !(r.c === comic && !!r.duo === !!duo))].slice(0, 48));
     } catch (e) {
       gtrail("sticker send failed " + (e && e.message || e));
       ctx.showToast("Couldn't send that sticker");
     }
   }
 
+  // hold (0.5 s) = the tile's second action; returns a function the click handler asks "was that a hold?"
+  function onHold(tile, fn) {
+    let timer = null, fired = false;
+    tile.addEventListener("touchstart", () => { fired = false; clearTimeout(timer); timer = setTimeout(() => { fired = true; haptic("medium"); fn(); }, 500); }, { passive: true });
+    const cancel = () => clearTimeout(timer);
+    tile.addEventListener("touchmove", cancel, { passive: true });
+    tile.addEventListener("touchend", cancel, { passive: true });
+    tile.addEventListener("touchcancel", cancel, { passive: true });
+    return () => { if (fired) { fired = false; return true; } return false; };
+  }
+  async function toggleFav(ctx, key, item, same) {
+    const list = await storage.get(key, []);
+    const had = list.some(same);
+    await storage.set(key, had ? list.filter((x) => !same(x)) : [Object.assign({ t: Date.now() }, item), ...list].slice(0, 150));
+    ctx.showToast(had ? "Removed from Favorites" : "Added to Favorites");
+    return !had;
+  }
+  // Recent = Bitmoji stickers + GIFs you sent; Favorites = stickers friends sent you, Bitmoji and GIFs you held to
+  // favorite. Newest first (older entries without a time keep their own order).
+  async function renderMixed(ctx, s, which) {
+    const stamp = (list) => list.map((x, i) => Object.assign({}, x, { _t: x.t || (x.id && /^f[0-9a-z]+$/.test(x.id) ? parseInt(x.id.slice(1), 36) : 0) || -i }));
+    let items;
+    if (which === "recent") {
+      items = [...stamp(await storage.get("ghostStickerRecents", [])).map((x) => ({ kind: "bitmoji", x })),
+               ...stamp(await storage.get("ghostGifRecents", [])).map((x) => ({ kind: "gif", x }))];
+    } else {
+      items = [...stamp(await storage.get("ghostStickerFavs", [])).map((x) => ({ kind: "raw", x })),
+               ...stamp(await storage.get("ghostBitmojiFavs", [])).map((x) => ({ kind: "bitmoji", x })),
+               ...stamp(await storage.get("ghostGifFavs", [])).map((x) => ({ kind: "gif", x }))];
+    }
+    if (s.tab !== which) return;
+    items.sort((a, b) => b.x._t - a.x._t);
+    s.body.innerHTML = "";
+    if (!items.length) {
+      s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: which === "recent" ? "Stickers and GIFs you send show up here" : "Hold any sticker or GIF to add it here. Stickers friends send: hold the message and tap \"Add to Favorite Stickers\"." }));
+      return;
+    }
+    const p = stickerPeople(ctx);
+    for (const { kind, x } of items) {
+      const tile = el("button", "gh-sticker-tile gh-press");
+      const img = el("img"); img.alt = ""; tile.appendChild(img);
+      let send, hold;
+      if (kind === "bitmoji") {
+        if (x.duo && !p.friend) continue;
+        img.loading = "lazy"; img.src = stickerUrl(x.c, p.me, x.duo ? p.friend : null);
+        img.addEventListener("error", () => tile.remove(), { once: true });
+        send = () => sendStickerNow(ctx, s, x.c, x.duo);
+        hold = () => toggleFav(ctx, "ghostBitmojiFavs", { c: x.c, duo: !!x.duo }, (y) => y.c === x.c && !!y.duo === !!x.duo).then((on) => { if (!on && which === "favs") tile.remove(); });
+      } else if (kind === "gif") {
+        tile.classList.add("gh-sticker-gif");
+        gifPreviewFor(x).then((r) => { if (r && r.dataUrl) img.src = r.dataUrl; });
+        send = () => sendGif(ctx, x, s);
+        hold = () => toggleFav(ctx, "ghostGifFavs", gifEntry(x), (y) => y.id === x.id).then((on) => { if (!on && which === "favs") tile.remove(); });
+      } else {
+        wallDB.get("favsticker:" + x.id).then((b) => { if (b) img.src = URL.createObjectURL(b); }).catch(() => {});
+        send = async () => {
+          const convId = ctx.state.currentConvId; if (!convId) return;
+          haptic(); closeSheetGeneric(s.backdrop, s.sheet);
+          try { await api.sendStickerRaw(convId, x.content, x.contentType); } catch (e) { gtrail("saved sticker send failed " + (e && e.message)); ctx.showToast("Couldn't send that sticker"); }
+        };
+        hold = async () => {
+          const cur = await storage.get("ghostStickerFavs", []);
+          await storage.set("ghostStickerFavs", cur.filter((y) => y.id !== x.id));
+          wallDB.del("favsticker:" + x.id); tile.remove(); ctx.showToast("Removed from Favorites");
+        };
+      }
+      const held = onHold(tile, hold);
+      tile.addEventListener("click", () => { if (held()) return; send(); });
+      s.body.appendChild(tile);
+    }
+  }
+  function gifEntry(g) { return g.src === "tenor" ? { src: "tenor", id: g.id, w: g.w, h: g.h, p: g.p, f: g.f } : { id: g.id, w: g.w, h: g.h }; }
+  async function sendGif(ctx, g, s) {
+    haptic();
+    const r = await gifFileFor(g);
+    gtrail("picked " + g.id + (r && r.dataUrl ? " loaded " + r.dataUrl.length : " load failed " + (r && r.error)));
+    if (!r || !r.dataUrl) { ctx.showToast("Couldn't load that GIF"); return; }
+    const convId = ctx.state.currentConvId;
+    const bin = atob(r.dataUrl.slice(r.dataUrl.indexOf(",") + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const blob = new Blob([bytes], { type: "image/gif" });
+    closeSheetGeneric(s.backdrop, s.sheet);
+    try { await api.sendMedia(convId, blob, { kind: "gif" }); gtrail("sent " + g.id); } catch (e) { gtrail("send failed " + (e && e.message || e)); ctx.showToast("Couldn't send that GIF"); }
+    const recents = await storage.get("ghostGifRecents", []);
+    await storage.set("ghostGifRecents", [Object.assign({ t: Date.now() }, gifEntry(g)), ...recents.filter((r2) => r2.id !== g.id)].slice(0, 40));
+  }
   function buildGifSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-gif-sheet");
@@ -4286,9 +4362,9 @@
     const searchWrap = sheet.querySelector(".gh-gif-search-row .gh-search");
     searchWrap.appendChild(icon("search", 16));
     const input = el("input");
-    input.placeholder = "Search GIPHY";
+    input.placeholder = "Search Tenor";
     input.autocapitalize = "off"; input.autocomplete = "off"; input.spellcheck = false;
-    input.setAttribute("aria-label", "Search GIPHY");
+    input.setAttribute("aria-label", "Search Tenor");
     searchWrap.appendChild(input);
     overlaysRoot.append(backdrop, sheet);
     backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
@@ -4316,16 +4392,15 @@
     paintGifTabs(s);
     const mySeq = ++s.seq;
     s.body.innerHTML = "";
-    if (s.query) return void loadGifGrid(ctx, s, mySeq, () => giphySearch(s.query, 0, gifRating()));
-    if (s.tab === "trending") return void loadGifGrid(ctx, s, mySeq, () => giphySearch("", 0, gifRating()));
+    if (s.query) return void loadGifGrid(ctx, s, mySeq, () => tenorSearch(s.query));
+    if (s.tab === "trending") return void loadGifGrid(ctx, s, mySeq, () => tenorSearch(""));
     if (s.tab === "favorites") return void loadStaticGifGrid(ctx, s, mySeq, "ghostGifFavs");
     if (s.tab === "recents") return void loadStaticGifGrid(ctx, s, mySeq, "ghostGifRecents");
   }
-  function gifRating() { try { return (typeof window.dgSetting === "function") ? window.dgSetting("gifRating", "pg-13") : "pg-13"; } catch (e) { return "pg-13"; } }
   async function loadStaticGifGrid(ctx, s, mySeq, key) {
     const list = await storage.get(key, []);
     if (mySeq !== s.seq) return;
-    if (!list.length) { const note = el("div", "gh-gif-note"); note.textContent = key === "ghostGifFavs" ? "No favourites yet" : "GIFs you send will show up here"; s.body.appendChild(note); return; }
+    if (!list.length) { const note = el("div", "gh-gif-note"); note.textContent = key === "ghostGifFavs" ? "Hold a GIF to add it to Favorites" : "GIFs you send will show up here"; s.body.appendChild(note); return; }
     paintGifGrid(ctx, s, list);
   }
   async function loadGifGrid(ctx, s, mySeq, fetcher) {
@@ -4335,22 +4410,7 @@
     s.body.appendChild(skelGrid);
     const res = await fetcher();
     if (mySeq !== s.seq) return;
-    if (!res || res.needKey) { // Ghost is its own app, so it has its own key store: ask for the key right here
-      s.body.innerHTML = "";
-      const n = el("div", "gh-gif-note");
-      n.textContent = "GIFs need a free GIPHY API key once: developers.giphy.com \u2192 Create an App \u2192 API. Paste it here:";
-      const input = document.createElement("input");
-      input.className = "gh-gif-keyinput"; input.placeholder = "GIPHY API key"; input.setAttribute("aria-label", "GIPHY API key"); input.autocapitalize = "off"; input.autocomplete = "off"; input.spellcheck = false;
-      input.style.cssText = "display:block;width:calc(100% - 32px);margin:12px 16px;padding:12px 14px;border-radius:12px;border:0;background:rgba(255,255,255,.08);color:inherit;font:16px -apple-system,system-ui,sans-serif";
-      const save = el("button", "gh-gif-keysave");
-      save.textContent = "Save";
-      save.style.cssText = "display:block;margin:0 16px;padding:11px 18px;border-radius:12px;border:0;background:#3e88f7;color:#fff;font:600 16px -apple-system,system-ui,sans-serif";
-      const go = async () => { const k = input.value.trim(); if (!k) return; await storage.set("giphyKey", k); s.body.innerHTML = ""; s.seq++; loadGifGrid(ctx, s, s.seq, fetcher); };
-      save.addEventListener("click", go);
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
-      s.body.append(n, input, save);
-      return;
-    }
+    if (!res) { s.body.innerHTML = ""; return; }
     if (res.error) { gtrail("search error " + res.error); s.body.innerHTML = ""; const n = el("div", "gh-gif-note"); n.textContent = res.error; s.body.appendChild(n); return; }
     if (!res.results || !res.results.length) { s.body.innerHTML = ""; const n = el("div", "gh-gif-note"); n.textContent = "No GIFs found"; s.body.appendChild(n); return; }
     s.body.innerHTML = "";
@@ -4374,23 +4434,10 @@
     tile.setAttribute("aria-label", "Send GIF");
     tile.style.aspectRatio = `${g.w} / ${g.h}`;
     const img = el("img");
-    giphyPreviewUrl(g.id).then((r) => { if (r && r.dataUrl) img.src = r.dataUrl; });
+    gifPreviewFor(g).then((r) => { if (r && r.dataUrl) img.src = r.dataUrl; });
     tile.appendChild(img);
-    tile.addEventListener("click", async () => {
-      haptic();
-      const r = await giphyFileUrl(g.id);
-      gtrail("picked " + g.id + (r && r.dataUrl ? " loaded " + r.dataUrl.length : " load failed " + (r && r.error)));
-      if (!r || !r.dataUrl) { ctx.showToast("Couldn't load that GIF"); return; }
-      const convId = ctx.state.currentConvId;
-      const bin = atob(r.dataUrl.slice(r.dataUrl.indexOf(",") + 1));
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const blob = new Blob([bytes], { type: "image/gif" });
-      try { await api.sendMedia(convId, blob, { kind: "gif" }); gtrail("sent " + g.id); } catch (e) { gtrail("send failed " + (e && e.message || e)); ctx.showToast("Couldn't send that GIF"); }
-      const recents = await storage.get("ghostGifRecents", []);
-      await storage.set("ghostGifRecents", [{ id: g.id, w: g.w, h: g.h }, ...recents.filter((r2) => r2.id !== g.id)].slice(0, 40));
-      closeSheetGeneric(s.backdrop, s.sheet);
-    });
+    const held = onHold(tile, () => toggleFav(ctx, "ghostGifFavs", gifEntry(g), (y) => y.id === g.id));
+    tile.addEventListener("click", () => { if (held()) return; sendGif(ctx, g, s); });
     return tile;
   }
 

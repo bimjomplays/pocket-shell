@@ -674,7 +674,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             replyHandler(true, nil)
         case "fetch":
             guard let text = body["url"] as? String, let url = URL(string: text), url.scheme == "https",
-                  let host = url.host, Self.giphyHosts.contains(host) else {
+                  let host = url.host, Self.giphyHosts.contains(host) || host == "tenor.com" || host.hasSuffix(".tenor.com") else {
                 return replyHandler(nil, "Unsupported GIF host")
             }
             var request = URLRequest(url: url, timeoutInterval: 20)
