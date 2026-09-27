@@ -499,6 +499,7 @@
 
     // exposed for the test harness / debugging only
     host.__ghost = ctx;
+    ctx.makeAvatar = makeAvatar; // (test harness)
     document.addEventListener("visibilitychange", () => syncPresence(ctx));
     // double-tap a chat row: the first tap already opened the chat, so the second one lands on the chat screen
     // sliding in - catch it here (capture phase, before anything in the chat reacts) and open the camera for them
@@ -756,7 +757,81 @@
     }
   }
 
+  // chats: a person's avatar for 1:1, a group gets its members' Bitmojis side by side (like Snapchat Web)
+  function convAvatarUser(conv) {
+    if (!conv) return { name: "?" };
+    if (conv.isGroup) return { name: conv.title, convId: conv.id, members: conv.participants || [], avatarUrl: conv.avatarUrl };
+    return (conv.participants && conv.participants[0]) || { name: conv.title };
+  }
+  function avatarSig(conv) {
+    const u = convAvatarUser(conv);
+    return [pref("avatars"), u.convId && customAvatarUrls.get("conv:" + u.convId), u.id && customAvatarUrls.get("user:" + u.id), u.bitmojiUrl,
+      (u.members || []).slice(0, 3).map((m) => m.bitmojiUrl || "").join(",")].join("|");
+  }
+  const customAvatarUrls = new Map(); // "user:<id>" / "conv:<id>" -> object URL of your chosen photo
+  async function loadCustomAvatars() {
+    for (const key of Object.keys(pref("customAvatars") || {})) {
+      if (customAvatarUrls.has(key)) continue;
+      const blob = await wallDB.get("avatar:" + key).catch(() => null);
+      if (blob) customAvatarUrls.set(key, URL.createObjectURL(blob));
+    }
+  }
+  async function saveCustomAvatar(ctx, key, file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+      const side = Math.min(img.naturalWidth, img.naturalHeight), out = 480;
+      const c = document.createElement("canvas"); c.width = out; c.height = out;
+      c.getContext("2d").drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, out, out);
+      const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.88));
+      if (!blob) throw new Error("bad photo");
+      await wallDB.put("avatar:" + key, blob);
+      const old = customAvatarUrls.get(key); if (old) URL.revokeObjectURL(old);
+      customAvatarUrls.set(key, URL.createObjectURL(blob));
+      setPref(ctx, "customAvatars", Object.assign({}, pref("customAvatars") || {}, { [key]: true }));
+    } finally { URL.revokeObjectURL(url); }
+    refreshAvatars(ctx);
+  }
+  async function clearCustomAvatar(ctx, key) {
+    await wallDB.del("avatar:" + key);
+    const old = customAvatarUrls.get(key); if (old) URL.revokeObjectURL(old);
+    customAvatarUrls.delete(key);
+    const all = Object.assign({}, pref("customAvatars") || {}); delete all[key];
+    setPref(ctx, "customAvatars", all);
+    refreshAvatars(ctx);
+  }
+  function refreshAvatars(ctx) {
+    try { renderHomeList(ctx); } catch (e) {}
+    const cd = ctx.state.currentConvId && ctx.state.convById.get(ctx.state.currentConvId);
+    if (cd) updateConvHeader(ctx, cd);
+    try { renderStories(ctx); } catch (e) {}
+  }
+  function groupAvatarEl(user, size) {
+    const box = el("div", "gh-avatar gh-avatar-group");
+    box.style.width = size + "px"; box.style.height = size + "px";
+    const name = user.name || "?";
+    const [c1, c2] = gradientFor({ id: user.convId }, name);
+    box.style.background = `radial-gradient(circle at 50% 30%, rgba(255,255,255,0.22), rgba(255,255,255,0) 62%), linear-gradient(160deg, ${c1}, ${c2})`;
+    const faces = (user.members || []).filter((m) => m && m.bitmojiUrl).slice(0, 3);
+    box.dataset.n = String(faces.length);
+    faces.forEach((m, i) => {
+      const img = el("img", "gh-avatar-face");
+      img.alt = ""; img.loading = "lazy"; img.dataset.i = String(i);
+      img.addEventListener("error", () => img.remove(), { once: true });
+      img.src = m.bitmojiUrl;
+      box.appendChild(img);
+    });
+    return box;
+  }
   function makeAvatar(user, size) {
+    const custom = user && ((user.convId && customAvatarUrls.get("conv:" + user.convId)) || (user.id && customAvatarUrls.get("user:" + user.id)));
+    if (custom) {
+      const img = el("img", "gh-avatar");
+      img.style.width = size + "px"; img.style.height = size + "px"; img.width = size; img.height = size; img.alt = "";
+      img.src = custom;
+      return img;
+    }
+    if (user && user.members && user.members.filter((m) => m && m.bitmojiUrl).length >= 2 && pref("avatars") !== "initials") return groupAvatarEl(user, size);
     const img = el("img", "gh-avatar");
     img.style.width = size + "px";
     img.style.height = size + "px";
@@ -880,8 +955,8 @@
       </div>
     `;
     const avatarWrap = rowEl.querySelector(".gh-row-avatar-wrap");
-    const avatarUser = conv.isGroup ? { name: conv.title, avatarUrl: conv.avatarUrl } : (conv.participants && conv.participants[0]) || { name: conv.title };
-    avatarWrap.insertBefore(makeAvatar(avatarUser, 52), avatarWrap.firstChild);
+    avatarWrap.insertBefore(makeAvatar(convAvatarUser(conv), 52), avatarWrap.firstChild);
+    rowEl._avSig = avatarSig(conv);
     // tap = open the chat; double-tap = snap camera for this person (like Snapchat). The chat opens at once on the
     // first tap (no waiting to see if a second one comes); the camera then slides up over it.
     rowEl.addEventListener("click", () => {
@@ -894,6 +969,14 @@
   }
   function updateHomeRow(row, conv) {
     const rowEl = row.el;
+    const sig = avatarSig(conv);
+    if (rowEl._avSig !== sig) { // Bitmoji ids often arrive after the list, and custom photos can change
+      rowEl._avSig = sig;
+      const wrap = rowEl.querySelector(".gh-row-avatar-wrap");
+      const old = wrap.querySelector(".gh-avatar");
+      const fresh = makeAvatar(convAvatarUser(conv), 52);
+      if (old) old.replaceWith(fresh); else wrap.insertBefore(fresh, wrap.firstChild);
+    }
     rowEl.dataset.unread = conv.unreadCount > 0 || conv.hasUnreadSnap ? "1" : "0";
     rowEl.querySelector(".gh-row-name").textContent = conv.title || "Unknown";
     rowEl.querySelector(".gh-row-time").textContent = fmtRowTime(conv.lastActivityTs || Date.now());
@@ -1131,7 +1214,7 @@
         conv.subEl.style.display = "none";
       }
     }
-    const av = convData.isGroup ? { name: convData.title, avatarUrl: convData.avatarUrl } : (convData.participants && convData.participants[0]) || { name: convData.title };
+    const av = convAvatarUser(convData);
     conv.avatarSlot.innerHTML = "";
     conv.avatarSlot.appendChild(makeAvatar(av, 34));
     conv.messages.dataset.group = convData.isGroup ? "1" : "0";
@@ -2201,12 +2284,13 @@
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true,
     doubleTapCamera: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
-    wallDim: 0.25, chatWalls: {},
+    wallDim: 0.25, chatWalls: {}, customAvatars: {},
   };
   let prefs = Object.assign({}, PREF_DEFAULTS);
   function pref(k) { return Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : PREF_DEFAULTS[k]; }
   async function loadPrefs(ctx) {
     try { prefs = Object.assign({}, PREF_DEFAULTS, await storage.get("ghostPrefs", {})); } catch (e) {}
+    loadCustomAvatars().then(() => { if (customAvatarUrls.size) refreshAvatars(ctx); }).catch(() => {});
     // older builds kept the accent as a native setting: carry it over once
     try { const legacy = typeof window.dgSetting === "function" && window.dgSetting("accent", null); if (legacy && ACCENT_SET[legacy] && !(await storage.get("ghostPrefs", null))) prefs.accent = legacy; } catch (e) {}
     applyPrefs(ctx);
@@ -2605,10 +2689,23 @@
     s.sheet.innerHTML = "";
     s.sheet.appendChild(el("div", "gh-sheet-grip"));
     const head = el("div", "gh-chat-sheet-head");
-    head.appendChild(makeAvatar(cd.isGroup ? { name: cd.title } : (cd.participants && cd.participants[0]) || { name: cd.title }, 64));
+    head.appendChild(makeAvatar(convAvatarUser(cd), 64));
     const nm = el("div", "gh-chat-sheet-name"); nm.textContent = cd.title || "Chat";
     head.appendChild(nm);
     s.sheet.appendChild(head);
+    // profile photo: yours to choose for this person (1:1) or this group; Bitmoji is the default
+    const avKey = cd.isGroup ? "conv:" + convId : (cd.participants && cd.participants[0] ? "user:" + cd.participants[0].id : null);
+    if (avKey) {
+      const pt = el("div", "gh-set-group-title"); pt.textContent = cd.isGroup ? "Group Photo" : "Profile Photo"; s.sheet.appendChild(pt);
+      const pg = el("div", "gh-set-group"); s.sheet.appendChild(pg);
+      setRow(pg, { label: "Choose Photo…", onClick: async () => {
+        const f = await pickPhoto(); if (!f) return;
+        try { await saveCustomAvatar(ctx, avKey, f); closeSheetGeneric(s.backdrop, s.sheet); ctx.showToast("Photo updated"); }
+        catch (e) { ctx.showToast("Couldn't use that photo"); }
+      } });
+      if (customAvatarUrls.has(avKey)) setRow(pg, { label: cd.isGroup ? "Use Bitmojis" : "Use Their Bitmoji", danger: true, onClick: async () => { await clearCustomAvatar(ctx, avKey); closeSheetGeneric(s.backdrop, s.sheet); } });
+      const pf = el("div", "gh-set-group-foot"); pf.textContent = "Only you see this - it doesn't change anything on Snapchat."; s.sheet.appendChild(pf);
+    }
     const title = el("div", "gh-set-group-title"); title.textContent = "Chat Wallpaper"; s.sheet.appendChild(title);
     const cards = el("div", "gh-set-cards gh-chat-walls");
     s.sheet.appendChild(cards);
@@ -3465,7 +3562,7 @@
     for (const conv of rows) {
       const row = el("div", "gh-friend-row gh-press");
       row.dataset.picked = c.picked.has(conv.id) ? "1" : "0";
-      const avatarUser = conv.isGroup ? { name: conv.title } : (conv.participants && conv.participants[0]) || { name: conv.title };
+      const avatarUser = convAvatarUser(conv);
       row.appendChild(makeAvatar(avatarUser, 44));
       const name = el("div", "gh-friend-name"); name.textContent = conv.title;
       const check = el("div", "gh-friend-check"); check.appendChild(icon("check", 14));
