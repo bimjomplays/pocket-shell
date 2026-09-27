@@ -284,34 +284,88 @@
     return { kind, text };
   }
 
+  // Message content is protobuf BYTES (messageContent.content, device sample 2026-09-26). Snapchat decodes it with
+  // one helper (main.js: `function p(e){try{return(0,c.Jr)(a.v.decode(e.content))}catch(t){...error("Failed to
+  // parse message content proto",t)...}}`), found here by that stable log string, never by minified names.
+  let decoder;
+  function contentDecoder() {
+    if (decoder !== undefined) return decoder;
+    decoder = null;
+    safe("decoder", () => {
+      const factories = webpackRequire && webpackRequire.m;
+      if (!factories) return;
+      for (const id of Object.keys(factories)) {
+        const src = String(factories[id]);
+        if (!src.includes("Failed to parse message content proto")) continue;
+        const exp = webpackRequire(id);
+        for (const k of Object.keys(exp)) {
+          const fn = safe("decoder-export", () => exp[k], null);
+          if (typeof fn === "function" && String(fn).includes("Failed to parse")) { decoder = fn; trail("decoder", "found in module " + id); return; }
+        }
+      }
+      trail("decoder", "not found", "error");
+    });
+    return decoder;
+  }
+  function decodeContent(messageContent) {
+    const d = contentDecoder();
+    return d && messageContent ? safe("decode", () => d(messageContent), null) : null;
+  }
+  const CASE_KIND = { text: "text", snapReply: "text", storyReply: "text", botResponse: "text", chatMedia: "chat-media", externalMedia: "chat-media",
+    externalMediaMessageContent: "chat-media", snapdoc: "snap", snap: "snap", snapMessageContent: "snap", tinySnap: "snap", note: "audio", voiceNote: "audio",
+    sticker: "sticker", creativeToolItem: "gif", share: "unknown", storyShare: "unknown", spotlightShare: "unknown", url: "text" };
+  const REACTION_EMOJI = { 1: "\u2764\uFE0F", 2: "\uD83D\uDE02", 3: "\uD83D\uDD25", 4: "\uD83D\uDC4D", 5: "\uD83D\uDE2E", 6: "\uD83D\uDE22", 7: "\uD83D\uDE21" };
+  // message ids cross to the UI as strings; Snapchat's Map keys are bigints
+  function findRaw(map, messageId) {
+    if (!map || typeof map.entries !== "function") return undefined;
+    const direct = map.get(messageId);
+    if (direct) return direct;
+    for (const [k, v] of map.entries()) if (String(k) === String(messageId)) return v;
+    return undefined;
+  }
+  function realKey(map, messageId) {
+    if (!map || typeof map.keys !== "function") return messageId;
+    for (const k of map.keys()) if (String(k) === String(messageId)) return k;
+    return messageId;
+  }
   function toMessage(conversationId, id, raw) {
     if (!raw) return null;
-    // `raw` is whatever `messaging.conversations[key].messages` (a Map) stores per id - verified shape
-    // from the reactToMessage/updateMessage call sites: { descriptor: {conversationId, messageId, ...},
-    // metadata: {reactions: [{userId, reaction}], ...}, messageContent: {contentType, ...}, content: {...} }
-    // Exact nesting differs a little between call sites (some read raw.content directly, some
-    // raw.messageContent.content) so both are tried.
-    const content = raw.content || (raw.messageContent && raw.messageContent.content) || raw.message?.messageContent?.content;
-    const { kind, text } = messageKindAndText(content);
-    const senderId = firstString(raw.senderUserId, raw.senderId, raw.descriptor && raw.descriptor.senderUserId);
-    const reactions = safe("message-reactions", () => (raw.metadata && raw.metadata.reactions || []).map((r) => ({
-      emoji: safe("reaction-emoji", () => r.reaction && r.reaction.reactionContent, undefined),
-      from: toUser({ userId: r.userId }) || { id: r.userId, name: r.userId },
-    })), []);
+    const mc = raw.messageContent || {};
+    const decoded = decodeContent(mc);
+    const c = decoded && decoded.content;
+    const kase = c && c.$case;
+    let kind = CASE_KIND[kase] || (mc.snapDisplayInfo ? "snap" : "unknown");
+    let text;
+    if (kase === "text") text = c.text && c.text.text;
+    else if (kase === "snapReply") text = c.snapReply && (c.snapReply.text || (c.snapReply.content && c.snapReply.content.text));
+    else if (kase === "storyReply") text = c.storyReply && c.storyReply.text;
+    else if (kase === "url") text = c.url && (c.url.url || c.url.text);
+    if (kase === "creativeToolItem") { const it = c.creativeToolItem; kind = it && (it.giphy || /giphy/i.test(JSON.stringify(Object.keys(it)))) ? "gif" : "sticker"; }
+    if (kind === "text" && typeof text !== "string") text = kase ? "" : undefined;
+    const md = raw.metadata || {};
+    const senderId = idOf(raw.senderId) || idOf(raw.senderUserId);
+    const me = meId();
+    const reactions = safe("message-reactions", () => (md.reactions || []).map((r) => {
+      const rc = r.reaction && r.reaction.reactionContent;
+      const emoji = (rc && (rc.emoji || REACTION_EMOJI[toNum(rc.intentionType)])) || "\u2764\uFE0F";
+      return { emoji, from: personFor(idOf(r.userId)) || { id: "?", name: "?" } };
+    }), []);
+    const others = (list) => (list || []).map(idOf).filter((x) => x && x !== senderId);
     return {
-      id: firstString(id, raw.messageId, raw.descriptor && raw.descriptor.messageId) || String(id),
+      id: String(id !== undefined ? id : raw.descriptor && raw.descriptor.messageId),
       conversationId,
-      from: (senderId && toUser({ userId: senderId })) || { id: senderId || "unknown", name: senderId || "unknown" },
-      ts: Number(raw.timestamp || raw.createdTimestamp || raw.serverTimestamp || 0) || Date.now(),
+      from: personFor(senderId) || { id: senderId || "unknown", name: "Unknown" },
+      ts: toNum(md.createdAt) || Date.now(),
       kind,
-      text,
-      media: undefined, // filled in by openConversation/openSnap once we can confirm a real media URL shape
-      replyTo: raw.quotedMessageId ? { messageId: raw.quotedMessageId } : undefined,
+      text: text || (kind === "unknown" && kase ? "[" + kase + "]" : text),
+      media: undefined, // media download/decrypt goes through Snapchat's media manager - next step
+      replyTo: mc.quotedMessage ? { messageId: String(mc.quotedMessage.messageId || ""), text: undefined } : undefined,
       reactions: reactions.length ? reactions : undefined,
-      saved: raw.savePolicy != null ? raw.savePolicy !== 0 : undefined,
-      opened: raw.opened,
-      pending: !!raw.pending,
-      failed: !!raw.failed,
+      saved: (md.savedBy || []).length > 0,
+      opened: others(md.openedBy).length > 0 || others(md.seenBy).length > 0,
+      pending: raw.state === 0 || raw.state === 1 ? undefined : undefined,
+      failed: false,
+      fromMe: !!(me && senderId === me),
     };
   }
 
@@ -321,6 +375,8 @@
   // conversation as "Conversation": the old code looked for names inside messaging.conversations, which has none.
   let userIndex = null, userIndexSize = -1;
   const extraUsers = new Map();
+  const idObjs = new Map(); // uuid string -> Snapchat's {id, str} object, remembered from the feed
+  let ensureFails = 0;
   const wantUsers = new Set(); // ids with no record yet: asked for via user.ensureUsers (what Snapchat does for rows)
   function publicUser(id) {
     const s = state();
@@ -444,6 +500,7 @@
   // lastSenderUserIds, isLocked }.
   function fromFeed(key, feed, entry) {
     const me = meId();
+    for (const p of feed.participants || []) { const k = idOf(p); if (k && p && typeof p === "object" && p.id) idObjs.set(k, p); }
     const ids = ((feed.participants) || []).map(idOf).filter(Boolean);
     const others = ids.filter((id) => id !== me);
     const participants = others.map(personFor).filter(Boolean);
@@ -501,12 +558,13 @@
   setInterval(() => {
     if (!wantUsers.size || !store) return;
     const u = (state() || {}).user;
-    const ids = [...wantUsers].slice(0, 64); for (const id of ids) wantUsers.delete(id);
+    if (ensureFails >= 3) return;
+    const ids = [...wantUsers].slice(0, 64).map((id) => idObjs.get(id) || id); for (const id of [...wantUsers].slice(0, 64)) wantUsers.delete(id);
     if (u && typeof u.ensureUsers === "function") safe("ensureUsers", () => Promise.resolve(u.ensureUsers(ids)).then((recs) => {
       // it returns the records too: keep them, whether or not they land in publicUsers
       for (const r of Array.isArray(recs) ? recs : []) { const k = r && idOf(r.user_id); if (k) { extraUsers.set(k, r); } }
       emitConversations();
-    }).catch((e) => trail("ensureUsers", e, "error")));
+    }).catch((e) => { ensureFails++; trail("ensureUsers", e, "error"); }));
   }, 1200);
   const allConversationIds = () => {
     const m = messaging();
@@ -724,7 +782,7 @@
       requireStore();
       const m = messaging();
       const entry = conversationEntry(conversationId);
-      const rawMessage = entry && entry.messages && typeof entry.messages.get === "function" && entry.messages.get(messageId);
+      const rawMessage = entry && entry.messages && typeof entry.messages.get === "function" && findRaw(entry.messages, messageId);
       if (emoji == null) {
         if (typeof m.removeReaction !== "function") throw new Error("removeReaction action missing");
         await m.removeReaction(rawMessage || { descriptor: { conversationId, messageId } });
@@ -749,7 +807,7 @@
       // action, not Snapchat's - if this ever renumbers, saveMessage will silently do the wrong thing,
       // which is exactly why BRIDGE_NOTES.md flags this as a "must re-check by string search" item.
       const SAVE = 3, UNSAVE = 4;
-      await m.updateMessage(convIdObj(conversationId), messageId, saved ? SAVE : UNSAVE);
+      await m.updateMessage(convIdObj(conversationId), realKey(conversationEntry(conversationId) && conversationEntry(conversationId).messages, messageId), saved ? SAVE : UNSAVE);
       return true;
     },
 
@@ -760,10 +818,10 @@
       // Snapchat's own lightbox calls onSnapInteraction(VIEWING_INITIATED, ...) then (VIEWING_FINISHED,
       // ...) through these same store actions - this is the actual "mark viewed" mechanism, not a
       // separate flag we set ourselves.
-      if (typeof m.startedViewingSnap === "function") await m.startedViewingSnap(convIdObj(conversationId), messageId);
-      if (typeof m.finishedViewingSnap === "function") await m.finishedViewingSnap(convIdObj(conversationId), messageId);
+      if (typeof m.startedViewingSnap === "function") await m.startedViewingSnap(convIdObj(conversationId), realKey(conversationEntry(conversationId) && conversationEntry(conversationId).messages, messageId));
+      if (typeof m.finishedViewingSnap === "function") await m.finishedViewingSnap(convIdObj(conversationId), realKey(conversationEntry(conversationId) && conversationEntry(conversationId).messages, messageId));
       const entry = conversationEntry(conversationId);
-      const raw = entry && entry.messages && typeof entry.messages.get === "function" && entry.messages.get(messageId);
+      const raw = entry && entry.messages && typeof entry.messages.get === "function" && findRaw(entry.messages, messageId);
       // No verified path from a message object to a fetchable snap media URL/blob while reading the
       // bundle (the real UI decrypts/streams it through the snap manager's own binary path) - reported
       // as an empty media list rather than guessed at. See BRIDGE_NOTES.md "openSnap".
