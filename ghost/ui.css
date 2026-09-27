@@ -36,8 +36,12 @@
   /* Nav bars/composer/tab-bar read as "frosted glass" via a near-opaque tint rather than a live
      backdrop-filter blur: blurring continuously-scrolling content behind fixed chrome is the classic
      expensive case for a compositor with no hardware blur path (confirmed on this machine's software GL —
-     it alone blew the scripted-scroll frame budget), so real motion cost stays at zero here. */
-  --gh-bg-header: rgba(21, 30, 39, 0.96);
+     it alone blew the scripted-scroll frame budget), so real motion cost stays at zero here. Fully opaque
+     (no alpha) rather than 96%: a translucent fixed bar over a scrolling list depends on the compositor
+     resolving the blend every frame, and this is the one thing that must never show the list through it
+     (home tab bar over the chat list, headers over messages) — solid removes that risk entirely for a
+     ~4% visual difference nobody will see. */
+  --gh-bg-header: #151e27;
   --gh-bg-panel: #1c2733;    /* sheets, cards, popovers */
   --gh-bg-panel-2: #24313f;  /* hover / pressed / inputs on a panel */
   --gh-bg-input: #253340;    /* composer field, search field */
@@ -602,10 +606,13 @@ input, textarea {
   background: rgba(30, 44, 58, 0.86);
   padding: 5px 12px;
   border-radius: 12px;
-  margin: 14px 0 10px;
+  margin: 16px 0 14px;
   position: sticky;
-  top: 6px;
-  z-index: 2;
+  top: 8px;
+  z-index: 5;
+  /* it floats over whatever is currently scrolled underneath it (another day, a call/snap chip, a bubble) —
+     a shadow reads that as an intentional elevated pill instead of a layout collision. */
+  box-shadow: 0 2px 10px rgba(0,0,0,0.4);
 }
 .gh-unread-sep {
   align-self: stretch;
@@ -787,11 +794,16 @@ input, textarea {
   border-radius: 14px;
   overflow: hidden;
   max-width: 250px;
+  min-width: 120px;
   max-height: 320px;
+  min-height: 90px;
   display: block;
   background: var(--gh-bg-panel-2);
   position: relative;
 }
+/* the min-width/min-height above are a floor so a still-tiny placeholder frame (e.g. a 1x1 GIF stand-in
+   while its real clip resolves) or a broken/unresolved blob never shrinks the bubble to a sliver; a
+   properly loaded image keeps its own aspect within the max-width/max-height via object-fit: cover below. */
 .gh-media img, .gh-media video { width: 100%; height: 100%; display: block; object-fit: cover; }
 .gh-media-meta {
   position: absolute;
@@ -1707,7 +1719,10 @@ input, textarea {
 .gh-friends-search input { flex: 1; min-width: 0; height: 100%; background: none; border: 0; outline: none; color: var(--gh-text); font-size: 16px; }
 .gh-friend-row .gh-avatar { width: 40px !important; height: 40px !important; flex-shrink: 0; }
 .gh-friend-row + .gh-friend-row::before { left: 66px; }
-.gh-friend-text { display: flex; flex-direction: column; gap: 1px; }
+/* flex: 1; min-width: 0: without it a long name/username can't shrink below its own content width in the
+   flex row, so it just pushes the Accept/Ignore buttons instead of eliding - the same flex/ellipsis footgun
+   noted on the conversation header, missed here. */
+.gh-friend-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .gh-friend-name { font-weight: 600; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-friend-user { font-size: 13px; color: var(--gh-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-friend-btn {
@@ -1857,3 +1872,26 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 }
 .gh-msg-wrap[data-retained="1"] .gh-bubble::after { display: none; }
 .gh-retained-label { font-size: 10px; line-height: 1.4; color: var(--gh-text-secondary); padding: 4px 5px 2px; }
+
+/* Opening a chat: bubbles hidden (wallpaper stays) until they're pinned to the newest message - see settleOpen */
+.gh-messages.gh-opening > * { opacity: 0 !important; transition: none !important; }
+/* Loading a chat for the first time: placeholder bubbles shimmer at the bottom until the messages arrive */
+.gh-messages.gh-loading-skel::after {
+  content: ""; position: absolute; left: 12px; right: 12px; bottom: calc(14px + var(--gh-safe-b)); height: 300px; pointer-events: none;
+  background:
+    linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.07) 50%, transparent 70%) 0 0 / 200% 100% no-repeat,
+    linear-gradient(var(--gh-bubble-in-2, #18232e), var(--gh-bubble-in-2, #18232e)) 0 0 / 58% 44px no-repeat,
+    linear-gradient(var(--gh-bubble-out-2, #2b5278), var(--gh-bubble-out-2, #2b5278)) 100% 60px / 46% 40px no-repeat,
+    linear-gradient(var(--gh-bubble-in-2, #18232e), var(--gh-bubble-in-2, #18232e)) 0 116px / 66% 64px no-repeat,
+    linear-gradient(var(--gh-bubble-out-2, #2b5278), var(--gh-bubble-out-2, #2b5278)) 100% 196px / 38% 40px no-repeat,
+    linear-gradient(var(--gh-bubble-in-2, #18232e), var(--gh-bubble-in-2, #18232e)) 0 252px / 50% 44px no-repeat;
+  opacity: 0.55; animation: gh-skel-shimmer 1.2s linear infinite;
+}
+@keyframes gh-skel-shimmer {
+  from { background-position: 150% 0, 0 0, 100% 60px, 0 116px, 100% 196px, 0 252px; }
+  to { background-position: -50% 0, 0 0, 100% 60px, 0 116px, 100% 196px, 0 252px; }
+}
+
+/* floating date pill (markStuckDates in ui.js): shown while scrolling, fades out once you stop */
+.gh-day-sep { transition: opacity 0.25s ease; }
+.gh-messages:not([data-scrolling="1"]) .gh-day-sep[data-stuck="1"] { opacity: 0; pointer-events: none; }

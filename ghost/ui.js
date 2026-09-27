@@ -1358,6 +1358,11 @@
     }, { passive: true });
 
     initMessageGestures(ctx, conv);
+    // Live wallpaper resume: ONE listener for the life of the page, not one per setLiveWall() call - it used to
+    // add a fresh document-level listener (closed over that call's canvas/loop) every time the wallpaper kind
+    // changed (switching chats, switching the wallpaper in Settings), and never removed the old ones, which
+    // piled up forever (the exact "grew until iOS killed the page" problem this file already fights elsewhere).
+    document.addEventListener("visibilitychange", () => { if (!document.hidden && conv.liveWall) conv.liveWall.start(); });
     return conv;
   }
 
@@ -1408,7 +1413,16 @@
     haptic("light");
     closeChatSearch(ctx);
     storage.set("ghostLastConv", conversationId);
-    if (ctx.state.currentConvId && ctx.state.currentConvId !== conversationId) scheduleMediaRelease(ctx, ctx.state.currentConvId);
+    if (ctx.state.currentConvId && ctx.state.currentConvId !== conversationId) {
+      scheduleMediaRelease(ctx, ctx.state.currentConvId);
+      // Going Home first closes the old chat (closeConversationScreen -> api.closeConversation), but jumping
+      // straight from one open chat to another (bookmark, gallery tile, story reply's new group, nav-swipe,
+      // new-chat sheet) skipped that, leaving the OLD conversation id in the bridge's openConversations set
+      // forever - both ids then got emitMessagesFor() called every store change, and since that's a single
+      // shared throttled function keyed by nothing, whichever id lost the race never received live message
+      // updates again (see bridge.js's throttle()/emitMessagesFor). Close it exactly like leaving to Home does.
+      api.closeConversation(ctx.state.currentConvId).catch(() => {});
+    }
     loadChatColors(ctx, conversationId);
     ctx.conv.openedAt = nowMs();
     setTimeout(() => { if (ctx.conv.liveWall) ctx.conv.liveWall.start(); }, 0);
@@ -1421,6 +1435,9 @@
     const conv = ctx.conv;
     conv.rendered.forEach((elm) => elm.remove());
     conv.rendered.clear();
+    // hidden from here on (also covers a message-list update that arrives while the chat is still loading and
+    // paints before we do) until settleOpen has it pinned to the newest message
+    conv.messages.classList.add("gh-opening");
     conv.replyTo = null;
     conv.textarea.value = "";
     hideMentions(ctx);
@@ -1448,6 +1465,7 @@
     }
     if (ctx.state.currentConvId !== conversationId) return; // navigated away while loading
     renderMessageList(ctx, conv, entry, { stick: true, initial: true });
+    settleOpen(ctx, conv, conversationId);
     // and once the screen has finished sliding in, nudge the list by a pixel: WebKit sometimes hasn't drawn the
     // newest bubbles yet (they appeared only once you scrolled) - a scroll makes it draw them
     for (const ms of [350, 900]) setTimeout(() => {
@@ -1456,6 +1474,29 @@
       const top = m.scrollTop; m.scrollTop = top - 1; m.scrollTop = conv.atBottom ? m.scrollHeight : top;
     }, ms);
     syncPresence(ctx);
+  }
+  // Opening a chat showed it a little higher up for a frame, then jumped to the newest message (device report
+  // 2026-09-27, "only some chats": the ones whose bubbles change height after the first layout - photos, stickers,
+  // emoji, replies). The rig caught it too: 61px off the bottom on the first painted frame. So the messages stay
+  // invisible (.gh-opening hides the bubbles, not the wallpaper) while they're pinned to the bottom every frame,
+  // and appear once the list height has held still for 2 frames (at most ~0.3s, still inside the slide-in).
+  function settleOpen(ctx, conv, id, peek) {
+    const m = conv.messages;
+    const t0 = nowMs();
+    let last = -1, calm = 0;
+    const stillHere = () => (peek ? conv.peekId === id || ctx.state.currentConvId === id : ctx.state.currentConvId === id);
+    const pin = () => { if (conv.atBottom) { conv.stickUntil = nowMs() + 120; m.scrollTop = m.scrollHeight; } };
+    pin();
+    const step = () => {
+      if (!stillHere()) return void m.classList.remove("gh-opening");
+      pin();
+      const h = m.scrollHeight;
+      calm = h === last ? calm + 1 : 0;
+      last = h;
+      if (calm >= 2 || nowMs() - t0 > 300) { pin(); markStuckDates(ctx); m.classList.remove("gh-opening"); return; }
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
   }
   // "Show me in chats" (Settings, default on): friends see my Bitmoji (phone, not laptop) in the chat I have
   // open, like the real app. Cleared when I leave the chat or Ghost goes to the background.
@@ -2290,9 +2331,29 @@
     return b;
   }
 
+  // Floating date pill, like Telegram: while you scroll, the day's date rides at the top; a moment after you stop
+  // it fades away instead of sitting on top of a bubble (it looked like a layout collision at rest).
+  function markStuckDates(ctx) {
+    const m = ctx.conv.messages;
+    for (const sep of m.querySelectorAll(".gh-day-sep")) {
+      // stuck = it has been carried down over the content that follows it (in normal flow that content starts
+      // below the pill)
+      const next = sep.nextElementSibling;
+      const stuck = !!next && next.getBoundingClientRect().top < sep.getBoundingClientRect().bottom - 1;
+      if (stuck) sep.dataset.stuck = "1"; else delete sep.dataset.stuck;
+    }
+  }
+  function noteConvScrolling(ctx) {
+    const conv = ctx.conv;
+    if (nowMs() - (conv.lastUserScrollAt || 0) > 1200) return; // our own pinning/repaints don't count
+    if (conv.messages.dataset.scrolling !== "1") conv.messages.dataset.scrolling = "1";
+    clearTimeout(conv._scrollIdleT);
+    conv._scrollIdleT = setTimeout(() => { markStuckDates(ctx); delete conv.messages.dataset.scrolling; }, 900);
+  }
   function onConvScroll(ctx) {
     const conv = ctx.conv;
     const m = conv.messages;
+    noteConvScrolling(ctx);
     const nearBottom = m.scrollHeight - m.scrollTop - m.clientHeight < 80;
     // Only YOUR scrolling may un-stick the chat from the bottom. The keyboard opening (the list gets shorter), the
     // composer shrinking after a send, or a bubble growing also fire scroll events; those used to count as "you
@@ -2323,7 +2384,7 @@
     const entry = ctx.state.messagesByConv.get(id);
     conv.unreadBoundaryIndex = null; conv.unreadBoundaryComputed = true;
     conv.pinUntil = nowMs() + 4000; conv.userTouched = false; conv.atBottom = true;
-    if (entry) { conv.messages.classList.remove("gh-loading-skel"); renderMessageList(ctx, conv, entry, { initial: true }); }
+    if (entry) { conv.messages.classList.remove("gh-loading-skel"); conv.messages.classList.add("gh-opening"); renderMessageList(ctx, conv, entry, { initial: true }); settleOpen(ctx, conv, id, true); }
     else { conv.messages.replaceChildren(conv.topSpacer, conv.bottomSpacer); conv.messages.classList.add("gh-loading-skel"); }
   }
   function mentionQuery(ta) {
@@ -2416,6 +2477,12 @@
       const prevTotal = prevEntry.messages.length;
       const entry = { messages: res.messages || prevEntry.messages, hasMore: !!res.hasMore };
       ctx.state.messagesByConv.set(convId, entry);
+      // Navigated to a different chat while this fetch was in flight: `conv` is the single shared conversation
+      // screen object, now showing that other chat, so update the cache above (harmless, keyed by convId) but
+      // stop here - mutating conv.windowStart/windowEnd and repainting conv.messages with THIS entry would
+      // splice the old chat's messages into whatever chat is on screen now (fetchOlderPages already guards the
+      // same race the same way; this path was missing it).
+      if (ctx.state.currentConvId !== convId) { conv._loadingOlder = false; return; }
       const newTotal = entry.messages.length;
       // `res.messages` (like openConversation's) is the WHOLE loaded slice from the new start onward, not just
       // the newly-fetched page - the actual number of messages prepended is the growth in that total, never
@@ -2778,14 +2845,17 @@
   // Storage. Ghost-only prefs live in GM storage ("ghostPrefs"); the few the app itself also reads (haptics,
   // reduce motion, show me in chats, voice-note speed, GIF rating) stay native settings.
   // =====================================================================================================
+  // header: fully opaque (no alpha) on purpose - it's the fixed bar/tab-bar tint drawn over a continuously
+  // scrolling list, and a translucent value there depends on the compositor re-blending it every frame,
+  // which is exactly the one place a list row must never show through (device-observed 2026-09-27).
   const THEMES = {
-    night:    { name: "Night",    app: "#0e161f", list: "#17212b", header: "rgba(21,30,39,0.96)", panel: "#1c2733", panel2: "#24313f", input: "#253340", in1: "#1c2936", in2: "#18232e", sub: "#8b98a5", ter: "#64707c", pill: "rgb(30,44,58)" },
-    midnight: { name: "Midnight", app: "#000000", list: "#000000", header: "rgba(10,10,12,0.96)", panel: "#121214", panel2: "#1c1c1f", input: "#1c1c1f", in1: "#1f1f22", in2: "#1a1a1d", sub: "#8e8e93", ter: "#636366", pill: "rgb(28,28,31)" },
-    ocean:    { name: "Ocean",    app: "#071a24", list: "#0c2330", header: "rgba(11,32,44,0.96)", panel: "#11303f", panel2: "#173b4c", input: "#183c4d", in1: "#123344", in2: "#0f2b3a", sub: "#86a6b5", ter: "#5e7d8b", pill: "rgb(17,48,63)" },
-    forest:   { name: "Forest",   app: "#0b1712", list: "#12211a", header: "rgba(17,31,24,0.96)", panel: "#182b22", panel2: "#20372c", input: "#21382d", in1: "#1a2f25", in2: "#16291f", sub: "#8fa89a", ter: "#667d71", pill: "rgb(24,43,34)" },
-    grape:    { name: "Grape",    app: "#130e1f", list: "#1b1529", header: "rgba(26,20,40,0.96)", panel: "#231b36", panel2: "#2d2443", input: "#2e2545", in1: "#261e39", in2: "#211a32", sub: "#a197b8", ter: "#776e8e", pill: "rgb(35,27,54)" },
-    ember:    { name: "Ember",    app: "#1a0f0c", list: "#231612", header: "rgba(35,22,18,0.96)", panel: "#2e1d18", panel2: "#3a261f", input: "#3b2720", in1: "#31201a", in2: "#2a1b16", sub: "#b39a90", ter: "#86706a", pill: "rgb(46,29,24)" },
-    graphite: { name: "Graphite", app: "#141517", list: "#1c1d20", header: "rgba(28,29,32,0.96)", panel: "#25262a", panel2: "#2e3035", input: "#2f3136", in1: "#27292d", in2: "#222428", sub: "#9a9ca3", ter: "#71737a", pill: "rgb(37,38,42)" },
+    night:    { name: "Night",    app: "#0e161f", list: "#17212b", header: "rgb(21,30,39)", panel: "#1c2733", panel2: "#24313f", input: "#253340", in1: "#1c2936", in2: "#18232e", sub: "#8b98a5", ter: "#64707c", pill: "rgb(30,44,58)" },
+    midnight: { name: "Midnight", app: "#000000", list: "#000000", header: "rgb(10,10,12)", panel: "#121214", panel2: "#1c1c1f", input: "#1c1c1f", in1: "#1f1f22", in2: "#1a1a1d", sub: "#8e8e93", ter: "#636366", pill: "rgb(28,28,31)" },
+    ocean:    { name: "Ocean",    app: "#071a24", list: "#0c2330", header: "rgb(11,32,44)", panel: "#11303f", panel2: "#173b4c", input: "#183c4d", in1: "#123344", in2: "#0f2b3a", sub: "#86a6b5", ter: "#5e7d8b", pill: "rgb(17,48,63)" },
+    forest:   { name: "Forest",   app: "#0b1712", list: "#12211a", header: "rgb(17,31,24)", panel: "#182b22", panel2: "#20372c", input: "#21382d", in1: "#1a2f25", in2: "#16291f", sub: "#8fa89a", ter: "#667d71", pill: "rgb(24,43,34)" },
+    grape:    { name: "Grape",    app: "#130e1f", list: "#1b1529", header: "rgb(26,20,40)", panel: "#231b36", panel2: "#2d2443", input: "#2e2545", in1: "#261e39", in2: "#211a32", sub: "#a197b8", ter: "#776e8e", pill: "rgb(35,27,54)" },
+    ember:    { name: "Ember",    app: "#1a0f0c", list: "#231612", header: "rgb(35,22,18)", panel: "#2e1d18", panel2: "#3a261f", input: "#3b2720", in1: "#31201a", in2: "#2a1b16", sub: "#b39a90", ter: "#86706a", pill: "rgb(46,29,24)" },
+    graphite: { name: "Graphite", app: "#141517", list: "#1c1d20", header: "rgb(28,29,32)", panel: "#25262a", panel2: "#2e3035", input: "#2f3136", in1: "#27292d", in2: "#222428", sub: "#9a9ca3", ter: "#71737a", pill: "rgb(37,38,42)" },
   };
   const ACCENT_SET = {
     blue:   ["#3e88f7", "#2f74e0", "#3a6a94", "#2b5278"],
@@ -2910,6 +2980,10 @@
   }
   function closeSettings(ctx) {
     const s = ctx.settings;
+    // A page like `gallery` can hand back a dispose() that tears down its own IntersectionObserver/etc; a
+    // direct close (e.g. tapping a media tile) skips popSettingsPage for every level, so every page still on
+    // the stack needs disposing here too, or its observer/tiles stay alive for the rest of the session.
+    for (const entry of s.stack) if (entry.dispose) entry.dispose();
     s.el.dataset.open = "0";
     setTimeout(() => { if (s.el.dataset.open !== "1") s.el.innerHTML = ""; }, 320);
   }
@@ -2925,13 +2999,16 @@
     head.append(back, title, el("div", "gh-set-head-spacer"));
     const body = el("div", "gh-set-body gh-scroll");
     page.append(head, body);
-    SETTINGS_PAGES[name](ctx, body, page);
+    // A page can optionally return a dispose() (e.g. gallery's IntersectionObserver); kept on the stack entry
+    // so popSettingsPage/closeSettings/refresh can tear it down instead of leaking it.
+    const initialDispose = SETTINGS_PAGES[name](ctx, body, page);
+    const entry = { name, page, dispose: typeof initialDispose === "function" ? initialDispose : null };
     s.el.appendChild(page);
-    s.stack.push({ name, page });
+    s.stack.push(entry);
     page.dataset.in = "0";
     requestAnimationFrame(() => requestAnimationFrame(() => { if (prev) prev.page.dataset.under = "1"; page.dataset.in = "1"; }));
     // values shown on this page (e.g. the theme name) are rebuilt when you come back to it
-    s.stack[s.stack.length - 1].refresh = () => { body.innerHTML = ""; SETTINGS_PAGES[name](ctx, body, page); };
+    entry.refresh = () => { if (entry.dispose) entry.dispose(); body.innerHTML = ""; const d = SETTINGS_PAGES[name](ctx, body, page); entry.dispose = typeof d === "function" ? d : null; };
     // swipe from the left edge to go back, like every iOS screen
     let x0 = null, dx = 0;
     page.addEventListener("touchstart", (e) => { const t = e.touches[0]; x0 = t.clientX < 28 ? t.clientX : null; dx = 0; }, { passive: true });
@@ -2943,6 +3020,7 @@
     if (s.stack.length <= 1) { closeSettings(ctx); return; }
     const top = s.stack.pop();
     const prev = s.stack[s.stack.length - 1];
+    if (top.dispose) top.dispose();
     top.page.dataset.in = "0";
     prev.page.dataset.under = "0";
     if (prev.refresh) prev.refresh();
@@ -3082,6 +3160,10 @@
         delete more.dataset.busy; paint();
       });
       paint();
+      // Tiles that never scrolled into view stay registered on `io` forever otherwise - the observer holds a
+      // strong reference to every observed (even now-detached) target for the life of the page, and this page
+      // is rebuilt from scratch on every visit/refresh (see pushSettingsPage's dispose plumbing).
+      return () => { if (io) io.disconnect(); };
     },
     // Bookmarks: messages you marked (hold a message > Bookmark). Only on this phone - Snapchat never sees them.
     bookmarks(ctx, body) {
@@ -3619,7 +3701,7 @@
       if (!still && !document.hidden && ctx.state.currentConvId) raf = requestAnimationFrame(loop);
     };
     const lw = { kind, el: cv, start: () => { if (!raf) raf = requestAnimationFrame(loop); }, stop: () => { if (raf) cancelAnimationFrame(raf); raf = 0; } };
-    document.addEventListener("visibilitychange", () => { if (!document.hidden && conv.liveWall === lw) lw.start(); });
+    // (resume-on-visible is one page-lifetime listener set up once in buildConversation, not per-call here)
     conv.liveWall = lw;
     lw.start();
   }
@@ -4038,6 +4120,12 @@
       };
       paintSk();
     }
+    // Open now, with everything built so far (photo, tools, nickname, streak keeper) already in the sheet:
+    // the rest (notifications/retention need an await; the wallpaper cards need one for a photo thumbnail)
+    // fills in a moment later, appended below what's already on screen. Awaiting all of that first, like this
+    // used to, held the slide-in animation itself back by 100-150ms after every tap - dead time with zero
+    // visual feedback, measured on the harness's sheet-open probe (tap-to-sheet-moving latency).
+    openSheetGeneric(s.backdrop, s.sheet);
     // chat settings: notifications, when chats delete, saved messages; group tools
     const st = await api.chatSettings(convId).catch(() => ({}));
     const nt = el("div", "gh-set-group-title"); nt.textContent = "Notifications"; s.sheet.appendChild(nt);
@@ -4126,8 +4214,7 @@
         dimRow.append(cap, g, fcap, fg);
       }
     };
-    await paint();
-    openSheetGeneric(s.backdrop, s.sheet);
+    await paint(); // sheet is already open (see above); this only fills in the wallpaper cards below the fold
   }
 
   // =====================================================================================================
@@ -4538,7 +4625,7 @@
     await loadFavSets();
     if (rseq !== s.rseq) return;
     for (const [name, b] of Object.entries(s.tabs)) b.dataset.on = s.tab === name ? "1" : "0";
-    s.body.innerHTML = "";
+    clearGifBody(s);
     s.body.scrollTop = 0;
     if (s.gif) s.gif.seq++; // a GIF search still loading must not land in another tab
     s.input.placeholder = s.tab === "gifs" ? "Search Tenor" : s.tab === "solo" ? "Search stickers" : "Search GIFs";
@@ -4637,7 +4724,7 @@
     }
     if (s.tab !== which || rseq !== s.rseq) return;
     items.sort((a, b) => b.x._t - a.x._t);
-    s.body.innerHTML = "";
+    clearGifBody(s);
     if (!items.length) {
       s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: which === "recent" ? "Stickers and GIFs you send show up here" : "Hold any sticker or GIF to add it here. Stickers friends send: hold the message and tap \"Add to Favorite Stickers\"." }));
       return;
@@ -4726,6 +4813,14 @@
     const io = g.v && typeof window.__ghostGiphyMock !== "function" && gifVideoIO();
     if (io) { tile._gif = g; io.observe(tile); }
   }
+  // gifIO (above) is created once and never recreated, so every tile it ever observed stays registered - and kept
+  // alive, playing/paused video and all - until unobserved. Every repaint here used to just throw the old tiles
+  // away with body.innerHTML="", so scrolling/searching/switching tabs in the sticker or GIF sheet grew gifIO's
+  // watch list without bound (the exact unbounded-growth problem this file already fights for blob URLs).
+  function clearGifBody(s) {
+    if (gifIO) for (const t of s.body.querySelectorAll(".gh-gif-tile, .gh-sticker-gif")) { if (t._video) t._video.pause(); gifIO.unobserve(t); }
+    s.body.innerHTML = "";
+  }
   // favorites, kept in memory while the sheet is open so every tile knows its star
   const favSets = { gif: new Set(), bitmoji: new Set() };
   async function loadFavSets() {
@@ -4804,7 +4899,7 @@
     await loadFavSets();
     paintGifTabs(s);
     const mySeq = ++s.seq;
-    s.body.innerHTML = "";
+    clearGifBody(s);
     if (s.query) return void loadGifGrid(ctx, s, mySeq, () => tenorSearch(s.query));
     if (s.tab === "trending") return void loadGifGrid(ctx, s, mySeq, () => tenorSearch(""));
     if (s.tab === "favorites") return void loadStaticGifGrid(ctx, s, mySeq, "ghostGifFavs");
@@ -5174,7 +5269,13 @@
   function closeViewer(ctx) {
     const v = ctx.viewer;
     if (v.snap) { const sn = v.snap; v.snap = null; api.closeSnap(sn.convId, sn.msgId).catch(() => {}); if (sn.onClose) sn.onClose(); }
-    if (v.el.dataset.story === "1") setTimeout(() => refreshStories(ctx), 600); // ring goes grey right away
+    if (v.el.dataset.story === "1") {
+      setTimeout(() => refreshStories(ctx), 600); // ring goes grey right away
+      // openStory's resolved photos/videos are fresh blob URLs every open (bridge.js re-resolves each time) and
+      // were never freed - leaving them stacking up for as long as Ghost stays open. Same key bridge.js tracked
+      // them under when it returned them.
+      if (v.story) api.releaseMedia("story:" + v.story.user.id).catch(() => {});
+    }
     v.el.dataset.story = "0";
     if (v.replyOpen) { v.replyOpen = false; v.el.dataset.reply = "0"; v.replyInput.blur(); }
     v.loadToken = (v.loadToken || 0) + 1;
@@ -5513,6 +5614,15 @@
       g = { kind, x0: t.clientX, y0: t.clientY, dx: 0, dy: 0, locked: null, p0: ctx.state.navProgress, rowId: wrapRowId, samples: [{ x: t.clientX, t: nowMs() }] };
     }
     function move(e) {
+      // Every touchmove reaches this twice while its target is still in the DOM: once bubbling through
+      // `stack`'s own listener below, once through the same-target rebind further down (added for the
+      // opposite case - iOS keeps delivering events to a target that WAS removed mid-gesture, which
+      // wouldn't otherwise bubble anywhere). Tagging the event dedupes the common connected-target case:
+      // it used to run this whole function's work twice per real finger movement, sampling the same
+      // (x, t) point into `g.samples` twice - quietly biasing the release-velocity/flick math by making
+      // the ring buffer's small window cover less real time than it looked like it did.
+      if (e.__ghostNavMoveHandled) return;
+      e.__ghostNavMoveHandled = true;
       if (!g || !e.touches || e.touches.length !== 1) return;
       const t = e.touches[0];
       g.dx = t.clientX - g.x0; g.dy = t.clientY - g.y0;

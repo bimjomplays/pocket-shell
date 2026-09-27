@@ -50,11 +50,16 @@
   }
 
   function throttle(fn, ms) {
-    let timer = null, pending = false;
+    let timer = null, pending = false, lastArgs = null;
+    // `emitMessagesFor` is one shared throttle instance called with a different conversationId per open
+    // chat (see openConversations) - the trailing call used to always replay the args from whichever call
+    // happened to start the timer, so a second conversation's update inside the same window was silently
+    // dropped (or, worse, replayed against the FIRST conversation's id). Always replay the most recent args.
     return (...args) => {
+      lastArgs = args;
       if (timer) { pending = true; return; }
       fn(...args);
-      timer = setTimeout(() => { timer = null; if (pending) { pending = false; fn(...args); } }, ms);
+      timer = setTimeout(() => { timer = null; if (pending) { pending = false; fn(...lastArgs); } }, ms);
     };
   }
 
@@ -2424,8 +2429,17 @@
     Promise.resolve()
       .then(() => fn(...(Array.isArray(args) ? args : [])))
       .then((result) => {
-        // remember which chat each media URL belongs to, so leaving the chat can free them (releaseMedia)
-        if ((method === "loadMedia" || method === "openSnap" || method === "replaySnap") && result && Array.isArray(args)) trackMedia(args[0], result.media);
+        // remember which chat each media URL belongs to, so leaving the chat can free them (releaseMedia).
+        // openStory's and loadShare's own resolveMediaInfos() calls make blob URLs the same way (see the media
+        // resolver note above "resolveMediaInfos") but were never tracked here, so they never got revoked -
+        // opening friends' stories (or a shared Spotlight/Discover video) leaked one blob URL per photo/video for
+        // the rest of the page's life. loadShare's are chat media, so they share that chat's own releaseMedia key
+        // (already called when you leave the chat - see ui.js scheduleMediaRelease); a story has no conversation,
+        // so it gets its own "story:<userId>" key that ui.js releases when the story viewer closes.
+        if (result && Array.isArray(args)) {
+          if (method === "loadMedia" || method === "openSnap" || method === "replaySnap" || method === "loadShare") trackMedia(args[0], result.media);
+          else if (method === "openStory") trackMedia("story:" + args[0], result.items);
+        }
         post({ ghost: "res", id, ok: true, result });
       })
       .catch((err) => {
