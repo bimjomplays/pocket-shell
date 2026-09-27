@@ -178,6 +178,13 @@
           "ghostOnly": true
         },
         {
+          "key": "privacyShield",
+          "type": "toggle",
+          "title": "Hide chats in the app switcher and screen recordings",
+          "default": true,
+          "ghostOnly": true
+        },
+        {
           "key": "quickRepliesShow",
           "type": "toggle",
           "title": "Quick replies row",

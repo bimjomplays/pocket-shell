@@ -37,6 +37,7 @@ targets:
         NSPhotoLibraryAddUsageDescription: Lets you save photos and snaps.
         ITSAppUsesNonExemptEncryption: false
         UIFileSharingEnabled: true
+        UIBackgroundModes: [audio]
         LSSupportsOpeningDocumentsInPlace: true
     settings:
       base:

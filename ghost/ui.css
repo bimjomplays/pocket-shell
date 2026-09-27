@@ -1673,3 +1673,7 @@ input, textarea {
 .gh-emoji-cell { font-size: 28px; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border-radius: 10px; }
 .gh-emoji-cell:active { background: rgba(255,255,255,0.1); }
 .gh-share-still svg { display: none; }
+.gh-viewer-save { margin-left: auto; width: 36px; height: 36px; color: #fff; }
+.gh-viewer-save + .gh-viewer-close { margin-left: 0; }
+.gh-call-pip { color: #fff; opacity: 0; pointer-events: none; transition: opacity 0.2s ease; }
+.gh-call[data-remote-video="1"] .gh-call-pip { opacity: 1; pointer-events: auto; }

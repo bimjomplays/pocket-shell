@@ -55,6 +55,7 @@
     back: '<path d="M15 18l-6-6 6-6"/>',
     pin: '<path d="M9 4h6l-1 6 3 3H7l3-3-1-6z"/><path d="M12 13v7"/>',
     eyeOff: '<path d="M3 3l18 18"/><path d="M10.6 5.1A9.8 9.8 0 0112 5c5 0 9 4.5 10 7-.4 1-1.2 2.3-2.4 3.5M6.3 6.3C4.3 7.6 2.9 9.6 2 12c1 2.5 5 7 10 7 1.8 0 3.4-.5 4.8-1.3"/><path d="M9.9 9.9a3 3 0 004.2 4.2"/>',
+    download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>',
     palette: '<path d="M12 3a9 9 0 100 18c1.1 0 1.7-.9 1.4-1.9-.3-.9.2-1.9 1.2-1.9H17a4 4 0 004-4c0-5.6-4-10.2-9-10.2z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7" r="1.2"/><circle cx="15" cy="7.5" r="1.2"/>',
     database: '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/>',
     vibrate: '<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M3 9v6M21 9v6"/>',
@@ -85,6 +86,7 @@
     call: '<path d="M22 16.9v2a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 013.1 4.2 2 2 0 015 2h2a2 2 0 012 1.7c.1.9.3 1.8.6 2.7a2 2 0 01-.4 2.1L8 9.9a16 16 0 006 6l1.4-1.2a2 2 0 012.1-.4c.9.3 1.8.5 2.7.6a2 2 0 011.8 2z"/>',
     videoCall: '<path d="M15 8l6-3v14l-6-3"/><rect x="1" y="6" width="14" height="12" rx="2"/>',
     callEnd: '<path d="M3.6 13.6c4.6-4.1 12.2-4.1 16.8 0 .6.5.6 1.4.1 2l-1.4 1.6c-.5.5-1.3.6-1.9.2l-2.1-1.4c-.5-.3-.7-.9-.6-1.5l.3-1.4a11.4 11.4 0 00-5.6 0l.3 1.4c.1.6-.1 1.2-.6 1.5l-2.1 1.4c-.6.4-1.4.3-1.9-.2l-1.4-1.6c-.5-.6-.5-1.5.1-2z" fill="currentColor"/>',
+    pip: '<rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="11" width="8" height="6" rx="1" fill="currentColor"/>',
     speakerIc: '<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/>',
     attach: '<path d="M20.5 11.5L12 20a5 5 0 01-7-7l8.5-8.5a3.5 3.5 0 015 5L10 18a2 2 0 01-3-3l7-7"/>',
     compose: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>',
@@ -223,6 +225,7 @@
     storyThumb: (userId) => bridge.call("storyThumb", [userId], 30000),
     replyToStory: (userId, item, text) => bridge.call("replyToStory", [userId, item, text], 30000),
     setPresence: (convId) => bridge.call("setPresence", [convId]),
+    sendTyping: (id) => bridge.call("sendTyping", [id]),
     setReadReceipts: (on) => bridge.call("setReadReceipts", [on]),
     startCall: (id, video) => bridge.call("startCall", [id, video], 30000),
     answerCall: (id, video) => bridge.call("answerCall", [id, video], 30000),
@@ -1239,6 +1242,13 @@
     // "@username " - Snapchat itself turns @username / @myai in the text into real mentions when it sends.
     conv.mentionBox = screen.querySelector(".gh-mention-box");
     conv.textarea.addEventListener("input", () => updateMentions(ctx));
+    // let them see "typing…" (at most every 3 s, like Snapchat's own composer; off with Settings > Privacy)
+    conv.textarea.addEventListener("input", () => {
+      const id = ctx.state.currentConvId;
+      if (!id || !conv.textarea.value || !pref("showTyping") || nowMs() - (conv.lastTypingSent || 0) < 3000) return;
+      conv.lastTypingSent = nowMs();
+      api.sendTyping(id).catch(() => {});
+    });
     conv.textarea.addEventListener("click", () => updateMentions(ctx));
     conv.textarea.addEventListener("blur", () => setTimeout(() => hideMentions(ctx), 150));
     // tap the name or picture at the top of a chat: that chat's options (wallpaper)
@@ -2244,6 +2254,7 @@
         <div class="gh-action-item" data-act="copy"></div>
         <div class="gh-action-item" data-act="save"></div>
         <div class="gh-action-item" data-act="fav"></div>
+        <div class="gh-action-item" data-act="photos"></div>
         <div class="gh-action-item gh-action-danger" data-act="delete"></div>
       </div>
     `;
@@ -2267,6 +2278,8 @@
     saveItem.append(icon("star"), textSpan("Save"));
     const favItem = sheet.querySelector('[data-act="fav"]');
     favItem.append(icon("emoji"), textSpan("Add to Favorite Stickers"));
+    const photosItem = sheet.querySelector('[data-act="photos"]');
+    photosItem.append(icon("download"), textSpan("Save to Photos"));
     const delItem = sheet.querySelector('[data-act="delete"]');
     delItem.append(icon("trash"), textSpan("Delete for Everyone"));
 
@@ -2274,7 +2287,7 @@
     overlaysRoot.appendChild(sheet);
     function textSpan(t) { const s = el("span"); s.textContent = t; return s; }
 
-    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, favItem, delItem, message: null, liftedEl: null };
+    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, favItem, delItem, photosItem, message: null, liftedEl: null };
     function closeAction() {
       if (s.liftedEl) { s.liftedEl.classList.remove("gh-msg-lifted"); s.liftedEl = null; }
       closeSheetGeneric(backdrop, sheet);
@@ -2331,6 +2344,15 @@
     const isSticker = message.kind === "sticker" || message.kind === "gif";
     s.favItem.style.display = isSticker ? "" : "none";
     s.favItem.onclick = () => { s.close(); favoriteSticker(ctx, message, wrapEl); };
+    const isMedia = message.kind === "chat-media" || message.kind === "gif" || message.kind === "sticker";
+    s.photosItem.style.display = isMedia ? "" : "none";
+    s.photosItem.onclick = async () => {
+      s.close();
+      const el0 = wrapEl && wrapEl.querySelector("video, img");
+      const src = el0 && (el0.currentSrc || el0.src);
+      if (src) saveRefToPhotos(ctx, { url: src, type: el0.tagName === "VIDEO" ? "video" : "image" });
+      else { const list = await fetchMediaFor(message); if (list[0]) saveRefToPhotos(ctx, list[0]); else ctx.showToast("Still loading - try again"); }
+    };
     const mineMsg = !!(message.fromMe || (message.from && message.from.id === meId));
     s.delItem.style.display = mineMsg ? "" : "none";
     s.delItem.onclick = async () => {
@@ -2727,6 +2749,10 @@
     privacy(ctx, body) {
       let g = setGroup(body, null, "Turn off to read chats without friends seeing \"Opened\". Snaps still count when you open them.");
       setRow(g, { label: "Send Read Receipts", toggle: { get: () => !!pref("readReceipts"), set: (v) => setPref(ctx, "readReceipts", v) } });
+      g = setGroup(body, null, "Friends see \"typing…\" while you write to them.");
+      setRow(g, { label: "Show When I'm Typing", toggle: { get: () => !!pref("showTyping"), set: (v) => setPref(ctx, "showTyping", v) } });
+      g = setGroup(body, null, "Covers Ghost in the app switcher and while your screen is recorded or mirrored. (iPhones don't let apps block a normal screenshot.)");
+      setRow(g, { label: "Privacy Shield", toggle: { get: () => nativeSetting("privacyShield", true) !== false, set: (v) => setNativeSetting("privacyShield", v) } });
       g = setGroup(body, null, "Blurs message previews in the chat list until you open the chat.");
       setRow(g, { label: "Hide Message Previews", toggle: { get: () => !!pref("hidePreviews"), set: (v) => setPref(ctx, "hidePreviews", v) } });
       g = setGroup(body, null, "Your Bitmoji in chats you have open.");
@@ -2969,7 +2995,7 @@
       <div class="gh-call-top">
         <button class="gh-call-min gh-hit" aria-label="Minimise call"></button>
         <div class="gh-call-top-text"><div class="gh-call-top-name"></div><div class="gh-call-top-status"></div></div>
-        <div style="width:44px"></div>
+        <button class="gh-call-pip gh-hit" aria-label="Picture in picture"></button>
       </div>
       <div class="gh-call-local"></div>
       <div class="gh-call-controls">
@@ -2989,6 +3015,18 @@
     setIc("speaker", "speakerIc"); setIc("camera", "videoCall"); setIc("mute", "mic"); setIc("flip", "flip"); setIc("end", "callEnd");
     setIc("decline", "callEnd"); setIc("accept-voice", "call"); setIc("accept-video", "videoCall");
     q(".gh-call-min").appendChild(icon("chevronDown", 26));
+    q(".gh-call-pip").appendChild(icon("pip", 24));
+    // picture in picture: their video keeps playing in a floating window over other apps
+    const enterPip = () => {
+      const v = q(".gh-call-remote video");
+      if (!v) { ctx.showToast("Picture in picture works once their video is on"); return false; }
+      try {
+        if (v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode("picture-in-picture")) { v.webkitSetPresentationMode("picture-in-picture"); return true; }
+        if (v.requestPictureInPicture) { v.requestPictureInPicture().catch(() => {}); return true; }
+      } catch (e) {}
+      ctx.showToast("Picture in picture isn't available here"); return false;
+    };
+    q(".gh-call-pip").addEventListener("click", (e) => { e.stopPropagation(); haptic("light"); enterPip(); });
     const c = { el: wrap, speaker: false, openedFor: null, ignored: new Set(), liveSince: new Map(), timer: null };
     // calls you hung up / declined: late engine updates about them must not reopen the screen
     const ignore = (k) => { if (!k) return; c.ignored.add(k.sessionId || ("pending|" + k.conversationId)); if (c.ignored.size > 50) c.ignored.delete(c.ignored.values().next().value); };
@@ -3209,6 +3247,20 @@
     mic.addEventListener("touchend", () => finish(false));
     mic.addEventListener("touchcancel", () => finish(true));
     mic.addEventListener("click", (e) => { if (!("ontouchstart" in window)) { if (r.rec) finish(false); else start(e.clientX); } });
+  }
+
+  // ---- Save to Photos (the app writes to the camera roll; nothing is sent to Snapchat) ------------------
+  async function saveRefToPhotos(ctx, ref) {
+    try {
+      haptic("light");
+      const url = ref.url || (ref.blob && URL.createObjectURL(ref.blob));
+      if (!url) throw new Error("nothing to save");
+      const blob = ref.blob || await fetch(url).then((r) => r.blob());
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+      await window.webkit.messageHandlers.dg.postMessage({ op: "saveToPhotos", data: btoa(bin), video: ref.type === "video" || /^video/.test(blob.type) });
+      ctx.showToast("Saved to Photos");
+    } catch (e) { ctx.showToast(String(e && e.message || e).includes("access") ? "Allow Photos access for Ghost in Settings" : "Couldn't save"); }
   }
 
   // any emoji as a reaction (Snapchat's newer apps show these; the fixed set above goes as Snapchat's reaction ids)
@@ -3639,6 +3691,7 @@
       <div class="gh-viewer-bars"></div>
       <div class="gh-viewer-top">
         <div class="gh-viewer-top-name"></div>
+        <button class="gh-viewer-save gh-hit" aria-label="Save to Photos"></button>
         <button class="gh-viewer-close gh-hit"></button>
       </div>
       <div class="gh-viewer-media"></div>
@@ -3651,6 +3704,8 @@
     `;
     wrap.querySelector(".gh-viewer-close").appendChild(icon("close", 20));
     wrap.querySelector(".gh-viewer-close").setAttribute("aria-label", "Close");
+    wrap.querySelector(".gh-viewer-save").appendChild(icon("download", 20));
+    wrap.querySelector(".gh-viewer-save").addEventListener("click", (e) => { e.stopPropagation(); const v = ctx.viewer; const ref = v.items[v.idx]; if (ref) saveRefToPhotos(ctx, ref); });
     const v = {
       el: wrap, bars: wrap.querySelector(".gh-viewer-bars"), media: wrap.querySelector(".gh-viewer-media"),
       nameEl: wrap.querySelector(".gh-viewer-top-name"), avatarSlot: wrap.querySelector(".gh-viewer-top"),

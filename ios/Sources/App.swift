@@ -4,6 +4,7 @@ import QuartzCore
 import AVFoundation
 import Vision
 import CoreImage
+import Photos
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -84,6 +85,45 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var keyboardOverlap: CGFloat = 0
     private var lastGhostSafe = ""
     private var speakerOn = false
+    private lazy var shield: UIView = {
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        let icon = UILabel()
+        icon.text = "👻"; icon.font = .systemFont(ofSize: 64); icon.textAlignment = .center
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        blur.contentView.addSubview(icon)
+        NSLayoutConstraint.activate([icon.centerXAnchor.constraint(equalTo: blur.contentView.centerXAnchor),
+                                     icon.centerYAnchor.constraint(equalTo: blur.contentView.centerYAnchor)])
+        return blur
+    }()
+    /// Ghost's privacy shield (Settings > Chats): covers the app while it's in the app switcher or the screen is
+    /// being recorded / mirrored. (iOS gives apps no way to block a plain screenshot.)
+    @objc private func updateShield() {
+        let on = SettingsStore.shared.bool("privacyShield")
+        let inactive = UIApplication.shared.applicationState != .active
+        let captured = view.window?.windowScene?.screen.isCaptured ?? UIScreen.main.isCaptured
+        let show = on && (inactive || captured)
+        if show {
+            if shield.superview == nil { shield.frame = view.bounds; shield.autoresizingMask = [.flexibleWidth, .flexibleHeight]; view.addSubview(shield) }
+        } else {
+            shield.removeFromSuperview()
+        }
+    }
+    /// Save a photo/video to the camera roll (Ghost's "Save to Photos").
+    private func saveToPhotos(_ data: Data, video: Bool, done: @escaping (String?) -> Void) {
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized || status == .limited else { return DispatchQueue.main.async { done("Photos access is off for Ghost") } }
+            let ext = video ? "mp4" : "jpg"
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("ghost-\(UUID().uuidString).\(ext)")
+            do { try data.write(to: url) } catch { return DispatchQueue.main.async { done(error.localizedDescription) } }
+            PHPhotoLibrary.shared().performChanges({
+                if video { PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url) }
+                else { PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: url) }
+            }) { ok, error in
+                try? FileManager.default.removeItem(at: url)
+                DispatchQueue.main.async { done(ok ? nil : (error?.localizedDescription ?? "couldn't save")) }
+            }
+        }
+    }
     /// Ghost calls: loudspeaker vs earpiece. A voice-chat session with defaultToSpeaker plus the port override.
     private func applySpeaker() throws {
         // Only the output route: changing the category/mode under WebKit's call audio cut the other side off entirely
@@ -200,6 +240,14 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         }
         NotificationCenter.default.addObserver(self, selector: #selector(saveLaunchPicture),
                                                name: UIApplication.willResignActiveNotification, object: nil)
+        if Self.ghostMode { // privacy shield: nothing readable in the app switcher or in a screen recording
+            NotificationCenter.default.addObserver(self, selector: #selector(updateShield),
+                                                   name: UIApplication.willResignActiveNotification, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(updateShield),
+                                                   name: UIApplication.didBecomeActiveNotification, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(updateShield),
+                                                   name: UIScreen.capturedDidChangeNotification, object: nil)
+        }
         TouchWindow.onTouch = { [weak self] in self?.renderFast(for: 2.5) }
         buildTabBar()
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
@@ -634,6 +682,11 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "trail":
             trail(body["text"] as? String ?? "")
             replyHandler(true, nil)
+        case "saveToPhotos":
+            guard let b64 = body["data"] as? String, let data = Data(base64Encoded: b64) else { return replyHandler(nil, "no data") }
+            saveToPhotos(data, video: (body["video"] as? Bool) ?? false) { error in
+                if let error { replyHandler(nil, error) } else { replyHandler(true, nil) }
+            }
         case "cutout": // Ghost's sticker maker: lift the subject out of a photo (iOS 17 Vision), transparent PNG back
             guard let b64 = body["image"] as? String, let data = Data(base64Encoded: b64),
                   let image = UIImage(data: data), let cg = image.cgImage else { return replyHandler(nil, "bad image") }

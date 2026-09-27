@@ -562,7 +562,7 @@
       }
       box.dataset.count = String(box.children.length);
     };
-    sync(remoteBox, remote.videoStreams, "video", (v) => { v.muted = true; }); // (sound comes from the audio elements)
+    sync(remoteBox, remote.videoStreams, "video", (v) => { v.muted = true; v.setAttribute("autopictureinpicture", ""); }); // (sound comes from the audio elements; PiP when Ghost goes to the background)
     sync(audioBox, remote.audioStreams, "audio");
     const lv = on && media.local && media.local.video && media.local.video.stream;
     sync(localBox, lv ? { local: lv } : {}, "video", (v) => { v.muted = true; });
@@ -1626,6 +1626,14 @@
       return true;
     },
     flipCamera() { const c = window.__dgCam; if (c && typeof c.flip === "function") { c.flip(); return true; } return false; },
+
+    // "typing…" for the other side, like Snapchat's composer: messaging.sendTypingNotification(conversationIdObj)
+    async sendTyping(conversationId) {
+      requireStore();
+      const m = messaging();
+      if (typeof m.sendTypingNotification === "function") await m.sendTypingNotification(convIdObj(conversationId));
+      return true;
+    },
 
     // Voice note: Snapchat's own voice-note sender (main.js 66836, the "$case:\"note\"...audio" encoder): it measures
     // the clip, uploads it and sends the note - messaging.sendVoiceNote(destinations, blob, locale).
