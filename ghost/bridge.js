@@ -319,12 +319,23 @@
   // bitmoji_avatar_id, bitmoji_selfie_id? } (main.js: "publicUsers:new Map", readers `.get(userId)`, and the
   // search/friend-picker code reading e.display_name / e.mutable_username). Device run 1 showed every
   // conversation as "Conversation": the old code looked for names inside messaging.conversations, which has none.
+  let userIndex = null, userIndexSize = -1;
+  const extraUsers = new Map();
+  const wantUsers = new Set(); // ids with no record yet: asked for via user.ensureUsers (what Snapchat does for rows)
   function publicUser(id) {
     const s = state();
     const map = s && s.user && s.user.publicUsers;
     if (!id || !map) return null;
-    const raw = typeof map.get === "function" ? map.get(id) : map[id];
-    if (!raw) return null;
+    let raw = typeof map.get === "function" ? map.get(id) : map[id];
+    if (!raw) {
+      if (!userIndex || userIndexSize !== (map.size || 0)) {
+        userIndex = new Map(); userIndexSize = map.size || 0;
+        const vals = typeof map.values === "function" ? map.values() : Object.values(map);
+        for (const v of vals) { const k = v && idOf(v.user_id); if (k) userIndex.set(k, v); }
+      }
+      raw = userIndex.get(id) || extraUsers.get(id);
+    }
+    if (!raw) { wantUsers.add(id); return null; }
     const name = firstString(raw.display_name, raw.displayName, raw.display, raw.mutable_username, raw.username);
     return {
       id,
@@ -334,12 +345,30 @@
       bitmojiUrl: bitmojiUrl(firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId), firstString(raw.bitmoji_selfie_id, raw.bitmojiSelfieId)),
     };
   }
-  const idOf = (p) => (typeof p === "string" ? p : p && firstString(p.id, p.userId, p.user_id, p.participantId, p.str)) || undefined;
+  // Every id in Snapchat's state is an object { id: Uint8Array(16), str: "<uuid>" } (device sample 2026-09-26);
+  // participants wrap it again as { participantId: {id, str}, color }.
+  const idOf = (p) => {
+    if (!p) return undefined;
+    if (typeof p === "string") return p;
+    if (typeof p.str === "string") return p.str;
+    return idOf(p.participantId) || idOf(p.userId) || idOf(p.user_id) || (typeof p.id === "string" ? p.id : undefined);
+  };
+  const toNum = (v) => (typeof v === "bigint" ? Number(v) : typeof v === "number" ? v : typeof v === "string" && /^\d+$/.test(v) ? Number(v) : 0);
+  // Snapchat's own actions want the id OBJECT, not the string: passing the uuid string made every
+  // enterConversation/exitConversation throw "undefined is not an object (evaluating 'e[t+0]')" (it reads the bytes).
+  function convIdObj(key) {
+    const m = messaging();
+    const f = (m.feed || {})[key];
+    if (f && f.conversationId && typeof f.conversationId === "object") return f.conversationId;
+    const c = (m.conversations || {})[key];
+    const cid = c && c.conversation && c.conversation.conversationId;
+    return cid && typeof cid === "object" ? cid : key;
+  }
   let meIdCache = null;
   function meId() {
     if (meIdCache) return meIdCache;
     const s = state();
-    const direct = s && s.auth && firstString(s.auth.userId, s.auth.user_id, s.auth.currentUserId);
+    const direct = s && s.auth && (idOf(s.auth.userId) || idOf(s.auth.me && (s.auth.me.userId || s.auth.me.user_id)));
     if (direct) return (meIdCache = direct);
     const counts = new Map();
     const feed = messaging().feed || {};
@@ -356,7 +385,8 @@
     if (!obj || typeof obj !== "object" || depth < 0) return best;
     for (const k of Object.keys(obj)) {
       const v = obj[k];
-      if (typeof v === "number" && /time|Ts$|Ms$|stamp/i.test(k) && v > 1e12 && v < 4e12 && v > best) best = v;
+      const num = typeof v === "bigint" ? Number(v) : v;
+      if (typeof num === "number" && /time|Ts$|Ms$|stamp/i.test(k) && num > 1e12 && num < 4e12 && num > best) best = num;
       else if (typeof v === "string" && /time|stamp/i.test(k) && /^\d{13}$/.test(v) && +v > best) best = +v;
       else if (v && typeof v === "object" && !(v instanceof Map)) best = Math.max(best, newestTimestamp(v, depth - 1));
     }
@@ -418,17 +448,20 @@
     const others = ids.filter((id) => id !== me);
     const participants = others.map(personFor).filter(Boolean);
     const isGroup = others.length > 1 || feed.conversationType === 1;
-    const title = firstString(feed.conversationTitle) || participants.map((p) => p.name).join(", ") || "Conversation";
+    const convRec = entry && entry.conversation;
+    const title = firstString(feed.conversationTitle, convRec && convRec.title) || participants.map((p) => p.name).join(", ") || "Conversation";
     const info = feed.displayInfo || {};
     const item = info.feedItem || {};
     const creator = idOf(info.feedItemCreatorId);
     const fromMe = !!(creator && me && creator === me);
     const kindCase = item.$case || ["snap", "chat", "call", "chatMedia", "note"].find((k) => item[k]) || "none";
     const kind = { snap: "snap", chat: "text", call: "call", chatMedia: "chat-media", note: "audio" }[kindCase] || "none";
-    const unread = info.viewed === false && !fromMe;
-    const streak = feed.streakMetadata && feed.streakMetadata.count ? {
-      count: Number(feed.streakMetadata.count) || 0,
-      expiring: !!(feed.streakMetadata.expirationTimestampMs && Number(feed.streakMetadata.expirationTimestampMs) - Date.now() < 4 * 3600e3),
+    const unreadChats = toNum(item.chat && item.chat.unreadChatCount);
+    const unread = (info.viewed === false && !fromMe) || unreadChats > 0;
+    const sm = feed.streakMetadata;
+    const streak = sm && toNum(sm.count) > 0 ? {
+      count: toNum(sm.count),
+      expiring: toNum(sm.expirationTimestampMs) > 0 && toNum(sm.expirationTimestampMs) - Date.now() < 4 * 3600e3,
     } : undefined;
     let text;
     if (kind === "text" && entry && entry.messages && typeof entry.messages.values === "function") {
@@ -444,13 +477,37 @@
       avatarUrl: undefined,
       lastActivityTs: newestTimestamp(feed, 3) || 0,
       preview: { kind, text, fromMe, status: info.viewed ? (fromMe ? "opened" : "viewed") : (fromMe ? "delivered" : "received") },
-      unreadCount: unread ? 1 : 0,
+      unreadCount: unread ? Math.max(1, unreadChats) : 0,
       hasUnreadSnap: unread && kind === "snap",
       streak,
       muted: undefined,
       pinned: undefined,
     };
   }
+  let messageSampled = false;
+  function sampleFirstMessageOnce(key) {
+    if (messageSampled) return;
+    setTimeout(() => safe("sample-message", () => {
+      const entry = (messaging().conversations || {})[key];
+      const msgs = entry && entry.messages;
+      if (!msgs || typeof msgs.values !== "function" || !msgs.size) return;
+      messageSampled = true;
+      const first = msgs.values().next().value;
+      const text = JSON.stringify({ entryKeys: Object.keys(entry), mapKey: redacted(msgs.keys().next().value, 2), message: redacted(first, 6) });
+      for (let i = 0, n = 1; i < Math.min(text.length, 16000); i += 380, n++) trail("sample-message part " + n, text.slice(i, i + 380));
+    }), 1500);
+  }
+  // friends whose records aren't loaded yet: ask Snapchat to fetch them (its list does the same for visible rows)
+  setInterval(() => {
+    if (!wantUsers.size || !store) return;
+    const u = (state() || {}).user;
+    const ids = [...wantUsers].slice(0, 64); for (const id of ids) wantUsers.delete(id);
+    if (u && typeof u.ensureUsers === "function") safe("ensureUsers", () => Promise.resolve(u.ensureUsers(ids)).then((recs) => {
+      // it returns the records too: keep them, whether or not they land in publicUsers
+      for (const r of Array.isArray(recs) ? recs : []) { const k = r && idOf(r.user_id); if (k) { extraUsers.set(k, r); } }
+      emitConversations();
+    }).catch((e) => trail("ensureUsers", e, "error")));
+  }, 1200);
   const allConversationIds = () => {
     const m = messaging();
     const ids = new Set(Object.keys(m.feed || {}));
@@ -566,13 +623,14 @@
       // Snapchat's chat pane: `useEffect(() => { enterConversation(conversationId, conversationType) })` - the second
       // argument is the conversation TYPE (device run 1 passed a string here and every open threw).
       const type = safe("conv-type", () => ((messaging().feed || {})[conversationId] || {}).conversationType, undefined);
-      if (typeof m.enterConversation === "function") await m.enterConversation(conversationId, type);
+      if (typeof m.enterConversation === "function") await m.enterConversation(convIdObj(conversationId), type);
+      sampleFirstMessageOnce(conversationId);
       const entry = conversationEntry(conversationId);
       // ...and it reports the newest message as seen via displayedMessages(conversationId, messageId) = read receipt,
       // exactly once per open like the real chat screen (only for the chat you actually opened)
       safe("displayed", () => {
         let lastId; if (entry && entry.messages && typeof entry.messages.keys === "function") for (const k of entry.messages.keys()) lastId = k;
-        if (lastId !== undefined && typeof m.displayedMessages === "function") Promise.resolve(m.displayedMessages(conversationId, lastId)).catch((e) => trail("displayed", e, "error"));
+        if (lastId !== undefined && typeof m.displayedMessages === "function") Promise.resolve(m.displayedMessages(convIdObj(conversationId), lastId)).catch((e) => trail("displayed", e, "error"));
       });
       const list = [];
       if (entry && entry.messages && typeof entry.messages.entries === "function") {
@@ -586,14 +644,14 @@
       requireStore();
       openConversations.delete(conversationId);
       const m = messaging();
-      if (typeof m.exitConversation === "function") await m.exitConversation(conversationId);
+      if (typeof m.exitConversation === "function") await m.exitConversation(convIdObj(conversationId));
       return true;
     },
 
     async loadOlder(conversationId) {
       requireStore();
       const m = messaging();
-      if (typeof m.paginateMessages === "function") await m.paginateMessages(conversationId);
+      if (typeof m.paginateMessages === "function") await m.paginateMessages(convIdObj(conversationId));
       const entry = conversationEntry(conversationId);
       const list = [];
       if (entry && entry.messages && typeof entry.messages.entries === "function") {
@@ -608,7 +666,8 @@
       const m = messaging();
       if (typeof m.sendTextMessage !== "function") throw new Error("sendTextMessage action missing");
       const replyOpts = opts && opts.replyToMessageId ? { messageId: opts.replyToMessageId } : undefined;
-      await (replyOpts ? m.sendTextMessage(conversationId, text, replyOpts) : m.sendTextMessage(conversationId, text));
+      const cid = convIdObj(conversationId);
+      await (replyOpts ? m.sendTextMessage(cid, text, replyOpts) : m.sendTextMessage(cid, text));
       return {};
     },
 
@@ -621,7 +680,7 @@
       // itself, so this is the ONE send path here we're confident stays fully native-looking on the
       // recipient's side without any extra wrapping from us.
       const file = blob instanceof File ? blob : new File([blob], `ghost.${(opts && opts.kind) || "bin"}`, { type: blob.type });
-      await m.sendMediaMessage({ conversations: [conversationId], stories: [] }, [file]);
+      await m.sendMediaMessage({ conversations: [convIdObj(conversationId)], stories: [] }, [file]);
       return {};
     },
 
@@ -690,7 +749,7 @@
       // action, not Snapchat's - if this ever renumbers, saveMessage will silently do the wrong thing,
       // which is exactly why BRIDGE_NOTES.md flags this as a "must re-check by string search" item.
       const SAVE = 3, UNSAVE = 4;
-      await m.updateMessage(conversationId, messageId, saved ? SAVE : UNSAVE);
+      await m.updateMessage(convIdObj(conversationId), messageId, saved ? SAVE : UNSAVE);
       return true;
     },
 
@@ -701,8 +760,8 @@
       // Snapchat's own lightbox calls onSnapInteraction(VIEWING_INITIATED, ...) then (VIEWING_FINISHED,
       // ...) through these same store actions - this is the actual "mark viewed" mechanism, not a
       // separate flag we set ourselves.
-      if (typeof m.startedViewingSnap === "function") await m.startedViewingSnap(conversationId, messageId);
-      if (typeof m.finishedViewingSnap === "function") await m.finishedViewingSnap(conversationId, messageId);
+      if (typeof m.startedViewingSnap === "function") await m.startedViewingSnap(convIdObj(conversationId), messageId);
+      if (typeof m.finishedViewingSnap === "function") await m.finishedViewingSnap(convIdObj(conversationId), messageId);
       const entry = conversationEntry(conversationId);
       const raw = entry && entry.messages && typeof entry.messages.get === "function" && entry.messages.get(messageId);
       // No verified path from a message object to a fetchable snap media URL/blob while reading the
