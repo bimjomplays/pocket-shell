@@ -57,7 +57,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private static let tabBarColor = UIColor(red: 0x1e / 255, green: 0x1e / 255, blue: 0x1e / 255, alpha: 1)
     private static let tabBarHeight: CGFloat = 82
     private static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
-    private static let giphyHosts: Set<String> = ["media.giphy.com", "api.giphy.com"]
+    private static let giphyHosts: Set<String> = ["media.giphy.com", "api.giphy.com", "api.bitmoji.com"] // + the Bitmoji sticker catalog (Ghost)
     private static let background = UIColor(red: 0x12 / 255, green: 0x12 / 255, blue: 0x12 / 255, alpha: 1)
 
     private let world = WKContentWorld.world(name: "darkmobile")

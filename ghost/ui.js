@@ -192,6 +192,7 @@
     closeConversation: (id) => bridge.call("closeConversation", [id]),
     loadOlder: (id) => bridge.call("loadOlder", [id]),
     sendText: (id, text, opts) => bridge.call("sendText", [id, text, opts || {}]),
+    sendSticker: (id, sticker) => bridge.call("sendSticker", [id, sticker], 30000),
     sendMedia: (id, blob, opts) => bridge.call("sendMedia", [id, blob, opts || {}], 120000), // uploads can be slow on cellular
     sendSnap: (ids, blob, opts) => bridge.call("sendSnap", [ids, blob, opts || {}], 120000),
     react: (id, messageId, emoji) => bridge.call("react", [id, messageId, emoji]),
@@ -389,6 +390,7 @@
     root.appendChild(overlays);
     ctx.actionSheet = buildActionSheet(ctx, overlays);
     ctx.gifSheet = buildGifSheet(ctx, overlays);
+    ctx.stickerSheet = buildStickerSheet(ctx, overlays);
     ctx.newChatSheet = buildNewChatSheet(ctx, overlays);
     ctx.attachSheet = buildAttachSheet(ctx, overlays);
     // Every sheet starts fully out of the render tree (see closeSheetGeneric's note) — openSheetGeneric
@@ -1008,7 +1010,8 @@
     screen.querySelector('[data-act="attach"]').appendChild(icon("attach"));
     screen.querySelector('[data-act="attach"]').setAttribute("aria-label", "Attach media");
     screen.querySelector('[data-act="emoji"]').appendChild(icon("emoji"));
-    screen.querySelector('[data-act="emoji"]').setAttribute("aria-label", "Emoji");
+    screen.querySelector('[data-act="emoji"]').setAttribute("aria-label", "Stickers");
+    screen.querySelector('[data-act="emoji"]').addEventListener("click", () => openStickerSheet(ctx));
     screen.querySelector('[data-act="mic"]').appendChild(icon("mic"));
     screen.querySelector('[data-act="mic"]').setAttribute("aria-label", "Record voice message");
     screen.querySelector('[data-act="send"]').appendChild(icon("send", 18));
@@ -2033,6 +2036,130 @@
   // =====================================================================================================
   // GIF sheet
   // =====================================================================================================
+  // =====================================================================================================
+  // Bitmoji stickers (the composer's smiley button). Catalog = Bitmoji's public sticker list (comic ids + tags, fetched
+  // natively, cached a week); every sticker is drawn with YOUR Bitmoji (and, in a 1:1 chat, the friend's too) from
+  // Snapchat's own render host, and sent as a real Bitmoji sticker message (bridge sendSticker).
+  // =====================================================================================================
+  const STICKER_CATALOG_URL = "https://api.bitmoji.com/content/templates";
+  let stickerCatalog = null;
+  async function loadStickerCatalog() {
+    if (stickerCatalog) return stickerCatalog;
+    const cached = await storage.get("ghostBitmojiCatalog", null);
+    if (cached && cached.at && Date.now() - cached.at < 7 * 864e5 && Array.isArray(cached.solo) && cached.solo.length) return (stickerCatalog = cached);
+    const bytes = await gmBytes(STICKER_CATALOG_URL);
+    const json = JSON.parse(new TextDecoder().decode(bytes));
+    const trim = (list) => (list || []).filter((x) => x && /^\d+$/.test(String(x.comic_id))).map((x) => [String(x.comic_id), ((x.tags || []).concat(x.alt_text || [])).join(" ").toLowerCase().slice(0, 240)]);
+    stickerCatalog = { at: Date.now(), solo: trim(json.imoji), duo: trim(json.friends) };
+    storage.set("ghostBitmojiCatalog", stickerCatalog);
+    return stickerCatalog;
+  }
+  const stickerUrl = (comic, me, friend) => `https://cf-st.sc-cdn.net/3d/render/${[comic, me, friend].filter(Boolean).join("-")}-v1.webp?scale=1&ua=2`;
+  function buildStickerSheet(ctx, overlaysRoot) {
+    const backdrop = el("div", "gh-backdrop");
+    const sheet = el("div", "gh-sheet gh-gif-sheet gh-sticker-sheet");
+    sheet.innerHTML = `
+      <div class="gh-sheet-grip"></div>
+      <div class="gh-gif-search-row"><div class="gh-search"></div></div>
+      <div class="gh-gif-tabs">
+        <button class="gh-gif-tab" data-tab="recent">Recent</button>
+        <button class="gh-gif-tab" data-tab="solo">Bitmoji</button>
+        <button class="gh-gif-tab" data-tab="duo">With friend</button>
+      </div>
+      <div class="gh-gif-body gh-sticker-grid gh-scroll"></div>
+    `;
+    const searchWrap = sheet.querySelector(".gh-search");
+    searchWrap.appendChild(icon("search", 16));
+    const input = el("input");
+    input.placeholder = "Search stickers";
+    input.autocapitalize = "off"; input.autocomplete = "off"; input.spellcheck = false;
+    searchWrap.appendChild(input);
+    overlaysRoot.append(backdrop, sheet);
+    backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
+    const s = { backdrop, sheet, input, body: sheet.querySelector(".gh-gif-body"), tabs: {}, tab: "solo", query: "", list: [], shown: 0 };
+    for (const b of sheet.querySelectorAll(".gh-gif-tab")) {
+      s.tabs[b.dataset.tab] = b;
+      b.addEventListener("click", () => { haptic("light"); s.tab = b.dataset.tab; renderStickers(ctx, s); });
+    }
+    let t;
+    input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { s.query = input.value.trim().toLowerCase(); renderStickers(ctx, s); }, 200); });
+    s.body.addEventListener("scroll", () => { if (s.body.scrollTop + s.body.clientHeight > s.body.scrollHeight - 400) moreStickers(ctx, s); }, { passive: true });
+    return s;
+  }
+  function stickerPeople(ctx) {
+    const me = ctx.state.me || {};
+    const conv = ctx.state.convById.get(ctx.state.currentConvId) || {};
+    const friend = !conv.isGroup && conv.participants && conv.participants[0];
+    return { me: me.avatarId, friend: friend && friend.avatarId, friendName: friend && (friend.name || "").split(" ")[0] };
+  }
+  async function openStickerSheet(ctx) {
+    haptic();
+    const s = ctx.stickerSheet;
+    const p = stickerPeople(ctx);
+    if (!p.me) { ctx.showToast("Your Bitmoji hasn't loaded yet"); return; }
+    s.tabs.duo.style.display = p.friend ? "" : "none";
+    s.tabs.duo.textContent = p.friend ? "With " + p.friendName : "";
+    s.query = ""; s.input.value = "";
+    const recents = await storage.get("ghostStickerRecents", []);
+    s.tab = recents.length ? "recent" : "solo";
+    openSheetGeneric(s.backdrop, s.sheet);
+    renderStickers(ctx, s);
+  }
+  async function renderStickers(ctx, s) {
+    for (const [name, b] of Object.entries(s.tabs)) b.dataset.on = s.tab === name ? "1" : "0";
+    s.body.innerHTML = "";
+    s.body.scrollTop = 0;
+    const p = stickerPeople(ctx);
+    let list = [];
+    if (s.tab === "recent") {
+      list = (await storage.get("ghostStickerRecents", [])).filter((r) => !r.duo || p.friend).map((r) => [r.c, "", r.duo]);
+      if (!list.length) { s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Stickers you send show up here" })); return; }
+    } else {
+      let cat;
+      try { cat = await loadStickerCatalog(); }
+      catch (e) { gtrail("sticker catalog failed " + (e && e.message || e)); s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Couldn't load stickers" })); return; }
+      const duo = s.tab === "duo";
+      list = (duo ? cat.duo : cat.solo).map((x) => [x[0], x[1], duo]);
+    }
+    if (s.query) list = list.filter((x) => x[1] && x[1].includes(s.query));
+    s.list = list; s.shown = 0;
+    if (!list.length) { s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "No stickers found" })); return; }
+    moreStickers(ctx, s);
+  }
+  function moreStickers(ctx, s) {
+    if (s.shown >= s.list.length) return;
+    const p = stickerPeople(ctx);
+    const frag = document.createDocumentFragment();
+    for (const [comic, , duo] of s.list.slice(s.shown, s.shown + 48)) {
+      const tile = el("button", "gh-sticker-tile gh-press");
+      tile.setAttribute("aria-label", "Send sticker");
+      const img = el("img");
+      img.loading = "lazy"; img.alt = "";
+      img.src = stickerUrl(comic, p.me, duo ? p.friend : null);
+      img.addEventListener("error", () => tile.remove(), { once: true }); // a few catalog stickers don't exist in 3D
+      tile.appendChild(img);
+      tile.addEventListener("click", () => sendStickerNow(ctx, s, comic, duo));
+      frag.appendChild(tile);
+    }
+    s.shown += 48;
+    s.body.appendChild(frag);
+  }
+  async function sendStickerNow(ctx, s, comic, duo) {
+    const p = stickerPeople(ctx);
+    const convId = ctx.state.currentConvId;
+    if (!convId || !p.me) return;
+    haptic();
+    closeSheetGeneric(s.backdrop, s.sheet);
+    try {
+      await api.sendSticker(convId, { comicId: comic, myAvatarId: p.me, friendAvatarId: duo ? p.friend : undefined });
+      const recents = await storage.get("ghostStickerRecents", []);
+      await storage.set("ghostStickerRecents", [{ c: comic, duo: !!duo }, ...recents.filter((r) => !(r.c === comic && !!r.duo === !!duo))].slice(0, 48));
+    } catch (e) {
+      gtrail("sticker send failed " + (e && e.message || e));
+      ctx.showToast("Couldn't send that sticker");
+    }
+  }
+
   function buildGifSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-gif-sheet");

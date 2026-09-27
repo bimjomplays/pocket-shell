@@ -1390,3 +1390,10 @@ input, textarea {
 .gh-sticker img { width: auto; height: auto; max-width: 150px; max-height: 150px; min-width: 60px; object-fit: contain; }
 .gh-sticker[data-loading="1"] img { width: 120px; height: 120px; border-radius: 16px; background: rgba(255,255,255,0.06); }
 .gh-sticker[data-broken="1"] img { visibility: hidden; width: 120px; height: 40px; }
+
+/* Bitmoji sticker picker */
+.gh-sticker-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; align-content: start; padding: 6px 8px calc(12px + var(--gh-safe-b)); }
+.gh-sticker-tile { aspect-ratio: 1; border-radius: 12px; display: flex; align-items: center; justify-content: center; background: transparent; }
+.gh-sticker-tile:active { background: rgba(255,255,255,0.08); transform: scale(0.94); }
+.gh-sticker-tile img { width: 100%; height: 100%; object-fit: contain; }
+.gh-gif-empty { grid-column: 1 / -1; padding: 40px 16px; text-align: center; color: var(--gh-text-secondary); font-size: 14px; }

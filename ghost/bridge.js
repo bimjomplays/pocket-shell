@@ -260,6 +260,7 @@
       username,
       avatarUrl: undefined, // no separate non-bitmoji avatar CDN found while reading the bundle
       bitmojiUrl: bitmojiUrl(avatarId, selfieId, sceneId),
+      avatarId,
       color: undefined,
     };
   }
@@ -361,6 +362,27 @@
     const missing = Object.keys(stickerHelperCache).filter((k) => !stickerHelperCache[k]);
     if (missing.length) trail("sticker-helpers", "missing " + missing.join(","), "error");
     return stickerHelperCache;
+  }
+  let sendHelperCache;
+  function exportWhere(moduleNeedle, pick) {
+    const factories = webpackRequire && webpackRequire.m;
+    if (!factories) return null;
+    for (const id of Object.keys(factories)) {
+      if (!String(factories[id]).includes(moduleNeedle)) continue;
+      const exp = safe("export-where", () => webpackRequire(id), null);
+      if (!exp) continue;
+      for (const k of Object.keys(exp)) { const v = safe("export-where-get", () => exp[k], null); if (safe("export-where-pick", () => pick(v), false)) return v; }
+    }
+    return null;
+  }
+  function sendHelpers() {
+    if (sendHelperCache) return sendHelperCache;
+    sendHelperCache = {
+      codec: exportWhere("e.content.sticker,t.uint32(34)", (v) => v && typeof v.encode === "function" && typeof v.decode === "function"), // message content proto
+      proxy: exportWhere("Comlink.proxy", (v) => typeof v === "function" && String(v).includes("Object.assign(e,{[")),                  // Comlink.proxy(callbacks)
+    };
+    if (!sendHelperCache.codec || !sendHelperCache.proxy) trail("send-helpers", "missing " + Object.keys(sendHelperCache).filter((k) => !sendHelperCache[k]).join(","), "error");
+    return sendHelperCache;
   }
   let lastStory = null;
   let storyThumbFnCache;
@@ -633,7 +655,7 @@
     if (!viaSnap && sel && idObjs.get(id)) viaSnap = safe("sel-get-obj", () => sel(idObjs.get(id))(state()), null);
     if (viaSnap && typeof viaSnap === "object") {
       const name = firstString(viaSnap.display_name, viaSnap.displayName, viaSnap.display, viaSnap.mutable_username, viaSnap.username);
-      if (name) return { id, name, username: firstString(viaSnap.mutable_username, viaSnap.username), avatarUrl: undefined,
+      if (name) return { id, name, username: firstString(viaSnap.mutable_username, viaSnap.username), avatarUrl: undefined, avatarId: firstString(viaSnap.bitmoji_avatar_id, viaSnap.bitmojiAvatarId),
         bitmojiUrl: bitmojiUrl(firstString(viaSnap.bitmoji_avatar_id, viaSnap.bitmojiAvatarId), firstString(viaSnap.bitmoji_selfie_id, viaSnap.bitmojiSelfieId), firstString(viaSnap.bitmoji_scene_id, viaSnap.bitmojiSceneId)) };
     }
     const s = state();
@@ -656,6 +678,7 @@
       username: firstString(raw.mutable_username, raw.username),
       avatarUrl: undefined,
       bitmojiUrl: bitmojiUrl(firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId), firstString(raw.bitmoji_selfie_id, raw.bitmojiSelfieId), firstString(raw.bitmoji_scene_id, raw.bitmojiSceneId)),
+      avatarId: firstString(raw.bitmoji_avatar_id, raw.bitmojiAvatarId),
     };
   }
   // Every id in Snapchat's state is an object { id: Uint8Array(16), str: "<uuid>" } (device sample 2026-09-26);
@@ -1259,6 +1282,39 @@
       // friends was already populated before this session touched anything, i.e. Snapchat itself preloads it for
       // the story rail's thumbnails without counting as a view).
       return { items: media };
+    },
+
+    // Bitmoji sticker. Snapchat Web can't send stickers, so this builds the same message the phone app sends for a
+    // Bitmoji sticker (device sample 2026-09-27, contentType 6): content.sticker.sticker = {$case: "included", included:
+    // {packId: "bitmoji", stickerId: "comicId:1:myAvatarId[:friendAvatarId]", stickerType: 1 (BITMOJI), ...}}, encoded with
+    // Snapchat's own message-content codec and sent through the messaging client exactly like its text sender does
+    // (main.js 66836: sendMessageWithContent(destinations, {content, contentType, platformAnalytics, ...}, proxied callbacks)).
+    async sendSticker(conversationId, sticker) {
+      requireStore();
+      const h = sendHelpers();
+      const client = messaging().client;
+      if (!h.codec || !h.proxy || !client || typeof client.getConversationManager !== "function") throw new Error("sticker sending isn't available");
+      const comic = String(sticker && sticker.comicId || "");
+      const mine = String(sticker && sticker.myAvatarId || "");
+      if (!/^\d+$/.test(comic) || !mine) throw new Error("bad sticker");
+      const stickerId = [comic, "1", mine, sticker.friendAvatarId || ""].filter(Boolean).join(":");
+      const content = h.codec.encode({ content: { $case: "sticker", sticker: { sticker: { $case: "included", included: {
+        packId: "bitmoji", stickerId, animated: false, giphySourceUrl: "", stickerType: 1, highResUri: "", isReaction: false } } } }, decorators: undefined }).finish();
+      const u = crypto.randomUUID();
+      const attemptId = { id: Uint8Array.from(u.replace(/-/g, "").match(/../g).map((x) => parseInt(x, 16))), str: u };
+      const destinations = { phoneNumbers: [], conversations: [convIdObj(conversationId)], stories: [], massSnaps: [] };
+      const message = { content, quotedMessageId: undefined, contentType: 6 /* STICKER */,
+        platformAnalytics: { content: undefined, metricsMessageType: 1 /* STICKER */, metricsMessageMediaType: 5 /* DERIVED_FROM_MESSAGE_TYPE */, reactionSource: 0, attemptId },
+        localMediaReferences: [], incidentalAttachments: [], savePolicy: 1 /* LIFETIME */, allowsTranscription: false, botMention: false };
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("sticker send timed out")), 30000);
+        client.getConversationManager().sendMessageWithContent(destinations, message, h.proxy({
+          onSuccess: () => { clearTimeout(t); resolve(); },
+          onError: (e) => { clearTimeout(t); reject(new Error("Snapchat refused the sticker (" + errText(e) + ")")); },
+          onQueued: () => {},
+        }));
+      });
+      return true;
     },
 
     // Swipe-up reply to a friend's story snap: Snapchat's composer does
