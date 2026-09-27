@@ -855,6 +855,8 @@
       from: personFor(senderId) || { id: senderId || "unknown", name: "Unknown" },
       ts: toNum(md.createdAt) || Date.now(),
       kind,
+      // Exact protobuf case, not describeStatus's old shape heuristic. Never match a deletion by name/time.
+      deleted: kase === "statusMessage" && c.statusMessage && c.statusMessage.status && c.statusMessage.status.$case === "messageErase" || undefined,
       text: text || (kind === "unknown" && kase ? "[" + kase + "]" : text),
       media, // chat photos/videos: download/decrypt goes through Snapchat's media manager - next step
       replyTo: mc.quotedMessage ? safe("quoted", () => {
@@ -1144,6 +1146,155 @@
   let unsubscribeStore = null;
   const openConversations = new Set(); // conversation ids the UI currently wants `messages` events for
 
+  const archive = typeof window.GhostRetention === "function" ? new window.GhostRetention() : null;
+  const archiveRefs = new Map(), archiveFeed = new Map(), quietQueue = new Map(), archiveMediaQueue = new Map();
+  let quietBusy = false, archiveMediaBusy = false, quietFetch = null, retentionNetworkError = "", lastCaptureAt = 0;
+  function retentionError() { retentionNetworkError = "Some messages or media could not be captured. Ghost will retry when chats update."; }
+  function retentionAccount() {
+    // Retention must never use meId's participant-frequency guess or its cache across account changes.
+    const auth = (state() || {}).auth;
+    return loggedIn() && auth ? idOf(auth.userId) || "" : "";
+  }
+  function observeRetention() {
+    if (!archive) return;
+    const account = retentionAccount();
+    if (archive.account !== account) {
+      archiveRefs.clear(); archiveFeed.clear(); quietQueue.clear(); archiveMediaQueue.clear();
+      archive.useAccount(account).then(() => { if (account) observeRetention(); }).catch(retentionError);
+      return;
+    }
+    if (!archive.enabled || !account) return;
+    const conversations = messaging().conversations || {};
+    for (const [cid, entry] of Object.entries(conversations)) {
+      const ref = entry && entry.messages;
+      if (!ref) { archiveRefs.delete(cid); continue; }
+      if (archiveRefs.get(cid) === ref) continue;
+      archiveRefs.set(cid, ref);
+      captureRawMessages(cid, ref);
+    }
+    // Feed timestamps trigger a quiet fetch, not enterConversation or presence. Initial backlog: unread chats only.
+    for (const [cid, feed] of Object.entries(messaging().feed || {})) {
+      const stamp = String(feed.lastEventUpdateTimestamp || feed.displayTimestamp || (feed.displayInfo || {}).displayTimestamp || "");
+      const before = archiveFeed.get(cid);
+      archiveFeed.set(cid, stamp);
+      const unread = (feed.displayInfo || {}).viewed === false;
+      if (before === stamp || (before === undefined && !unread)) continue;
+      if (quietQueue.size < 256 || quietQueue.has(cid)) quietQueue.set(cid, archive.generation);
+      else retentionError();
+    }
+    pumpQuietCapture();
+  }
+  function captureRawMessages(cid, rawMessages) {
+    if (!archive || !archive.enabled) return;
+    const gen = archive.generation;
+    const entries = rawMessages instanceof Map ? [...rawMessages.entries()] : Array.isArray(rawMessages)
+      ? rawMessages.map((raw) => [raw.descriptor && raw.descriptor.messageId, raw]) : [];
+    const list = [], rawById = new Map();
+    for (const [id, raw] of entries) {
+      const m = safe("retention-normalize", () => toMessage(cid, id, raw), null);
+      if (!m) continue;
+      list.push(m);
+      if (["chat-media", "audio", "gif", "sticker"].includes(m.kind)) {
+        // Decoder/resolver inputs must survive a deletion while their disk/network work is queued.
+        rawById.set(m.id, { messageContent: structuredClone(raw.messageContent), direct: m.media });
+      }
+    }
+    archive.capture(list).then((needed) => {
+      if (gen !== archive.generation) return;
+      lastCaptureAt = Date.now();
+      for (const m of needed) {
+        const key = cid + "|" + m.id;
+        if (archiveMediaQueue.has(key)) continue;
+        if (archiveMediaQueue.size >= 64) { retentionError(); break; }
+        archiveMediaQueue.set(key, { cid, id: m.id, raw: rawById.get(m.id), gen });
+      }
+      pumpArchiveMedia();
+    }).catch(retentionError);
+  }
+  async function pumpQuietCapture() {
+    if (quietBusy || !archive) return;
+    quietBusy = true;
+    try {
+      while (quietQueue.size) {
+        const [cid, gen] = quietQueue.entries().next().value; quietQueue.delete(cid);
+        if (!archive.enabled || gen !== archive.generation) continue;
+        try {
+          // Verified in Snapchat's bundle: this exported helper calls ONLY fetchConversationWithMessages.
+          // Its sibling enterConversation performs the separate enter call. Never fall back to that sibling.
+          quietFetch = quietFetch || exportBySource(".fetchConversationWithMessages(");
+          if (!quietFetch || !messaging().client) throw new Error("quiet fetch unavailable");
+          let timer;
+          const result = await Promise.race([quietFetch(messaging().client, convIdObj(cid)),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("quiet fetch timeout")), 20000); })]).finally(() => clearTimeout(timer));
+          if (gen === archive.generation && archive.enabled) captureRawMessages(cid, result && result.messages);
+        } catch (_) { retentionError(); }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    } finally { quietBusy = false; }
+  }
+  async function retainedBlob(url) {
+    if (!url || !/^(blob:|https:\/\/|data:)/.test(url)) throw new Error("media unavailable");
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
+    const max = 50 * 1024 * 1024; // one decode/download at a time; do not recreate the old iPhone memory leak
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok || Number(response.headers.get("content-length")) > max) throw new Error("media too large or unavailable");
+      if (!response.body || !response.body.getReader) throw new Error("bounded media download unavailable");
+      const reader = response.body.getReader(), chunks = []; let size = 0;
+      while (true) {
+        const r = await reader.read(); if (r.done) break;
+        size += r.value.byteLength;
+        if (size > max) { await reader.cancel(); throw new Error("media too large"); }
+        chunks.push(r.value);
+      }
+      return new Blob(chunks, { type: response.headers.get("content-type") || "application/octet-stream" });
+    } finally { clearTimeout(timer); }
+  }
+  async function pumpArchiveMedia() {
+    if (archiveMediaBusy || !archive) return;
+    archiveMediaBusy = true;
+    try {
+      while (archiveMediaQueue.size) {
+        const [key, job] = archiveMediaQueue.entries().next().value; archiveMediaQueue.delete(key);
+        if (job.gen !== archive.generation || !archive.enabled || !job.raw) continue;
+        let resolved = [];
+        try {
+          const direct = job.raw.direct || [];
+          resolved = direct.some((m) => m.url) ? direct : (await resolveChatMedia(job.raw)).media || [];
+          const items = []; let total = 0;
+          for (const ref of resolved) {
+            if (job.gen !== archive.generation || !archive.enabled) break;
+            const blob = ref.blob || await retainedBlob(ref.url);
+            const overlayBlob = ref.overlay ? await retainedBlob(ref.overlay) : undefined;
+            total += blob.size + (overlayBlob ? overlayBlob.size : 0);
+            if (total > 50 * 1024 * 1024) throw new Error("media too large");
+            items.push({ type: ref.type, width: ref.width, height: ref.height, durationSec: ref.durationSec, blob, overlayBlob });
+          }
+          if (items.length) {
+            await archive.putMedia(job.cid, job.id, items, job.gen);
+            if (openConversations.has(job.cid)) { lastMsgRef.delete(job.cid); emitMessagesFor(job.cid); }
+          } else retentionError();
+        } catch (_) { retentionError(); }
+        finally { for (const ref of resolved) for (const url of [ref.url, ref.overlay]) if (url && url.startsWith("blob:")) URL.revokeObjectURL(url); }
+      }
+    } finally { archiveMediaBusy = false; }
+  }
+  async function withRetention(cid, messages) {
+    if (!archive || !archive.enabled) return messages;
+    try { return await archive.merge(cid, messages); }
+    catch (_) { retentionError(); return messages; }
+  }
+  const archiveEventVersions = new Map();
+  function postRetainedMessages(cid, messages, hasMore) {
+    const account = retentionAccount();
+    const version = (archiveEventVersions.get(cid) || 0) + 1; archiveEventVersions.set(cid, version);
+    withRetention(cid, messages).then((list) => {
+      if (account !== retentionAccount() || archiveEventVersions.get(cid) !== version || !openConversations.has(cid)) return;
+      post({ ghost: "event", type: "messages", data: { conversationId: cid, messages: list, hasMore } });
+    });
+  }
+  setInterval(() => { if (store) observeRetention(); }, 5000);
+
   const emitConversations = throttle(() => {
     const convs = safe("conversations", () => {
       const map = messaging().conversations || {};
@@ -1178,7 +1329,7 @@
   const emitMessagesFor = throttle((conversationId) => {
     safe("messages-event", () => {
       const entry = (messaging().conversations || {})[conversationId];
-      if (!entry) return;
+      if (!entry) { postRetainedMessages(conversationId, [], false); return; }
       const ref = entry.messages;
       if (lastMsgRef.get(conversationId) === ref && lastMsgRef.get(conversationId + "#more") === !!entry.hasMoreMessages) return;
       lastMsgRef.set(conversationId, ref); lastMsgRef.set(conversationId + "#more", !!entry.hasMoreMessages);
@@ -1188,7 +1339,7 @@
         for (const [id, m] of msgs.entries()) { const n = toMessage(conversationId, id, m); if (n) list.push(n); }
       }
       list.sort((a, b) => a.ts - b.ts);
-      post({ ghost: "event", type: "messages", data: { conversationId, messages: list, hasMore: !!entry.hasMoreMessages } });
+      postRetainedMessages(conversationId, list, !!entry.hasMoreMessages);
       markDisplayed(conversationId);
     });
   }, 150);
@@ -1286,12 +1437,14 @@
         post({ ghost: "event", type: "ready", data: { loggedIn: now, me: meUser() } });
       }
       emitConversations();
+      observeRetention();
       for (const id of openConversations) emitMessagesFor(id);
       safe("typing", checkTyping);
       safe("here", checkHere);
       safe("calls", checkCalls);
     }), null);
     emitConversations();
+    observeRetention();
     post({ ghost: "event", type: "ready", data: { loggedIn: loggedIn(), me: meUser() } });
   }
 
@@ -1414,7 +1567,99 @@
     if (!set) mediaUrlsByConv.set(conversationId, (set = new Set()));
     for (const m of list) for (const u of [m && m.url, m && m.overlay]) if (typeof u === "string" && u.startsWith("blob:")) set.add(u);
   }
+  async function resolveChatMedia(raw) {
+      const mc = raw.messageContent || {};
+      const decoded = decodeContent(mc);
+      const c = decoded && decoded.content;
+      const kase = c && c.$case;
+      // a snap you may look at again (your own sent snap, or one saved in chat): just fetch it - no viewing/opened
+      // receipts, unlike openSnap
+      const snapdoc = kase === "snapdoc" ? c.snapdoc : (c && c[kase] && c[kase].snapdoc && !Array.isArray(c[kase].snapdoc) ? c[kase].snapdoc : null);
+      if (snapdoc && mc.remoteMediaReferences && mc.remoteMediaReferences[0]) {
+        return { media: await resolveMediaInfos(mediaInfosFromSnapdoc(snapdoc, mc.remoteMediaReferences[0]), undefined, "snap") };
+      }
+      if (kase === "externalMedia" || kase === "chatMedia" || kase === "externalMediaMessageContent") {
+        const snapdocs = (c.externalMedia && c.externalMedia.snapdoc) || [];
+        const rmrs = mc.remoteMediaReferences || [];
+        const media = [];
+        for (let i = 0; i < snapdocs.length; i++) {
+          const infos = mediaInfosFromSnapdoc(snapdocs[i], rmrs[i]);
+          for (const m of await resolveMediaInfos(infos, undefined, "ghost_chat_media")) media.push(m);
+        }
+        return { media };
+      }
+      const ent = kase === "creativeToolItem" && c.creativeToolItem && c.creativeToolItem.item && c.creativeToolItem.item.entity && c.creativeToolItem.item.entity.entityOneof;
+      if (ent && ent.$case === "customSticker") {
+        // exactly Snapchat's I6 (main.js, search 'custom_sticker'): import the AES key+iv, download+decrypt the bolt
+        // object, unzip if it's a media~ bundle, show as a blob
+        const cs = ent.customSticker, bolt = cs.mediaContent && cs.mediaContent.contentBoltObject;
+        const h = stickerHelpers();
+        if (!bolt || !h.importKey || !h.download) return { media: [] };
+        const enc = new TextEncoder();
+        const key = await h.importKey(enc.encode(cs.encKey), enc.encode(cs.encIv));
+        const buf = await h.download(bolt, "custom_sticker", key);
+        const z = h.unzip ? await h.unzip(buf) : null;
+        const url = URL.createObjectURL(new Blob([new Uint8Array(z ? z.mediaArrayBuffer : buf)]));
+        return { media: [{ type: "image", url, width: cs.width || undefined, height: cs.height || undefined }] };
+      }
+      if (ent && ent.$case === "gfycat") {
+        const a = ent.gfycat.mediaAssets && ent.gfycat.mediaAssets[0];
+        const bolt = a && a.mediaContent && a.mediaContent.contentBoltObject;
+        const h = stickerHelpers();
+        if (!bolt || !h.resolveBolt) return { media: [] };
+        const url = await h.resolveBolt(bolt, "gfycat_stickers");
+        return { media: url ? [{ type: "image", url, width: a.width, height: a.height }] : [] };
+      }
+      if (kase === "sticker" && c.sticker && c.sticker.sticker && c.sticker.sticker.$case === "custom") {
+        const cm = c.sticker.sticker.custom;
+        const rmr = mc.remoteMediaReferences && mc.remoteMediaReferences[0];
+        const ref = rmr && mediaReferenceFromRaw(rmr.mediaReferences && rmr.mediaReferences[0]);
+        const meta = cm && cm.sticker;
+        if (!ref || !meta) return { media: [] };
+        return { media: await resolveMediaInfos([{ mediaMetadata: { encryptionInfo: meta.encryptionInfo, dimensions: meta.dimensions, hasSound: false, zipped: !!meta.zipped }, mediaReference: ref }], "image", "custom_sticker") };
+      }
+      if (kase === "note" || kase === "voiceNote") {
+        // Same as Snapchat's own voice-note player (main.js, search 'Invalid audio note - no media metadata'):
+        // {mediaMetadata: O5(content.note.note.audio.note), mediaReference: gw(remoteMediaReferences)}, then the
+        // resolver with context "voice_note". (Before 2026-09-27 this read c.note.$case - one level too shallow -
+        // so every voice note came back empty and the play button did nothing.)
+        const nn = c.note && c.note.note;
+        const audioMeta = nn && nn.$case === "audio" && nn.audio && nn.audio.note;
+        const rmr = mc.remoteMediaReferences && mc.remoteMediaReferences[0];
+        const ref = rmr && mediaReferenceFromRaw(rmr.mediaReferences && rmr.mediaReferences[0]);
+        if (!audioMeta || !ref) { trail("voice-note", "no " + (!audioMeta ? "metadata" : "media reference") + " (" + (nn && nn.$case) + ")", "error"); return { media: [] }; }
+        const info = { mediaMetadata: { encryptionInfo: audioMeta.encryptionInfo, dimensions: audioMeta.dimensions, hasSound: true, zipped: !!audioMeta.zipped }, mediaReference: ref };
+        const media = await resolveMediaInfos([info], "audio", "voice_note");
+        const dur = toNum(audioMeta.mediaDurationMs) / 1000;
+        for (const m of media) if (dur) m.durationSec = dur;
+        return { media };
+      }
+      return { media: [] };
+  }
   const methods = {
+    async retentionStatus() {
+      if (!archive) throw new Error("Archive unavailable in this build");
+      await archive.useAccount(retentionAccount());
+      return { ...await archive.status(), captureError: retentionNetworkError, lastCaptureAt,
+        pendingMedia: archiveMediaQueue.size, pendingChats: quietQueue.size };
+    },
+    async configureRetention(on) {
+      if (!archive) throw new Error("Archive unavailable in this build");
+      await archive.useAccount(retentionAccount());
+      await archive.setEnabled(on);
+      quietQueue.clear(); archiveMediaQueue.clear(); archiveRefs.clear(); archiveFeed.clear();
+      observeRetention();
+      for (const cid of openConversations) { lastMsgRef.delete(cid); emitMessagesFor(cid); }
+      return methods.retentionStatus();
+    },
+    async clearRetainedMessages() {
+      if (!archive) throw new Error("Archive unavailable in this build");
+      await archive.useAccount(retentionAccount());
+      await archive.clear();
+      quietQueue.clear(); archiveMediaQueue.clear(); retentionNetworkError = "";
+      for (const cid of openConversations) { lastMsgRef.delete(cid); emitMessagesFor(cid); }
+      return methods.retentionStatus();
+    },
     status() {
       return { loggedIn: loggedIn(), me: meUser(), storeFound: !!store, version: VERSION };
     },
@@ -1448,7 +1693,7 @@
         for (const [id, msg] of entry.messages.entries()) { const n = toMessage(conversationId, id, msg); if (n) list.push(n); }
       }
       list.sort((a, b) => a.ts - b.ts);
-      return { messages: list, hasMore: !!(entry && entry.hasMoreMessages) };
+      return { messages: await withRetention(conversationId, list), hasMore: !!(entry && entry.hasMoreMessages) };
     },
 
     async closeConversation(conversationId) {
@@ -1469,7 +1714,7 @@
         for (const [id, msg] of entry.messages.entries()) { const n = toMessage(conversationId, id, msg); if (n) list.push(n); }
       }
       list.sort((a, b) => a.ts - b.ts);
-      return { messages: list, hasMore: !!(entry && entry.hasMoreMessages) };
+      return { messages: await withRetention(conversationId, list), hasMore: !!(entry && entry.hasMoreMessages) };
     },
 
     async sendText(conversationId, text, opts) {
@@ -2093,76 +2338,16 @@
 
     async loadMedia(conversationId, messageId) {
       requireStore();
+      if (archive && archive.enabled) {
+        const items = await archive.getMedia(conversationId, messageId).catch(() => []);
+        if (items.length) return { media: items.map((m) => ({ type: m.type, width: m.width, height: m.height,
+          durationSec: m.durationSec, url: URL.createObjectURL(m.blob),
+          overlay: m.overlayBlob ? URL.createObjectURL(m.overlayBlob) : undefined })) };
+      }
       const entry = conversationEntry(conversationId);
       const raw = entry && entry.messages && findRaw(entry.messages, messageId);
       if (!raw) throw new Error("message not loaded locally, open the conversation first");
-      const mc = raw.messageContent || {};
-      const decoded = decodeContent(mc);
-      const c = decoded && decoded.content;
-      const kase = c && c.$case;
-      // a snap you may look at again (your own sent snap, or one saved in chat): just fetch it - no viewing/opened
-      // receipts, unlike openSnap
-      const snapdoc = kase === "snapdoc" ? c.snapdoc : (c && c[kase] && c[kase].snapdoc && !Array.isArray(c[kase].snapdoc) ? c[kase].snapdoc : null);
-      if (snapdoc && mc.remoteMediaReferences && mc.remoteMediaReferences[0]) {
-        return { media: await resolveMediaInfos(mediaInfosFromSnapdoc(snapdoc, mc.remoteMediaReferences[0]), undefined, "snap") };
-      }
-      if (kase === "externalMedia" || kase === "chatMedia" || kase === "externalMediaMessageContent") {
-        const snapdocs = (c.externalMedia && c.externalMedia.snapdoc) || [];
-        const rmrs = mc.remoteMediaReferences || [];
-        const media = [];
-        for (let i = 0; i < snapdocs.length; i++) {
-          const infos = mediaInfosFromSnapdoc(snapdocs[i], rmrs[i]);
-          for (const m of await resolveMediaInfos(infos, undefined, "ghost_chat_media")) media.push(m);
-        }
-        return { media };
-      }
-      const ent = kase === "creativeToolItem" && c.creativeToolItem && c.creativeToolItem.item && c.creativeToolItem.item.entity && c.creativeToolItem.item.entity.entityOneof;
-      if (ent && ent.$case === "customSticker") {
-        // exactly Snapchat's I6 (main.js, search 'custom_sticker'): import the AES key+iv, download+decrypt the bolt
-        // object, unzip if it's a media~ bundle, show as a blob
-        const cs = ent.customSticker, bolt = cs.mediaContent && cs.mediaContent.contentBoltObject;
-        const h = stickerHelpers();
-        if (!bolt || !h.importKey || !h.download) return { media: [] };
-        const enc = new TextEncoder();
-        const key = await h.importKey(enc.encode(cs.encKey), enc.encode(cs.encIv));
-        const buf = await h.download(bolt, "custom_sticker", key);
-        const z = h.unzip ? await h.unzip(buf) : null;
-        const url = URL.createObjectURL(new Blob([new Uint8Array(z ? z.mediaArrayBuffer : buf)]));
-        return { media: [{ type: "image", url, width: cs.width || undefined, height: cs.height || undefined }] };
-      }
-      if (ent && ent.$case === "gfycat") {
-        const a = ent.gfycat.mediaAssets && ent.gfycat.mediaAssets[0];
-        const bolt = a && a.mediaContent && a.mediaContent.contentBoltObject;
-        const h = stickerHelpers();
-        if (!bolt || !h.resolveBolt) return { media: [] };
-        const url = await h.resolveBolt(bolt, "gfycat_stickers");
-        return { media: url ? [{ type: "image", url, width: a.width, height: a.height }] : [] };
-      }
-      if (kase === "sticker" && c.sticker && c.sticker.sticker && c.sticker.sticker.$case === "custom") {
-        const cm = c.sticker.sticker.custom;
-        const rmr = mc.remoteMediaReferences && mc.remoteMediaReferences[0];
-        const ref = rmr && mediaReferenceFromRaw(rmr.mediaReferences && rmr.mediaReferences[0]);
-        const meta = cm && cm.sticker;
-        if (!ref || !meta) return { media: [] };
-        return { media: await resolveMediaInfos([{ mediaMetadata: { encryptionInfo: meta.encryptionInfo, dimensions: meta.dimensions, hasSound: false, zipped: !!meta.zipped }, mediaReference: ref }], "image", "custom_sticker") };
-      }
-      if (kase === "note" || kase === "voiceNote") {
-        // Same as Snapchat's own voice-note player (main.js, search 'Invalid audio note - no media metadata'):
-        // {mediaMetadata: O5(content.note.note.audio.note), mediaReference: gw(remoteMediaReferences)}, then the
-        // resolver with context "voice_note". (Before 2026-09-27 this read c.note.$case - one level too shallow -
-        // so every voice note came back empty and the play button did nothing.)
-        const nn = c.note && c.note.note;
-        const audioMeta = nn && nn.$case === "audio" && nn.audio && nn.audio.note;
-        const rmr = mc.remoteMediaReferences && mc.remoteMediaReferences[0];
-        const ref = rmr && mediaReferenceFromRaw(rmr.mediaReferences && rmr.mediaReferences[0]);
-        if (!audioMeta || !ref) { trail("voice-note", "no " + (!audioMeta ? "metadata" : "media reference") + " (" + (nn && nn.$case) + ")", "error"); return { media: [] }; }
-        const info = { mediaMetadata: { encryptionInfo: audioMeta.encryptionInfo, dimensions: audioMeta.dimensions, hasSound: true, zipped: !!audioMeta.zipped }, mediaReference: ref };
-        const media = await resolveMediaInfos([info], "audio", "voice_note");
-        const dur = toNum(audioMeta.mediaDurationMs) / 1000;
-        for (const m of media) if (dur) m.durationSec = dur;
-        return { media };
-      }
-      return { media: [] };
+      return resolveChatMedia(raw);
     },
 
     debugShape() {

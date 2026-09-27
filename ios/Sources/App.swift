@@ -86,6 +86,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var keyboardOverlap: CGFloat = 0
     private var lastGhostSafe = ""
     private var speakerOn = false
+    private var keepAwake: GhostKeepAwake?
     private lazy var shield: UIView = {
         let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
         let icon = UILabel()
@@ -259,6 +260,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             NotificationCenter.default.addObserver(self, selector: #selector(updateShield),
                                                    name: UIScreen.capturedDidChangeNotification, object: nil)
         }
+        if Self.ghostMode { keepAwake = GhostKeepAwake() }
         TouchWindow.onTouch = { [weak self] in self?.renderFast(for: 2.5) }
         buildTabBar()
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
@@ -776,6 +778,14 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                 replyHandler(true, nil)
             } catch {
                 replyHandler(nil, error.localizedDescription)
+            }
+        case "keepAwake":
+            guard Self.ghostMode, let keepAwake else { return replyHandler(nil, "Keep Awake is only available in Ghost mode") }
+            if let enabled = body["enabled"] as? Bool {
+                let state = keepAwake.setEnabled(enabled)
+                replyHandler(state, keepAwake.error)
+            } else {
+                replyHandler(keepAwake.state, nil)
             }
         case "haptic":
             let style: UIImpactFeedbackGenerator.FeedbackStyle

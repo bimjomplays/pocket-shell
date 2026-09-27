@@ -75,7 +75,7 @@ app = root / 'ios' / 'Resources'
 # Ghost line (branch try/ghost): the new UI and its data bridge, bundled for App.swift's GhostMode
 ghost = root / 'ghost'
 if (ghost / 'bridge.js').exists():
-    (app / 'ghost-bridge.js').write_text((ghost / 'bridge.js').read_text())
+    (app / 'ghost-bridge.js').write_text((ghost / 'retention.js').read_text() + '\n' + (ghost / 'bridge.js').read_text())
 if (ghost / 'ui.js').exists():
     css = (ghost / 'ui.css').read_text() if (ghost / 'ui.css').exists() else ''
     # the GIF player from the Snapchat-look app, without its page scanner: animates GIFs sent as photos

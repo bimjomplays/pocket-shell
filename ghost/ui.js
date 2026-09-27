@@ -233,6 +233,9 @@
     newConversation: (userIds) => bridge.call("newConversation", [userIds]),
     chatColors: (convId) => bridge.call("chatColors", [convId]),
     releaseMedia: (convId) => bridge.call("releaseMedia", [convId]),
+    retentionStatus: () => bridge.call("retentionStatus"),
+    configureRetention: (on) => bridge.call("configureRetention", [on]),
+    clearRetainedMessages: () => bridge.call("clearRetainedMessages"),
     searchFriends: (q) => bridge.call("searchFriends", [q]),
     findUsers: (q) => bridge.call("findUsers", [q]),
     friendRequests: () => bridge.call("friendRequests"),
@@ -672,7 +675,7 @@
     // chat, replay the "new message" pop and scroll - the jumping in group chats (device, 2026-09-27). Now:
     // nothing changed -> nothing; new messages at the end -> the normal arrival; anything else (reactions,
     // opened/saved state) -> repaint in place, scroll untouched.
-    const sig = (list) => list.map((m) => m.id + ":" + (m.reactions ? m.reactions.length : 0) + ":" + (m.saved ? 1 : 0) + (m.opened ? 1 : 0) + ":" + (m.text || "").length + ":" + (m.seenBy ? m.seenBy.length : 0)).join("|");
+    const sig = (list) => list.map((m) => m.id + ":" + (m.reactions ? m.reactions.length : 0) + ":" + (m.saved ? 1 : 0) + (m.opened ? 1 : 0) + ":" + (m.text || "").length + ":" + (m.seenBy ? m.seenBy.length : 0) + ":" + !!m.retained + ":" + !!m.retainedMedia).join("|");
     if (prev && sig(prev.messages) === sig(entry.messages) && prev.hasMore === entry.hasMore) return;
     const prevLast = prev && prev.messages.length ? prev.messages[prev.messages.length - 1].id : null;
     const newLast = entry.messages.length ? entry.messages[entry.messages.length - 1].id : null;
@@ -1169,7 +1172,7 @@
     const list = home.list;
     let startY = 0, pulling = false, dy = 0;
     list.addEventListener("touchstart", (e) => {
-      if (list.scrollTop > 0 || e.touches.length !== 1) { pulling = false; return; }
+      if (list.scrollTop > 0 || !e.touches || e.touches.length !== 1) { pulling = false; return; }
       startY = e.touches[0].clientY; pulling = true; dy = 0;
     }, { passive: true });
     list.addEventListener("touchmove", (e) => {
@@ -1630,7 +1633,7 @@
   function seenRowEl(ctx, all) {
     let m = null;
     for (let i = all.length - 1; i >= 0; i--) if (all[i].kind !== "system" && all[i].kind !== "call") { m = all[i]; break; }
-    if (!m || m.pending || m.failed) return null;
+    if (!m || m.pending || m.failed || m.retained) return null;
     const convId = ctx.state.currentConvId;
     const cd = ctx.state.convById.get(convId) || {};
     const meId = ctx.state.me && ctx.state.me.id;
@@ -1709,11 +1712,15 @@
   function messageWrapEl(ctx, m, isMe, isLast) {
     const wrap = el("div", "gh-msg-wrap");
     wrap.dataset.messageId = m.id;
+    if (m.retained) wrap.dataset.retained = "1";
     const swipe = el("div", "gh-msg-swipe");
     const hint = el("div", "gh-reply-hint");
     hint.appendChild(icon("reply", 18));
     if (m.replyTo) swipe.appendChild(replyQuoteEl(m.replyTo));
-    swipe.appendChild(bubbleEl(ctx, m, isMe, isLast));
+    if (m.retained && m.mediaUnavailable) {
+      const missing = el("div", "gh-bubble"); missing.textContent = "Media wasn't captured before deletion"; swipe.appendChild(missing);
+    } else swipe.appendChild(bubbleEl(ctx, m, isMe, isLast));
+    if (m.retained) { const label = el("div", "gh-retained-label"); label.textContent = "Deleted · kept on this device"; swipe.appendChild(label); }
     if (ctx.state.currentConvId && isBookmarked(ctx.state.currentConvId, m.id)) { wrap.dataset.bm = "1"; const bm = el("span", "gh-bm-mark"); bm.appendChild(icon("bookmark", 11)); swipe.appendChild(bm); }
     if (m.reactions && m.reactions.length) swipe.appendChild(reactionsEl(ctx, m));
     if (isMe && m.failed) {
@@ -1731,7 +1738,7 @@
   function tickMetaEl(m, isMe, extraClass) {
     const meta = el("span", (extraClass ? "gh-bubble-meta " + extraClass : "gh-bubble-meta"));
     meta.appendChild(document.createTextNode(fmtClock(m.ts)));
-    if (isMe) {
+    if (isMe && !m.retained) {
       if (m.failed) meta.appendChild(icon("close", 14, "gh-tick gh-tick-fail"));
       else if (m.pending) meta.appendChild(icon("check", 14, "gh-tick gh-tick-pending"));
       else meta.appendChild(icon("checkDouble", 14, "gh-tick"));
@@ -1865,6 +1872,7 @@
   }
 
   function bubbleEl(ctx, m, isMe, isLast) {
+    if (m.retained && m.kind === "gif") m = { ...m, kind: "chat-media" }; // archived bytes load locally, without the live GIPHY fetch path
     switch (m.kind) {
       case "text": {
         const b = el("div", "gh-bubble");
@@ -2109,7 +2117,8 @@
   const mediaCache = new Map(), mediaWaiting = [];
   let mediaActive = 0;
   function fetchMediaFor(m) {
-    const key = m.conversationId + "|" + m.id;
+    if (m.retained && !m.retainedMedia) return Promise.resolve([]);
+    const key = m.conversationId + "|" + m.id + (m.retained ? "|retained" : "");
     if (mediaCache.has(key)) return mediaCache.get(key);
     const p = new Promise((resolve) => mediaWaiting.push({ m, resolve }));
     mediaCache.set(key, p);
@@ -2475,6 +2484,7 @@
   }
 
   function setReplyTo(ctx, msg) {
+    if (msg && msg.retained) { ctx.showToast("This message was deleted. You can copy its text instead."); return; }
     const conv = ctx.conv;
     conv.replyTo = msg;
     if (msg) {
@@ -2520,7 +2530,7 @@
       return (conv._all || []).find((m) => m.id === id);
     }
     conv.messages.addEventListener("touchstart", (e) => {
-      if (e.touches.length !== 1) { g = null; return; }
+      if (!e.touches || e.touches.length !== 1) { g = null; return; }
       const target = e.target;
       if (target.closest("button, a, input, textarea, video, .gh-reaction-pill")) { g = null; return; }
       const wrap = findWrap(target);
@@ -2535,7 +2545,7 @@
       }, LONG_PRESS_MS);
     }, { passive: true });
     conv.messages.addEventListener("touchmove", (e) => {
-      if (!g || e.touches.length !== 1) return;
+      if (!g || !e.touches || e.touches.length !== 1) return;
       const t = e.touches[0];
       g.dx = t.clientX - g.x0; g.dy = t.clientY - g.y0;
       if (g.timer && (Math.abs(g.dx) > MOVE_CANCEL || Math.abs(g.dy) > MOVE_CANCEL)) { clearTimeout(g.timer); g.timer = null; }
@@ -2660,6 +2670,7 @@
     s.message = message;
     const convId = ctx.state.currentConvId;
     const meId = ctx.state.me && ctx.state.me.id;
+    for (const item of [s.reactRow, s.replyItem, s.saveItem]) item.style.display = message.retained ? "none" : "";
     for (const b of s.reactRow.querySelectorAll(".gh-react-emoji")) {
       const mine = (message.reactions || []).some((r) => r.emoji === b.dataset.emoji && r.from && r.from.id === meId);
       b.dataset.mine = mine ? "1" : "0";
@@ -2695,7 +2706,7 @@
       else { const list = await fetchMediaFor(message); if (list[0]) saveRefToPhotos(ctx, list[0]); else ctx.showToast("Still loading - try again"); }
     };
     const mineMsg = !!(message.fromMe || (message.from && message.from.id === meId));
-    s.delItem.style.display = mineMsg ? "" : "none";
+    s.delItem.style.display = mineMsg && !message.retained ? "" : "none";
     s.delItem.onclick = async () => {
       s.close();
       haptic("medium");
@@ -3391,6 +3402,7 @@
       setRow(g, { label: "Clear Recent GIFs", danger: true, onClick: async () => { await storage.set("ghostGifRecents", []); ctx.showToast("Recent GIFs cleared"); } });
     },
     storage(ctx, body) {
+      buildRetentionSettings(ctx, body);
       let g = setGroup(body, null, "Downloaded photos, stickers and the sticker list are kept while Ghost is open. Clearing frees memory; they load again when needed.");
       setRow(g, { label: "Clear Media Cache", onClick: () => { mediaCache.clear(); storyThumbs.clear(); ctx.showToast("Media cache cleared"); } });
       setRow(g, { label: "Refresh Sticker List", onClick: async () => { stickerCatalog = null; await storage.set("ghostBitmojiCatalog", null); ctx.showToast("Sticker list will reload"); } });
@@ -3409,6 +3421,53 @@
     },
   };
   function refreshAllLists(ctx) { try { renderHomeList(ctx); renderStories(ctx); } catch (e) {} }
+
+  function buildRetentionSettings(ctx, body) {
+    const clearLocalViews = () => {
+      mediaCache.clear();
+      for (const [id, entry] of ctx.state.messagesByConv) ctx.state.messagesByConv.set(id, { ...entry, messages: entry.messages.filter((m) => !m.retained) });
+    };
+    const group = setGroup(body, "Deleted Messages", "Keeps text and chat media on this device for up to 30 days, within 500 MB total. Oldest copies are removed first. Individual media downloads are limited to 50 MB. Unopened snaps aren't captured. Messages deleted before Ghost receives them can't be recovered.");
+    const status = el("div", "gh-set-group-foot"); status.textContent = "Loading archive…"; group.appendChild(status);
+    let clearArmedUntil = 0;
+    const paint = (info) => {
+      group.replaceChildren();
+      const toggle = setRow(group, { label: "Retain Deleted Messages", toggle: { get: () => info.enabled, set: async (on) => {
+        toggle.style.pointerEvents = "none";
+        try { if (!on) clearLocalViews(); paint(await api.configureRetention(on)); }
+        catch (e) { paint(info); ctx.showToast("Couldn't change retention"); }
+      } } });
+      if (!info.accountReady) { toggle.style.pointerEvents = "none"; toggle.setAttribute("aria-disabled", "true"); }
+      setRow(group, { label: "Local Archive", value: (info.bytes / (1024 * 1024)).toFixed(1) + " MB · " + info.count + " messages" });
+      const clear = setRow(group, { label: "Clear Retained Messages", danger: true, onClick: async () => {
+        if (Date.now() > clearArmedUntil) { clearArmedUntil = Date.now() + 5000; clear.querySelector(".gh-set-label").textContent = "Tap again to clear this account's copies"; return; }
+        clear.style.pointerEvents = "none";
+        try { clearLocalViews(); paint(await api.clearRetainedMessages()); ctx.showToast("Retained copies cleared"); }
+        catch (e) { clear.style.pointerEvents = ""; ctx.showToast("Couldn't clear the archive"); }
+      } });
+      status.textContent = !info.accountReady ? "Waiting for your signed-in account." : info.error || info.captureError || (info.enabled ? "Captures while Ghost is running. Your existing read-receipt setting still applies when you open a chat." : "Capture and retained bubbles are off. Stored copies remain until cleared or expired.");
+      group.appendChild(status);
+    };
+    api.retentionStatus().then(paint).catch(() => { status.textContent = "The local archive is unavailable. Try reloading Ghost."; });
+    const awake = setGroup(body, "Background Capture", "Experimental: silent audio may help Ghost stay active, but iOS can still suspend the web view. Uses extra battery. Force-quitting or restarting the phone stops capture. Test with your phone locked before relying on it.");
+    const awakeStatus = el("div", "gh-set-group-foot"); awakeStatus.textContent = "Checking background audio…"; awake.appendChild(awakeStatus);
+    const request = (enabled) => {
+      try { return Promise.resolve(window.webkit.messageHandlers.dg.postMessage({ op: "keepAwake", ...(enabled === undefined ? {} : { enabled }) })); }
+      catch (e) { return Promise.reject(e); }
+    };
+    const paintAwake = (info) => {
+      awake.replaceChildren();
+      if (!info || typeof info.enabled !== "boolean") { awakeStatus.textContent = "Available in the Ghost iPhone app."; awake.appendChild(awakeStatus); return; }
+      const toggle = setRow(awake, { label: "Keep Ghost Awake", toggle: { get: () => info.enabled, set: async (on) => {
+        toggle.style.pointerEvents = "none";
+        try { paintAwake(await request(on)); }
+        catch (e) { awakeStatus.textContent = "Couldn't start background audio."; request().then(paintAwake).catch(() => paintAwake(info)); }
+      } } });
+      awakeStatus.textContent = info.error || (info.playing ? "Silent audio is running. Background message capture still needs a device test." : info.enabled ? "Enabled, but audio is paused. Return to Ghost after calls or interruptions." : "Off");
+      awake.appendChild(awakeStatus);
+    };
+    request().then(paintAwake).catch(() => paintAwake(null));
+  }
 
   // =====================================================================================================
   // Chat wallpapers: a default for every chat (a preset or your own photo) and per-chat overrides that always win
@@ -4932,12 +4991,12 @@
 
     let holdTimer = null, startX = 0, startY = 0, mode = null, held = false;
     wrap.addEventListener("touchstart", (e) => {
-      if (e.touches.length !== 1 || v.replyOpen) return;
+      if (!e.touches || e.touches.length !== 1 || v.replyOpen) return;
       startX = e.touches[0].clientX; startY = e.touches[0].clientY; mode = null; held = false;
       holdTimer = setTimeout(() => { held = true; pauseViewer(ctx, true); }, 200);
     }, { passive: true });
     wrap.addEventListener("touchmove", (e) => {
-      if (e.touches.length !== 1 || v.replyOpen) return;
+      if (!e.touches || e.touches.length !== 1 || v.replyOpen) return;
       const dx = e.touches[0].clientX - startX, dy = e.touches[0].clientY - startY;
       if (!mode && Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { mode = dy > 0 ? "down" : "up"; clearTimeout(holdTimer); }
       if (mode === "down") {
@@ -5454,7 +5513,7 @@
       g = { kind, x0: t.clientX, y0: t.clientY, dx: 0, dy: 0, locked: null, p0: ctx.state.navProgress, rowId: wrapRowId, samples: [{ x: t.clientX, t: nowMs() }] };
     }
     function move(e) {
-      if (!g || e.touches.length !== 1) return;
+      if (!g || !e.touches || e.touches.length !== 1) return;
       const t = e.touches[0];
       g.dx = t.clientX - g.x0; g.dy = t.clientY - g.y0;
       g.samples.push({ x: t.clientX, t: nowMs() }); if (g.samples.length > 10) g.samples.shift();
@@ -5507,7 +5566,7 @@
     }
 
     stack.addEventListener("touchstart", (e) => {
-      if (e.touches.length !== 1) { g = null; return; }
+      if (!e.touches || e.touches.length !== 1) { g = null; return; }
       const target = e.target;
       const onConv = ctx.state.navProgress > 0.5;
       if (!onConv) {

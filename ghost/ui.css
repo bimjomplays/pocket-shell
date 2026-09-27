@@ -1848,3 +1848,12 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-seen-faces .gh-avatar + .gh-avatar { margin-left: -6px; }
 .gh-seen.gh-press { cursor: pointer; }
 .gh-here-av[data-typing="1"] .gh-avatar { box-shadow: 0 0 0 2px var(--gh-accent); }
+/* Locally retained content is visually distinct from messages still present on Snapchat. */
+.gh-msg-wrap[data-retained="1"] .gh-bubble,
+.gh-msg-wrap[data-retained="1"] .gh-media,
+.gh-msg-wrap[data-retained="1"] .gh-voice {
+  outline: 1.5px dashed var(--gh-text-secondary);
+  outline-offset: -1px;
+}
+.gh-msg-wrap[data-retained="1"] .gh-bubble::after { display: none; }
+.gh-retained-label { font-size: 10px; line-height: 1.4; color: var(--gh-text-secondary); padding: 4px 5px 2px; }
