@@ -105,6 +105,11 @@
     flash: '<path d="M13 2L4 14h6l-1 8 9-12h-6z" fill="currentColor" stroke="none"/>',
     timerIcon: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/>',
     expand: '<path d="M9 3H3v6"/><path d="M15 3h6v6"/><path d="M21 15v6h-6"/><path d="M3 15v6h6"/>',
+    share: '<path d="M12 3v12"/><path d="M8 7l4-4 4 4"/><path d="M6 11H5a2 2 0 00-2 2v6a2 2 0 002 2h14a2 2 0 002-2v-6a2 2 0 00-2-2h-1"/>',
+    heart: '<path d="M12 20s-7.5-4.6-9.2-9.4C1.7 7.3 3.9 4 7.3 4c2 0 3.5 1.1 4.7 2.8C13.2 5.1 14.7 4 16.7 4c3.4 0 5.6 3.3 4.5 6.6C19.5 15.4 12 20 12 20z"/>',
+    heartFill: '<path d="M12 20s-7.5-4.6-9.2-9.4C1.7 7.3 3.9 4 7.3 4c2 0 3.5 1.1 4.7 2.8C13.2 5.1 14.7 4 16.7 4c3.4 0 5.6 3.3 4.5 6.6C19.5 15.4 12 20 12 20z" fill="currentColor"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r="0.6" fill="currentColor"/>',
+    more: '<circle cx="5.5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor"/>',
   };
   function icon(name, size, extraClass) {
     const wrap = document.createElement("span");
@@ -490,6 +495,7 @@
     root.appendChild(ctx.callBar);
     ctx.settings = buildSettings(ctx);
     root.appendChild(ctx.settings.el);
+    buildGallery(ctx, ctx.home.screen, ctx.home.screen.querySelector(".gh-tab-bar"));
     loadPrefs(ctx);
 
     initNavGesture(ctx);
@@ -746,6 +752,7 @@
       <div class="gh-tab-bar">
         <button class="gh-tab-btn gh-hit" data-tab="chats" data-active="1"></button>
         <button class="gh-tab-btn gh-hit" data-tab="stories"></button>
+        <button class="gh-tab-btn gh-hit" data-tab="gallery"></button>
         <button class="gh-tab-btn gh-hit" data-tab="settings"></button>
       </div>
     `;
@@ -757,6 +764,9 @@
     const tabStories = screen.querySelector('[data-tab="stories"]');
     tabStories.append(icon("camera", 25), Object.assign(document.createElement("span"), { textContent: "Camera" }));
     tabStories.setAttribute("aria-label", "Camera");
+    const tabGallery = screen.querySelector('[data-tab="gallery"]');
+    tabGallery.append(icon("gallery", 25), Object.assign(document.createElement("span"), { textContent: "Gallery" }));
+    tabGallery.setAttribute("aria-label", "Gallery");
     const tabSettings = screen.querySelector('[data-tab="settings"]');
     tabSettings.append(icon("settingsTab", 25), Object.assign(document.createElement("span"), { textContent: "Settings" }));
     const search = screen.querySelector(".gh-search");
@@ -782,18 +792,31 @@
     for (const b of screen.querySelectorAll('[data-act="new"]')) {
       b.addEventListener("click", () => { haptic(); openNewChatSheet(ctx); });
     }
+    const allTabs = [tabChats, tabStories, tabGallery, tabSettings];
+    // the tab that's "under" Settings (a full-screen overlay) and the camera: Chats or Gallery
+    const baseTab = () => (ctx.gallery && ctx.gallery.el.dataset.open === "1" ? tabGallery : tabChats);
     tabSettings.addEventListener("click", () => {
       haptic();
-      for (const t of [tabChats, tabStories, tabSettings]) t.dataset.active = "0";
+      for (const t of allTabs) t.dataset.active = "0";
       tabSettings.dataset.active = "1";
       openSettings(ctx);
-      setTimeout(() => { tabSettings.dataset.active = "0"; tabChats.dataset.active = "1"; }, 400);
+      setTimeout(() => { tabSettings.dataset.active = "0"; baseTab().dataset.active = "1"; }, 400);
     });
     tabChats.addEventListener("click", () => {
       haptic();
-      for (const t of [tabChats, tabStories, tabSettings]) t.dataset.active = "0";
+      const wasGallery = ctx.gallery && ctx.gallery.el.dataset.open === "1";
+      for (const t of allTabs) t.dataset.active = "0";
       tabChats.dataset.active = "1";
+      if (wasGallery) { closeGallery(ctx); return; }
       list.scrollTo({ top: 0, behavior: "smooth" });
+    });
+    tabGallery.addEventListener("click", () => {
+      haptic();
+      const g = ctx.gallery;
+      if (g.el.dataset.open === "1") { g.scroll.scrollTo({ top: 0, behavior: "smooth" }); return; }
+      for (const t of allTabs) t.dataset.active = "0";
+      tabGallery.dataset.active = "1";
+      openGallery(ctx);
     });
     tabStories.addEventListener("click", () => { openCamera(ctx, {}); }); // the middle tab is the snap camera now
     input.addEventListener("input", () => { home.query = input.value.trim().toLowerCase(); renderHomeList(ctx); });
@@ -5711,12 +5734,64 @@
     v.hint.addEventListener("click", () => openStoryReply(ctx));
 
     let holdTimer = null, startX = 0, startY = 0, mode = null, held = false;
+    // Pinch to zoom a photo/snap/story (user request 2026-09-28). Snaps and stories spring back when you let go
+    // and carry on playing, like Snapchat; a chat photo opened on its own stays zoomed so you can pan it with one
+    // finger, and a tap puts it back. Touch positions go through toLocal() (the host is CSS-zoomed on the phone).
+    let pinch = null, panStart = null;
+    v.zoom = { s: 1, x: 0, y: 0 };
+    const applyZoom = (animate) => {
+      for (const c of v.media.children) {
+        c.style.transformOrigin = "0 0";
+        c.style.transition = animate ? "transform 0.22s cubic-bezier(0.32,0.72,0,1)" : "";
+        c.style.transform = v.zoom.s === 1 ? "" : `translate(${v.zoom.x}px, ${v.zoom.y}px) scale(${v.zoom.s})`;
+      }
+    };
+    const clampPan = () => {
+      const W = v.media.clientWidth, H = v.media.clientHeight, s = v.zoom.s;
+      v.zoom.x = clamp(v.zoom.x, W - W * s, 0); v.zoom.y = clamp(v.zoom.y, H - H * s, 0);
+    };
+    v.resetZoom = (animate) => { v.zoom = { s: 1, x: 0, y: 0 }; applyZoom(animate); };
+    const pinchPoints = (e) => {
+      const a = toLocal(v.media, e.touches[0].clientX, e.touches[0].clientY), b = toLocal(v.media, e.touches[1].clientX, e.touches[1].clientY);
+      return { d: Math.hypot(b.x - a.x, b.y - a.y) || 1, m: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
+    };
     wrap.addEventListener("touchstart", (e) => {
-      if (!e.touches || e.touches.length !== 1 || v.replyOpen) return;
+      if (!e.touches || v.replyOpen) return;
+      if (e.touches.length === 2 && v.media.querySelector("img, video")) {
+        clearTimeout(holdTimer); mode = "pinch";
+        const p = pinchPoints(e);
+        pinch = { d0: p.d, m0: p.m, z0: Object.assign({}, v.zoom) };
+        pauseViewer(ctx, true);
+        wrap.style.transform = ""; wrap.style.opacity = ""; v.media.style.transform = "";
+        return;
+      }
+      if (e.touches.length === 1 && v.zoom.s > 1 && v.single) {
+        const t = toLocal(v.media, e.touches[0].clientX, e.touches[0].clientY);
+        panStart = { x: t.x, y: t.y, z0: Object.assign({}, v.zoom), moved: false };
+        mode = "pan";
+        return;
+      }
+      if (e.touches.length !== 1) return;
       startX = e.touches[0].clientX; startY = e.touches[0].clientY; mode = null; held = false;
       holdTimer = setTimeout(() => { held = true; pauseViewer(ctx, true); }, 200);
     }, { passive: true });
     wrap.addEventListener("touchmove", (e) => {
+      if (mode === "pinch" && pinch && e.touches && e.touches.length >= 2) {
+        const p = pinchPoints(e);
+        const sc = clamp(pinch.z0.s * p.d / pinch.d0, 1, 5);
+        const px = (pinch.m0.x - pinch.z0.x) / pinch.z0.s, py = (pinch.m0.y - pinch.z0.y) / pinch.z0.s;
+        v.zoom = { s: sc, x: p.m.x - px * sc, y: p.m.y - py * sc };
+        clampPan(); applyZoom(false);
+        return;
+      }
+      if (mode === "pinch") return;
+      if (mode === "pan" && panStart && e.touches && e.touches.length === 1) {
+        const t = toLocal(v.media, e.touches[0].clientX, e.touches[0].clientY);
+        if (Math.hypot(t.x - panStart.x, t.y - panStart.y) > 6) panStart.moved = true;
+        v.zoom = { s: panStart.z0.s, x: panStart.z0.x + t.x - panStart.x, y: panStart.z0.y + t.y - panStart.y };
+        clampPan(); applyZoom(false);
+        return;
+      }
       if (!e.touches || e.touches.length !== 1 || v.replyOpen) return;
       const dx = e.touches[0].clientX - startX, dy = e.touches[0].clientY - startY;
       if (!mode && Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { mode = dy > 0 ? "down" : "up"; clearTimeout(holdTimer); }
@@ -5729,6 +5804,21 @@
     }, { passive: true });
     const end = (e) => {
       clearTimeout(holdTimer);
+      if (mode === "pinch") {
+        if (e.touches && e.touches.length) return; // wait until every finger is up
+        swallowClick = true; setTimeout(() => { swallowClick = false; }, 400);
+        pinch = null; mode = null; held = false;
+        if (!v.single || v.zoom.s < 1.05) v.resetZoom(true); // snaps/stories spring back; a chat photo stays zoomed
+        pauseViewer(ctx, false);
+        return;
+      }
+      if (mode === "pan") {
+        const moved = panStart && panStart.moved;
+        panStart = null; mode = null;
+        swallowClick = true; setTimeout(() => { swallowClick = false; }, 400);
+        if (!moved) v.resetZoom(true); // a tap on a zoomed photo zooms back out instead of closing it
+        return;
+      }
       const t = e.changedTouches && e.changedTouches[0];
       const dy = t ? t.clientY - startY : 0;
       v.media.style.transform = "";
@@ -5791,6 +5881,7 @@
   function paintViewerItem(ctx) {
     const v = ctx.viewer;
     v.media.innerHTML = "";
+    v.zoom = { s: 1, x: 0, y: 0 };
     const ref = v.items[v.idx];
     if (!ref) { closeViewer(ctx); return; }
     v.currentRef = ref;
@@ -6726,13 +6817,18 @@
     if (c.recording && c.recorder) { c.recording = false; haptic("light"); try { c.recorder.stop(); } catch (e) {} }
     else { c.el.dataset.recording = "0"; c.el.dataset.locked = "0"; c.lockedRecording = false; clearInterval(c.recTickTimer); c.recTickTimer = null; }
   }
-  function openReview(ctx, blob, kind, fromCamera, dims) {
+  // extra (Gallery editing): { url, fit: "contain" } shows a library/vault item by URL, whole photo visible, instead
+  // of a freshly captured blob filling the screen.
+  function openReview(ctx, blob, kind, fromCamera, dims, extra) {
     const c = ctx.camera;
     c.captured = { blob, kind, width: dims && dims.width, height: dims && dims.height, hasAudio: dims ? dims.hasAudio !== false : true };
     stopCameraStream(ctx);
     c.reviewMedia.innerHTML = "";
-    const url = URL.createObjectURL(blob);
+    const url = extra && extra.url ? extra.url : URL.createObjectURL(blob);
     c.captured.url = url;
+    c.captured.ownUrl = !(extra && extra.url);
+    c.fit = extra && extra.fit === "contain" ? "contain" : "cover";
+    c.review.dataset.fit = c.fit;
     const media = kind === "video" ? el("video") : el("img");
     media.src = url;
     if (kind === "video") {
@@ -6753,19 +6849,27 @@
     c.picker.dataset.open = "0";
     const v = c.reviewMedia.querySelector("video"); if (v) v.pause();
     c.reviewMedia.innerHTML = "";
-    if (c.captured && c.captured.url) URL.revokeObjectURL(c.captured.url);
+    if (c.captured && c.captured.url && c.captured.ownUrl) URL.revokeObjectURL(c.captured.url);
     c.captured = null;
+    c.editSource = null; c.el.dataset.editsrc = "0";
     teardownEditor(ctx, c);
   }
   function discardReview(ctx) {
     const c = ctx.camera;
     commitPendingEdits(ctx, c);
+    if (c.editSource) { // editing a Gallery item: back to the gallery, not to a live camera
+      const leave = () => closeCamera(ctx);
+      if (c.editor && c.editor.hasEdits()) confirmSheet(ctx, "Discard your edits?", "Discard").then((ok) => { if (ok) leave(); });
+      else leave();
+      return;
+    }
     const go = () => { closeReview(ctx); c.zoom = 1; c.zoomShown = 1; c.usingUltra = false; startCameraStream(ctx); }; // retake opens the normal lens at 1x
     if (c.editor && c.editor.hasEdits()) confirmSheet(ctx, "Discard this Snap and your edits?", "Discard").then((ok) => { if (ok) go(); });
     else go();
   }
   function openPicker(ctx) {
     const c = ctx.camera;
+    if (c.editSource) { openGalEditSend(ctx); return; }
     c.search.value = "";
     renderPicker(ctx);
     c.picker.dataset.open = "1";
@@ -6837,17 +6941,24 @@
   }
   async function saveSnapNow(ctx) {
     const c = ctx.camera;
+    if (c.editSource) { saveGalEdit(ctx); return; }
     if (!c.captured || c.saving) return;
     commitPendingEdits(ctx, c);
     c.saving = true;
     try {
       const out = await renderEditorOutput(ctx, c);
       if (c.captured.kind === "video" && out.overlay) {
-        // No local re-encode pipeline exists (MediaRecorder here only captures a live stream, not an
-        // offline photo+overlay composite) - Photos gets the untouched video; the edits still reach the
-        // recipient via sendSnap's separate overlay (see BRIDGE_NOTES.md "sendSnap overlayMedia").
-        await saveRefToPhotos(ctx, { blob: c.captured.blob, type: "video" });
-        ctx.showToast("Saved to Photos (drawing/text send to friends, but aren't baked into the saved video yet)");
+        // The drawing/text/stickers are burned into the saved video natively (GalleryLibrary.swift galleryRender,
+        // AVVideoCompositionCoreAnimationTool); if that fails, Photos gets the untouched clip like before.
+        try {
+          ctx.showToast("Saving…");
+          await dgPost("galleryRender", { source: { type: "data", kind: "video", data: await blobToB64(c.captured.blob) }, overlay: await blobToB64(out.overlay), mode: "copy" });
+          ctx.showToast("Saved to Photos");
+        } catch (err) {
+          gtrail("video save with edits failed " + (err && err.message || err));
+          await saveRefToPhotos(ctx, { blob: c.captured.blob, type: "video" });
+          ctx.showToast("Saved to Photos without the drawing/text");
+        }
       } else {
         await saveRefToPhotos(ctx, { blob: out.blob, type: c.captured.kind === "video" ? "video" : "image" });
       }
@@ -6982,6 +7093,7 @@
   function resetEditor(ctx, c) {
     const ed = c.editor;
     if (!ed) return;
+    ed.fit = c.fit || "cover";
     for (const item of ed.items) if (item.el) item.el.remove();
     ed.items = []; ed.strokes = []; ed.curStroke = null; ed.itemSeq = 0;
     ed.tool = null; ed.editingText = null; ed.trashOver = false;
@@ -7469,9 +7581,14 @@
     }
     octx.restore();
   }
+  function containTransform(vw, vh, mw, mh) {
+    const scale = Math.min(vw / mw, vh / mh) || 1;
+    return { scale, ox: (vw - mw * scale) / 2, oy: (vh - mh * scale) / 2 };
+  }
   function paintEditorOverlay(ed, octx, mediaW, mediaH) {
     const vw = ed.viewport.w || 1, vh = ed.viewport.h || 1;
-    const t = coverTransform(vw, vh, mediaW, mediaH);
+    // camera snaps fill the screen (cover); a Gallery item is shown whole (contain) - map with the same fit
+    const t = (ed.fit === "contain" ? containTransform : coverTransform)(vw, vh, mediaW, mediaH);
     octx.clearRect(0, 0, mediaW, mediaH);
     for (const s of ed.strokes) {
       const pts = s.pts.map((p) => viewportToMedia(t, p.x, p.y));
@@ -7506,6 +7623,1851 @@
     fctx.drawImage(overlayCanvas, 0, 0);
     const blob = await new Promise((res) => finalCanvas.toBlob(res, "image/jpeg", 0.92));
     return { blob, width: w, height: h };
+  }
+
+  // =====================================================================================================
+  // Gallery tab — the device's photo library as a full screen (the tab right of Camera). Plan and decisions:
+  // ghost/GALLERY_PLAN.md. Native side: ios/Sources/GalleryLibrary.swift ("gallery*" ops) plus
+  // ghostphoto://thumb (grid, hq=1 for the viewer) and ghostphoto://video (Range playback).
+  //
+  // Layout comes from a native month index ({y, m, count}, newest first), so every month section and the
+  // scrubber exist before any metadata is loaded; item metadata is fetched in pages around the viewport.
+  // Thumbnails go through makeThumbQueue, which follows the photo picker's lesson: a tile torn down mid-load
+  // frees its concurrency slot itself, and the grid only clears+rebuilds on an actual width change.
+  // All touch deltas are converted with pagePxToLocal()/toLocal() (the host is CSS-zoomed on the phone).
+  // =====================================================================================================
+  const GAL_COLS = 4, GAL_GAP = 2, GAL_HEAD_H = 44, GAL_PAGE = 240, GAL_BUFFER_PX = 900, GAL_LOAD_MAX = 8;
+  const GAL_SEND_MAX = 20, GAL_SELECT_MAX = 100;
+  const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+  // id -> version stamp, bumped after "Replace original" so WebKit doesn't keep showing the cached old picture
+  const galVersions = new Map();
+  function galAssetUrl(kind, id, size) {
+    if (typeof window.__ghostPickerUrlOverride === "function") return window.__ghostPickerUrlOverride(kind, id, size);
+    const v = galVersions.has(id) ? "v=" + galVersions.get(id) : "";
+    if (kind === "video") return "ghostphoto://video/" + encodeURIComponent(id) + (v ? "?" + v : "");
+    if (kind === "view") return "ghostphoto://thumb/" + encodeURIComponent(id) + "?s=" + (size || 2400) + "&hq=1" + (v ? "&" + v : "");
+    return pickerAssetUrl(kind, id, size) + (v ? "&" + v : "");
+  }
+  function blobToB64(blob) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => { const s = String(r.result || ""); res(s.slice(s.indexOf(",") + 1)); };
+      r.onerror = () => rej(r.error || new Error("read failed"));
+      r.readAsDataURL(blob);
+    });
+  }
+  function b64ToBlob(b64, mime) {
+    const bin = atob(b64);
+    const buf = new Uint8Array(bin.length);
+    for (let k = 0; k < bin.length; k++) buf[k] = bin.charCodeAt(k);
+    return new Blob([buf], { type: mime });
+  }
+  function fmtLongDate(ts) {
+    const d = new Date(ts), today = startOfDay(Date.now());
+    const day = startOfDay(ts);
+    if (day === today) return "Today";
+    if (day === today - DAY_MS) return "Yesterday";
+    return MONTH_NAMES[d.getMonth()] + " " + d.getDate() + ", " + d.getFullYear();
+  }
+  function fmtBytes(n) {
+    if (!(n > 0)) return "";
+    if (n < 1024 * 1024) return Math.max(1, Math.round(n / 1024)) + " KB";
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + " MB";
+    return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
+  }
+
+  // A concurrency-capped <img> loader. release() MUST be called for every tile that leaves the DOM: it settles
+  // that tile's slot itself (see the PROJECT_STATE Lessons note about <img> removed mid-decode firing nothing).
+  function makeThumbQueue(max) {
+    const q = { active: 0, jobs: [], gen: 0 };
+    function pump() {
+      while (q.active < max && q.jobs.length) {
+        const job = q.jobs.shift();
+        if (job.gen !== q.gen || job.tile._released) continue;
+        q.active++;
+        job.run();
+      }
+    }
+    function done() { q.active = Math.max(0, q.active - 1); pump(); }
+    q.load = (tile, url, cls) => {
+      const gen = q.gen;
+      q.jobs.push({
+        gen, tile,
+        run: () => {
+          const img = el("img", cls || "gh-gal-thumb");
+          img.alt = ""; img.decoding = "async";
+          let settled = false;
+          const fin = () => { if (settled) return; settled = true; tile._settleLoad = null; done(); };
+          tile._settleLoad = fin;
+          img.addEventListener("load", () => { img.dataset.loaded = "1"; fin(); }, { once: true });
+          img.addEventListener("error", fin, { once: true });
+          tile._img = img;
+          tile.insertBefore(img, tile.firstChild);
+          img.src = url;
+        },
+      });
+      pump();
+    };
+    q.release = (tile) => {
+      tile._released = true;
+      if (tile._settleLoad) tile._settleLoad();
+      if (tile._img) { tile._img.removeAttribute("src"); tile._img.remove(); tile._img = null; }
+    };
+    q.reset = () => { q.gen++; q.jobs.length = 0; };
+    return q;
+  }
+
+  function buildGallery(ctx, screen, tabBar) {
+    const wrap = el("div", "gh-gal");
+    wrap.dataset.open = "0";
+    wrap.innerHTML = `
+      <div class="gh-gal-head">
+        <button class="gh-gal-album gh-press" aria-label="Albums">
+          <span class="gh-gal-title">Gallery</span>
+          <span class="gh-gal-sub"><span class="gh-gal-sub-text">Recents</span></span>
+        </button>
+        <div class="gh-gal-head-actions">
+          <button class="gh-gal-lock gh-hit" data-gact="vault" aria-label="My Eyes Only"></button>
+          <button class="gh-gal-select gh-press" data-gact="select">Select</button>
+        </div>
+      </div>
+      <button class="gh-gal-limited gh-press" style="display:none">Limited access — Manage</button>
+      <div class="gh-gal-scroll gh-scroll">
+        <div class="gh-gal-otd" style="display:none">
+          <div class="gh-gal-otd-title">On this day</div>
+          <div class="gh-gal-otd-row"></div>
+        </div>
+        <div class="gh-gal-grid"></div>
+        <div class="gh-gal-empty" style="display:none">No photos or videos yet.</div>
+      </div>
+      <div class="gh-gal-scrub" data-show="0"><div class="gh-gal-scrub-thumb"></div><div class="gh-gal-scrub-label"></div></div>
+      <div class="gh-gal-denied" style="display:none">
+        <div class="gh-gal-denied-text">Ghost needs access to your photos to show your gallery.</div>
+        <button class="gh-gal-settings-btn gh-press">Open Settings</button>
+      </div>
+    `;
+    screen.insertBefore(wrap, tabBar);
+    // the select-mode action bar sits over the tab bar (the home screen's own stacking context, above it)
+    const selbar = el("div", "gh-gal-selbar");
+    selbar.dataset.show = "0";
+    selbar.innerHTML = `
+      <button class="gh-hit" data-gact="share" aria-label="Share"></button>
+      <button class="gh-hit" data-gact="fav" aria-label="Favorite"></button>
+      <div class="gh-gal-selcount">Select items</div>
+      <button class="gh-gal-selgo gh-press" data-gact="send">Send</button>
+      <button class="gh-hit" data-gact="tovault" aria-label="Move to My Eyes Only"></button>
+      <button class="gh-hit" data-gact="delete" aria-label="Delete"></button>
+    `;
+    screen.appendChild(selbar);
+    selbar.querySelector('[data-gact="share"]').appendChild(icon("share", 22));
+    selbar.querySelector('[data-gact="fav"]').appendChild(icon("heart", 22));
+    selbar.querySelector('[data-gact="delete"]').appendChild(icon("trash", 22));
+    selbar.querySelector('[data-gact="tovault"]').appendChild(icon("lock", 22));
+    wrap.querySelector(".gh-gal-sub").appendChild(icon("chevronDown", 14));
+    wrap.querySelector(".gh-gal-lock").appendChild(icon("lock", 20));
+
+    const q = (s) => wrap.querySelector(s);
+    const g = {
+      el: wrap, selbar, head: q(".gh-gal-head"), scroll: q(".gh-gal-scroll"), grid: q(".gh-gal-grid"),
+      otd: q(".gh-gal-otd"), otdRow: q(".gh-gal-otd-row"), emptyEl: q(".gh-gal-empty"), deniedEl: q(".gh-gal-denied"),
+      limitedRow: q(".gh-gal-limited"), subText: q(".gh-gal-sub-text"), selectBtn: q(".gh-gal-select"),
+      scrub: q(".gh-gal-scrub"), scrubThumb: q(".gh-gal-scrub-thumb"), scrubLabel: q(".gh-gal-scrub-label"),
+      selCount: selbar.querySelector(".gh-gal-selcount"),
+      album: "all", albumTitle: "Recents", albums: [],
+      months: [], sections: [], total: 0, items: [], byId: new Map(), pages: new Map(),
+      mounted: new Map(), tileSize: 0, width: 0, seq: 0, loaded: false, loading: false, authStatus: null,
+      selecting: false, selected: [], otdYears: [], otdDay: null,
+      thumbs: makeThumbQueue(GAL_LOAD_MAX),
+    };
+    ctx.gallery = g;
+    g.layer = el("div", "gh-gal-layer");
+    ctx.root.appendChild(g.layer);
+    g.viewer = buildGalViewer(ctx, g.layer);
+    g.albumSheet = buildGalAlbumSheet(ctx, g.layer);
+    g.infoSheet = buildGalInfoSheet(ctx, g.layer);
+    ctx.sendPage = buildSendPage(ctx);
+    ctx.root.appendChild(ctx.sendPage.el);
+    buildVault(ctx, g.layer);
+
+    q(".gh-gal-album").addEventListener("click", () => { haptic("light"); openGalAlbumSheet(ctx); });
+    g.selectBtn.addEventListener("click", () => { haptic("light"); setGalSelecting(ctx, !g.selecting); });
+    g.limitedRow.addEventListener("click", () => { haptic("light"); dgPost("photoManage").catch(() => {}); });
+    q(".gh-gal-settings-btn").addEventListener("click", () => { haptic("light"); dgPost("photoOpenSettings").catch(() => {}); });
+    selbar.querySelector('[data-gact="share"]').addEventListener("click", () => galShareIds(ctx, g.selected.slice()));
+    selbar.querySelector('[data-gact="fav"]').addEventListener("click", () => galFavoriteSelection(ctx));
+    selbar.querySelector('[data-gact="send"]').addEventListener("click", () => { if (g.vaultPick) finishVaultPick(ctx); else galSendIds(ctx, g.selected.slice()); });
+    selbar.querySelector('[data-gact="tovault"]').addEventListener("click", () => galMoveToVault(ctx, g.selected.slice()));
+    q(".gh-gal-lock").addEventListener("click", () => { haptic("light"); openVault(ctx); });
+    selbar.querySelector('[data-gact="delete"]').addEventListener("click", () => galDeleteIds(ctx, g.selected.slice()));
+    g.scroll.addEventListener("scroll", () => { scheduleGalLayout(ctx); showGalScrubber(ctx); }, { passive: true });
+    if (typeof ResizeObserver === "function") new ResizeObserver(() => { if (g.el.dataset.open === "1") layoutGallery(ctx); }).observe(g.scroll);
+    initGalScrubber(ctx);
+    let changeTimer = null;
+    window.__ghostGalleryChanged = (albums) => {
+      clearTimeout(changeTimer);
+      changeTimer = setTimeout(() => {
+        if (!g.loaded) return;
+        if (!Array.isArray(albums) || albums.includes(g.album)) refreshGallery(ctx);
+        loadGalOnThisDay(ctx);
+      }, 350);
+    };
+    window.__ghostGalleryProgress = (id, p) => galViewerProgress(ctx, id, p);
+    return g;
+  }
+
+  function openGallery(ctx) {
+    const g = ctx.gallery;
+    g.el.dataset.open = "1";
+    if (!g.loaded && !g.loading) loadGallery(ctx);
+    else {
+      requestAnimationFrame(() => layoutGallery(ctx));
+      const d = new Date();
+      if (g.otdDay !== d.getMonth() + "-" + d.getDate()) loadGalOnThisDay(ctx);
+    }
+  }
+  function closeGallery(ctx) {
+    const g = ctx.gallery;
+    if (g.selecting) setGalSelecting(ctx, false);
+    g.el.dataset.open = "0";
+  }
+
+  async function loadGallery(ctx) {
+    const g = ctx.gallery;
+    g.loading = true;
+    let auth = null;
+    try { auth = await dgPost("photoAuth"); } catch (e) {}
+    g.authStatus = (auth && auth.status) || "denied";
+    const ok = g.authStatus === "authorized" || g.authStatus === "limited";
+    g.deniedEl.style.display = ok ? "none" : "";
+    g.scroll.style.display = ok ? "" : "none";
+    g.limitedRow.style.display = g.authStatus === "limited" ? "" : "none";
+    if (!ok) {
+      g.deniedEl.querySelector(".gh-gal-denied-text").textContent = g.authStatus === "restricted"
+        ? "Photo access is restricted on this iPhone."
+        : "Ghost needs access to your photos to show your gallery. Turn it on in Settings.";
+      g.loading = false;
+      return;
+    }
+    await reloadGallery(ctx, false);
+    g.loaded = true; g.loading = false;
+    loadGalOnThisDay(ctx);
+  }
+
+  // Full reload of the current album: month index, then layout; metadata pages load as tiles become visible.
+  async function reloadGallery(ctx, keepScroll) {
+    const g = ctx.gallery;
+    const mySeq = ++g.seq;
+    let res = null;
+    try { res = await dgPost("galleryMonths", { album: g.album }); } catch (e) {}
+    if (mySeq !== g.seq) return;
+    const scrollTop = keepScroll ? g.scroll.scrollTop : 0;
+    g.months = (res && res.months) || [];
+    g.total = (res && res.total) || 0;
+    g.items = []; g.pages = new Map();
+    releaseAllGalTiles(ctx);
+    layoutGallery(ctx, true);
+    g.scroll.scrollTop = scrollTop;
+    updateGalVisible(ctx);
+    g.emptyEl.style.display = g.total ? "none" : "";
+  }
+  // Library changed (native observer): relayout only if the month shape changed, else just refresh metadata
+  // of what's on screen without remounting thumbnails (e.g. a favorite toggled elsewhere).
+  async function refreshGallery(ctx) {
+    const g = ctx.gallery;
+    const mySeq = g.seq;
+    let res = null;
+    try { res = await dgPost("galleryMonths", { album: g.album }); } catch (e) { return; }
+    if (mySeq !== g.seq || !res) return;
+    const same = res.total === g.total && JSON.stringify(res.months) === JSON.stringify(g.months);
+    if (!same) { await reloadGallery(ctx, true); return; }
+    g.pages = new Map();
+    g.items = [];
+    for (const [key, tile] of g.mounted) if (typeof key === "number") tile._needsMeta = true;
+    updateGalVisible(ctx);
+  }
+  function releaseAllGalTiles(ctx) {
+    const g = ctx.gallery;
+    g.thumbs.reset();
+    for (const tile of g.mounted.values()) { g.thumbs.release(tile); tile.remove(); }
+    g.mounted.clear();
+    g.grid.innerHTML = "";
+  }
+
+  // ---- layout ---------------------------------------------------------------------------------------------
+  function layoutGallery(ctx, force) {
+    const g = ctx.gallery;
+    const w = g.grid.clientWidth || g.scroll.clientWidth;
+    if (!w) return;
+    const size = Math.floor((w - GAL_GAP * (GAL_COLS - 1)) / GAL_COLS);
+    if (force || size !== g.tileSize || w !== g.width) {
+      if (!force) releaseAllGalTiles(ctx);
+      g.tileSize = size; g.width = w;
+      const rowH = size + GAL_GAP;
+      let top = 0, start = 0;
+      g.sections = g.months.map((m) => {
+        const rows = Math.ceil(m.count / GAL_COLS);
+        const sec = { y: m.y, m: m.m, count: m.count, start, top, rows, height: GAL_HEAD_H + rows * rowH };
+        top += sec.height; start += m.count;
+        return sec;
+      });
+      g.grid.style.height = top + "px";
+    }
+    updateGalVisible(ctx);
+  }
+  function scheduleGalLayout(ctx) {
+    const g = ctx.gallery;
+    if (g._raf) return;
+    g._raf = true;
+    requestAnimationFrame(() => { g._raf = false; updateGalVisible(ctx); });
+  }
+  function galSectionAt(g, y) { // last section whose top <= y
+    let lo = 0, hi = g.sections.length - 1, ans = 0;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (g.sections[mid].top <= y) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
+    return ans;
+  }
+  function updateGalVisible(ctx) {
+    const g = ctx.gallery;
+    if (!g.tileSize || !g.sections.length) return;
+    const rowH = g.tileSize + GAL_GAP;
+    const gridTop = g.grid.offsetTop;
+    const viewTop = g.scroll.scrollTop - gridTop, viewH = g.scroll.clientHeight;
+    const lo = viewTop - GAL_BUFFER_PX, hi = viewTop + viewH + GAL_BUFFER_PX;
+    const want = new Set();
+    const needPages = new Set();
+    for (let si = galSectionAt(g, Math.max(0, lo)); si < g.sections.length; si++) {
+      const sec = g.sections[si];
+      if (sec.top > hi) break;
+      if (sec.top + sec.height < lo) continue;
+      if (sec.top + GAL_HEAD_H >= lo && sec.top <= hi) want.add("h" + si);
+      const r0 = Math.max(0, Math.floor((lo - sec.top - GAL_HEAD_H) / rowH));
+      const r1 = Math.min(sec.rows - 1, Math.floor((hi - sec.top - GAL_HEAD_H) / rowH));
+      for (let r = r0; r <= r1; r++) {
+        for (let c = 0; c < GAL_COLS; c++) {
+          const local = r * GAL_COLS + c;
+          if (local >= sec.count) break;
+          const index = sec.start + local;
+          want.add(index);
+          if (!g.items[index]) needPages.add(Math.floor(index / GAL_PAGE));
+        }
+      }
+    }
+    for (const [key, node] of Array.from(g.mounted)) {
+      if (!want.has(key)) { if (typeof key === "number") g.thumbs.release(node); node.remove(); g.mounted.delete(key); }
+    }
+    for (const key of want) {
+      const existing = g.mounted.get(key);
+      if (existing) { if (typeof key === "number" && (existing._needsMeta || !existing._item) && g.items[key]) fillGalTile(ctx, existing, g.items[key]); continue; }
+      const node = typeof key === "number" ? buildGalTile(ctx, key) : buildGalHeader(ctx, Number(key.slice(1)));
+      g.mounted.set(key, node);
+      g.grid.appendChild(node);
+    }
+    for (const page of needPages) loadGalPage(ctx, page);
+  }
+  function buildGalHeader(ctx, si) {
+    const g = ctx.gallery, sec = g.sections[si];
+    const h = el("div", "gh-gal-month");
+    h.style.transform = `translateY(${sec.top}px)`;
+    h.style.height = GAL_HEAD_H + "px";
+    const now = new Date();
+    h.textContent = MONTH_NAMES[sec.m - 1] + (sec.y === now.getFullYear() ? "" : " " + sec.y);
+    return h;
+  }
+  function galTilePos(g, index) {
+    // sections are few (one per month): a linear walk from a binary search is plenty fast
+    let lo = 0, hi = g.sections.length - 1, si = 0;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (g.sections[mid].start <= index) { si = mid; lo = mid + 1; } else hi = mid - 1; }
+    const sec = g.sections[si], local = index - sec.start;
+    const rowH = g.tileSize + GAL_GAP;
+    return { x: (local % GAL_COLS) * (g.tileSize + GAL_GAP), y: sec.top + GAL_HEAD_H + Math.floor(local / GAL_COLS) * rowH };
+  }
+  function buildGalTile(ctx, index) {
+    const g = ctx.gallery;
+    const tile = el("div", "gh-gal-tile");
+    tile.setAttribute("role", "button");
+    tile.dataset.index = String(index);
+    const pos = galTilePos(g, index);
+    tile.style.width = tile.style.height = g.tileSize + "px";
+    tile.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
+    const check = el("span", "gh-gal-check"); check.appendChild(icon("check", 13));
+    tile.appendChild(check);
+    if (g.items[index]) fillGalTile(ctx, tile, g.items[index]);
+    let pressTimer = null, moved = false, sx = 0, sy = 0, longPressed = false;
+    tile.addEventListener("touchstart", (e) => {
+      if (!e.touches || e.touches.length !== 1) return;
+      moved = false; longPressed = false; sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+      clearTimeout(pressTimer);
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        if (moved || !tile._item) return;
+        longPressed = true;
+        haptic("medium");
+        if (!g.selecting) setGalSelecting(ctx, true);
+        if (!g.selected.includes(tile._item.id)) toggleGalSelect(ctx, tile._item);
+      }, 450);
+    }, { passive: true });
+    tile.addEventListener("touchmove", (e) => {
+      const t = e.touches && e.touches[0];
+      if (t && Math.hypot(t.clientX - sx, t.clientY - sy) > 8) { moved = true; clearTimeout(pressTimer); }
+    }, { passive: true });
+    const endPress = () => { clearTimeout(pressTimer); pressTimer = null; };
+    tile.addEventListener("touchend", endPress, { passive: true });
+    tile.addEventListener("touchcancel", endPress, { passive: true });
+    tile.addEventListener("click", () => {
+      if (longPressed) { longPressed = false; return; }
+      if (!tile._item) return;
+      if (g.selecting) { haptic("light"); toggleGalSelect(ctx, tile._item); return; }
+      haptic("light");
+      openGalViewer(ctx, galGridSource(ctx), index);
+    });
+    return tile;
+  }
+  function fillGalTile(ctx, tile, item) {
+    const g = ctx.gallery;
+    const sameAsset = tile._item && tile._item.id === item.id;
+    tile._item = item; tile._needsMeta = false;
+    tile.dataset.id = item.id;
+    tile.dataset.video = item.mediaType === "video" ? "1" : "0";
+    tile.dataset.fav = item.favorite ? "1" : "0";
+    tile.dataset.selected = g.selected.includes(item.id) ? "1" : "0";
+    let dur = tile.querySelector(".gh-gal-dur");
+    if (item.mediaType === "video") {
+      if (!dur) { dur = el("span", "gh-gal-dur"); tile.appendChild(dur); }
+      dur.textContent = fmtDuration(item.duration || 0);
+    } else if (dur) dur.remove();
+    if (!tile.querySelector(".gh-gal-favmark")) { const f = el("span", "gh-gal-favmark"); f.appendChild(icon("heartFill", 12)); tile.appendChild(f); }
+    if (!sameAsset) {
+      if (tile._img || tile._settleLoad) { g.thumbs.release(tile); tile._released = false; }
+      g.thumbs.load(tile, galAssetUrl("thumb", item.id, 256));
+    }
+  }
+  async function loadGalPage(ctx, page) {
+    const g = ctx.gallery;
+    if (g.pages.has(page)) return g.pages.get(page);
+    const mySeq = g.seq;
+    const p = (async () => {
+      let res = null;
+      try { res = await dgPost("galleryList", { album: g.album, offset: page * GAL_PAGE, limit: GAL_PAGE }); } catch (e) {}
+      if (mySeq !== g.seq) return;
+      if (!res || !Array.isArray(res.items)) { g.pages.delete(page); return; }
+      const base = typeof res.offset === "number" ? res.offset : page * GAL_PAGE;
+      res.items.forEach((it, k) => { g.items[base + k] = it; g.byId.set(it.id, it); });
+      for (const [key, tile] of g.mounted) {
+        if (typeof key === "number" && key >= base && key < base + res.items.length && (!tile._item || tile._needsMeta)) fillGalTile(ctx, tile, g.items[key]);
+      }
+    })();
+    g.pages.set(page, p);
+    return p;
+  }
+  async function galEnsureItem(ctx, index) {
+    const g = ctx.gallery;
+    if (index < 0 || index >= g.total) return null;
+    if (!g.items[index]) await loadGalPage(ctx, Math.floor(index / GAL_PAGE));
+    return g.items[index] || null;
+  }
+  function galGridSource(ctx) {
+    const g = ctx.gallery;
+    return {
+      kind: "grid",
+      count: () => g.total,
+      get: (i) => g.items[i] || null,
+      ensure: (i) => galEnsureItem(ctx, i),
+      afterDelete: async () => { await reloadGallery(ctx, true); },
+    };
+  }
+  function galArraySource(items, title) {
+    const arr = items.slice();
+    return {
+      kind: "array", title,
+      count: () => arr.length,
+      get: (i) => arr[i] || null,
+      ensure: (i) => Promise.resolve(arr[i] || null),
+      afterDelete: async (ids) => { for (let i = arr.length - 1; i >= 0; i--) if (ids.includes(arr[i].id)) arr.splice(i, 1); },
+    };
+  }
+
+  // ---- scrubber: drag the pill on the right edge to jump through months/years ------------------------------
+  function showGalScrubber(ctx) {
+    const g = ctx.gallery;
+    const max = g.scroll.scrollHeight - g.scroll.clientHeight;
+    if (max < g.scroll.clientHeight * 3) { g.scrub.dataset.show = "0"; return; }
+    g.scrub.dataset.show = "1";
+    if (!g.scrubbing) positionGalScrubThumb(ctx);
+    clearTimeout(g._scrubHide);
+    g._scrubHide = setTimeout(() => { if (!g.scrubbing) g.scrub.dataset.show = "0"; }, 1400);
+  }
+  function positionGalScrubThumb(ctx) {
+    const g = ctx.gallery;
+    const max = Math.max(1, g.scroll.scrollHeight - g.scroll.clientHeight);
+    const track = Math.max(1, g.scrub.clientHeight - 36);
+    g.scrubThumb.style.transform = `translateY(${(g.scroll.scrollTop / max) * track}px)`;
+  }
+  function galMonthLabelAt(ctx, scrollTop) {
+    const g = ctx.gallery;
+    if (!g.sections.length) return "";
+    const sec = g.sections[galSectionAt(g, Math.max(0, scrollTop - g.grid.offsetTop + 1))];
+    return MONTH_NAMES[sec.m - 1].slice(0, 3) + " " + sec.y;
+  }
+  function initGalScrubber(ctx) {
+    const g = ctx.gallery;
+    const move = (clientY) => {
+      const local = toLocal(g.scrub, 0, clientY).y;
+      const track = Math.max(1, g.scrub.clientHeight - 36);
+      const frac = clamp((local - 18) / track, 0, 1);
+      const max = g.scroll.scrollHeight - g.scroll.clientHeight;
+      g.scroll.scrollTop = frac * max;
+      g.scrubThumb.style.transform = `translateY(${frac * track}px)`;
+      const label = galMonthLabelAt(ctx, frac * max);
+      if (label !== g.scrubLabel.textContent) { g.scrubLabel.textContent = label; haptic("light"); }
+      g.scrubLabel.style.transform = `translateY(${frac * track}px)`;
+      updateGalVisible(ctx);
+    };
+    g.scrubThumb.addEventListener("touchstart", (e) => {
+      if (!e.touches || e.touches.length !== 1) return;
+      g.scrubbing = true; g.scrub.dataset.drag = "1"; clearTimeout(g._scrubHide);
+      move(e.touches[0].clientY);
+    }, { passive: true });
+    g.scrubThumb.addEventListener("touchmove", (e) => { if (g.scrubbing && e.touches && e.touches[0]) move(e.touches[0].clientY); }, { passive: true });
+    const end = () => { if (!g.scrubbing) return; g.scrubbing = false; g.scrub.dataset.drag = "0"; showGalScrubber(ctx); };
+    g.scrubThumb.addEventListener("touchend", end, { passive: true });
+    g.scrubThumb.addEventListener("touchcancel", end, { passive: true });
+  }
+
+  // ---- selection -----------------------------------------------------------------------------------------
+  function setGalSelecting(ctx, on) {
+    const g = ctx.gallery;
+    if (!on && g.vaultPick) { g.vaultPick = false; if (ctx.vault && ctx.vault.token) ctx.vault.el.dataset.open = "1"; } // cancelled picking for My Eyes Only
+    g.selbar.dataset.mode = on && g.vaultPick ? "vault" : "";
+    g.selecting = on;
+    g.el.dataset.selecting = on ? "1" : "0";
+    g.selectBtn.textContent = on ? "Cancel" : "Select";
+    if (!on) g.selected = [];
+    g.selbar.dataset.show = on ? "1" : "0";
+    repaintGalSelection(ctx);
+  }
+  function toggleGalSelect(ctx, item) {
+    const g = ctx.gallery;
+    const i = g.selected.indexOf(item.id);
+    if (i !== -1) g.selected.splice(i, 1);
+    else {
+      if (g.selected.length >= GAL_SELECT_MAX) { ctx.showToast("Up to " + GAL_SELECT_MAX + " at a time"); return; }
+      g.selected.push(item.id);
+    }
+    repaintGalSelection(ctx);
+  }
+  function repaintGalSelection(ctx) {
+    const g = ctx.gallery;
+    for (const [key, tile] of g.mounted) if (typeof key === "number" && tile._item) tile.dataset.selected = g.selected.includes(tile._item.id) ? "1" : "0";
+    const n = g.selected.length;
+    g.selCount.textContent = n ? (n === 1 ? "1 selected" : n + " selected") : "Select items";
+    g.selbar.querySelector('[data-gact="send"]').textContent = g.vaultPick ? (n ? "Move " + n : "Move") : "Send";
+    g.selbar.dataset.has = n ? "1" : "0";
+    const allFav = n > 0 && g.selected.every((id) => (g.byId.get(id) || {}).favorite);
+    const favBtn = g.selbar.querySelector('[data-gact="fav"]');
+    favBtn.innerHTML = ""; favBtn.appendChild(icon(allFav ? "heartFill" : "heart", 22));
+    favBtn.setAttribute("aria-label", allFav ? "Unfavorite" : "Favorite");
+  }
+  async function galFavoriteSelection(ctx) {
+    const g = ctx.gallery;
+    const ids = g.selected.slice();
+    if (!ids.length) return;
+    const on = !ids.every((id) => (g.byId.get(id) || {}).favorite);
+    haptic("light");
+    let failed = 0;
+    for (const id of ids) {
+      try { await dgPost("galleryFavorite", { id, on }); const it = g.byId.get(id); if (it) it.favorite = on; } catch (e) { failed++; }
+    }
+    if (failed) ctx.showToast("Couldn't change " + failed + (failed === 1 ? " item" : " items"));
+    for (const [key, tile] of g.mounted) if (typeof key === "number" && tile._item) tile.dataset.fav = tile._item.favorite ? "1" : "0";
+    repaintGalSelection(ctx);
+  }
+
+  // ---- share / delete / send (shared by the grid's select mode and the viewer) ---------------------------
+  async function galShareIds(ctx, ids) {
+    if (!ids.length) return;
+    haptic("light");
+    try { await dgPost("galleryShare", { ids }); }
+    catch (e) { ctx.showToast("Couldn't share that"); }
+  }
+  // iOS asks for confirmation itself; returns the ids that were actually deleted.
+  async function galDeleteIds(ctx, ids) {
+    const g = ctx.gallery;
+    if (!ids.length) return [];
+    haptic("light");
+    let res = null;
+    try { res = await dgPost("galleryDelete", { ids }); }
+    catch (e) { ctx.showToast("Couldn't delete"); return []; }
+    const deleted = (res && res.deleted) || [];
+    if (!deleted.length) return [];
+    for (const id of deleted) g.byId.delete(id);
+    g.selected = g.selected.filter((id) => !deleted.includes(id));
+    if (g.selecting) setGalSelecting(ctx, false);
+    await reloadGallery(ctx, true);
+    loadGalOnThisDay(ctx);
+    return deleted;
+  }
+  function galItemsFor(ctx, ids) {
+    const g = ctx.gallery;
+    return ids.map((id) => g.byId.get(id) || { id, mediaType: "image" });
+  }
+  function galSendIds(ctx, ids) {
+    if (!ids.length) return;
+    if (ids.length > GAL_SEND_MAX) { ctx.showToast("Send up to " + GAL_SEND_MAX + " at a time"); return; }
+    const items = galItemsFor(ctx, ids);
+    haptic("light");
+    openSendPage(ctx, {
+      count: items.length,
+      onSend: async (dest) => {
+        const r = await galSendItems(ctx, items, dest);
+        if (r.ok && ctx.gallery.selecting) setGalSelecting(ctx, false);
+        return r.ok > 0;
+      },
+    });
+  }
+  // One item at a time (bytes over the "dg" round trip, see the photo picker's header comment). Snap mode: one
+  // sendSnap per item to every picked chat at once (+ story). Chat mode: sendMedia per chat per item; every
+  // destination's failure is counted separately so the toast can say exactly what didn't go.
+  async function galSendItems(ctx, items, dest, progress) {
+    let ok = 0, failed = 0;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (progress) progress(i, items.length);
+      let blob = item.blob || null; // an edited render (galleryRender "send") is passed in ready to go
+      if (!blob) try {
+        const res = await dgPost(item.vault ? "vaultFull" : "photoFull", { id: item.id });
+        if (!res || !res.data) throw new Error("no data");
+        blob = b64ToBlob(res.data, res.mime || (item.mediaType === "video" ? "video/mp4" : "image/jpeg"));
+      } catch (e) { failed += dest.mode === "snap" ? 1 : dest.convIds.length; gtrail("gallery fetch failed " + (e && e.message || e)); continue; }
+      const kind = item.mediaType === "video" ? "video" : "image";
+      if (dest.mode === "snap") {
+        try {
+          await api.sendSnap(dest.convIds, blob, { kind, width: item.width, height: item.height, hasAudio: kind === "video", myStory: !!dest.story });
+          ok++;
+        } catch (e) { failed++; gtrail("gallery snap send failed " + (e && e.message || e)); }
+      } else {
+        for (const convId of dest.convIds) {
+          try { await api.sendMedia(convId, blob, { kind }); ok++; }
+          catch (e) { failed++; gtrail("gallery chat send failed " + (e && e.message || e)); }
+        }
+      }
+    }
+    if (ok) haptic("success");
+    const where = dest.mode === "snap"
+      ? (dest.story && !dest.convIds.length ? "your story" : dest.convIds.length === 1 && !dest.story ? ((ctx.state.convById.get(dest.convIds[0]) || {}).title || "1 chat") : (dest.convIds.length + (dest.story ? 1 : 0)) + " places")
+      : (dest.convIds.length === 1 ? ((ctx.state.convById.get(dest.convIds[0]) || {}).title || "1 chat") : dest.convIds.length + " chats");
+    if (!failed) ctx.showToast((items.length === 1 ? "Sent to " : items.length + " sent to ") + where);
+    else if (ok) ctx.showToast("Sent " + ok + ", " + failed + " didn't send");
+    else ctx.showToast("Couldn't send");
+    return { ok, failed };
+  }
+
+  // ---- On this day ---------------------------------------------------------------------------------------
+  async function loadGalOnThisDay(ctx) {
+    const g = ctx.gallery;
+    let res = null;
+    try { res = await dgPost("galleryOnThisDay"); } catch (e) {}
+    const d = new Date();
+    g.otdDay = d.getMonth() + "-" + d.getDate();
+    g.otdYears = (res && res.years) || [];
+    g.otdRow.innerHTML = "";
+    g.otd.style.display = g.otdYears.length && g.album === "all" ? "" : "none";
+    for (const yr of g.otdYears) {
+      const card = el("button", "gh-gal-otd-card gh-press");
+      const cover = (yr.items || [])[Math.floor(((yr.items || []).length - 1) / 2)] || (yr.items || [])[0];
+      if (cover) {
+        const img = el("img", "gh-gal-otd-img"); img.alt = ""; img.decoding = "async";
+        img.src = galAssetUrl("thumb", cover.id, 420);
+        card.appendChild(img);
+      }
+      const label = el("div", "gh-gal-otd-label");
+      const big = el("div", "gh-gal-otd-big"); big.textContent = yr.yearsAgo === 1 ? "1 year ago today" : yr.yearsAgo + " years ago today";
+      const small = el("div", "gh-gal-otd-small"); small.textContent = MONTHS[d.getMonth()] + " " + d.getDate() + ", " + yr.year + " · " + yr.count;
+      label.append(big, small);
+      card.appendChild(label);
+      card.setAttribute("aria-label", big.textContent);
+      card.addEventListener("click", () => {
+        haptic("light");
+        for (const it of yr.items || []) g.byId.set(it.id, it);
+        openGalViewer(ctx, galArraySource(yr.items || [], big.textContent), 0);
+      });
+      g.otdRow.appendChild(card);
+    }
+    // the grid's top moved: recompute which tiles are visible
+    requestAnimationFrame(() => updateGalVisible(ctx));
+  }
+
+  // ---- albums sheet --------------------------------------------------------------------------------------
+  function buildGalAlbumSheet(ctx, layer) {
+    const backdrop = el("div", "gh-backdrop");
+    const sheet = el("div", "gh-sheet gh-gal-albums"); sheet.style.display = "none";
+    sheet.innerHTML = `<div class="gh-sheet-grip"></div><div class="gh-gal-albums-title">Albums</div><div class="gh-gal-albums-list gh-scroll"></div>`;
+    layer.append(backdrop, sheet);
+    const s = { backdrop, sheet, list: sheet.querySelector(".gh-gal-albums-list") };
+    backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
+    return s;
+  }
+  async function openGalAlbumSheet(ctx) {
+    const g = ctx.gallery, s = g.albumSheet;
+    if (g.selecting) setGalSelecting(ctx, false);
+    s.list.innerHTML = '<div class="gh-gal-albums-loading"><div class="gh-spinner"></div></div>';
+    openSheetGeneric(s.backdrop, s.sheet);
+    let res = null;
+    try { res = await dgPost("galleryAlbums"); } catch (e) {}
+    g.albums = (res && res.albums) || [{ id: "all", title: "Recents", count: g.total, cover: "" }];
+    s.list.innerHTML = "";
+    const extra = typeof galAlbumSheetExtras === "function" ? galAlbumSheetExtras(ctx) : null;
+    if (extra) s.list.appendChild(extra);
+    for (const a of g.albums) {
+      const row = el("button", "gh-gal-album-row gh-press");
+      row.dataset.on = a.id === g.album ? "1" : "0";
+      const cov = el("div", "gh-gal-album-cover");
+      if (a.cover) { const img = el("img"); img.alt = ""; img.src = galAssetUrl("thumb", a.cover, 160); cov.appendChild(img); }
+      else cov.appendChild(icon(a.kind === "smart-fav" ? "heart" : "gallery", 22));
+      const txt = el("div", "gh-gal-album-text");
+      const t = el("div", "gh-gal-album-name"); t.textContent = a.title;
+      const c = el("div", "gh-gal-album-count"); c.textContent = String(a.count);
+      txt.append(t, c);
+      row.append(cov, txt);
+      row.addEventListener("click", () => {
+        haptic("light");
+        closeSheetGeneric(s.backdrop, s.sheet);
+        if (a.id === g.album) return;
+        g.album = a.id; g.albumTitle = a.id === "all" ? "Recents" : a.title;
+        g.subText.textContent = g.albumTitle;
+        g.otd.style.display = g.otdYears.length && g.album === "all" ? "" : "none";
+        reloadGallery(ctx, false);
+      });
+      s.list.appendChild(row);
+    }
+  }
+
+  // ---- info sheet ----------------------------------------------------------------------------------------
+  function buildGalInfoSheet(ctx, layer) {
+    const backdrop = el("div", "gh-backdrop");
+    const sheet = el("div", "gh-sheet gh-gal-info"); sheet.style.display = "none";
+    sheet.innerHTML = `<div class="gh-sheet-grip"></div><div class="gh-gal-info-body"></div>`;
+    layer.append(backdrop, sheet);
+    const s = { backdrop, sheet, body: sheet.querySelector(".gh-gal-info-body") };
+    backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
+    return s;
+  }
+  async function openGalInfo(ctx, item) {
+    const s = ctx.gallery.infoSheet;
+    s.body.innerHTML = '<div class="gh-gal-albums-loading"><div class="gh-spinner"></div></div>';
+    openSheetGeneric(s.backdrop, s.sheet);
+    let info = item;
+    if (!item.vault) { try { info = Object.assign({}, item, await dgPost("galleryInfo", { id: item.id })); } catch (e) {} }
+    else if (typeof vaultInfoFor === "function") { try { info = Object.assign({}, item, await vaultInfoFor(ctx, item)); } catch (e) {} }
+    s.body.innerHTML = "";
+    const head = el("div", "gh-gal-info-head");
+    const d = new Date(info.date || Date.now());
+    head.textContent = fmtLongDate(info.date || Date.now()) + " · " + fmtClock(+d);
+    s.body.appendChild(head);
+    const rows = [];
+    if (info.filename) rows.push(["Name", info.filename]);
+    const mp = info.width && info.height ? (info.width * info.height / 1e6) : 0;
+    if (info.width && info.height) rows.push(["Size", info.width + " × " + info.height + (mp >= 0.5 ? " · " + mp.toFixed(mp >= 10 ? 0 : 1) + " MP" : "")]);
+    if (info.size) rows.push(["File", fmtBytes(info.size)]);
+    if (info.mediaType === "video") rows.push(["Length", fmtDuration(info.duration || 0)]);
+    if (info.live) rows.push(["Type", "Live Photo"]);
+    if (info.place) rows.push(["Place", info.place]);
+    else if (typeof info.lat === "number") rows.push(["Place", info.lat.toFixed(5) + ", " + info.lon.toFixed(5)]);
+    if (info.vault) rows.push(["Where", "My Eyes Only"]);
+    const grp = el("div", "gh-set-group");
+    for (const [k, v] of rows) {
+      const row = el("div", "gh-set-row gh-gal-info-row");
+      const a = el("div", "gh-set-label"); a.textContent = k;
+      const b = el("div", "gh-gal-info-val"); b.textContent = v;
+      row.append(a, b); grp.appendChild(row);
+    }
+    s.body.appendChild(grp);
+  }
+
+  // ---- full-screen viewer --------------------------------------------------------------------------------
+  function buildGalViewer(ctx, layer) {
+    const wrap = el("div", "gh-gv");
+    wrap.dataset.open = "0"; wrap.dataset.chrome = "1";
+    wrap.innerHTML = `
+      <div class="gh-gv-bg"></div>
+      <div class="gh-gv-track"></div>
+      <div class="gh-gv-top">
+        <button class="gh-gv-btn gh-hit" data-gact="close" aria-label="Close"></button>
+        <div class="gh-gv-title"><div class="gh-gv-t1"></div><div class="gh-gv-t2"></div></div>
+        <button class="gh-gv-btn gh-hit" data-gact="more" aria-label="More"></button>
+      </div>
+      <div class="gh-gv-dl" style="display:none"></div>
+      <div class="gh-gv-bottom">
+        <button class="gh-gv-btn gh-hit" data-gact="share" aria-label="Share"></button>
+        <button class="gh-gv-btn gh-hit" data-gact="fav" aria-label="Favorite"></button>
+        <button class="gh-gv-btn gh-hit" data-gact="edit" aria-label="Edit"></button>
+        <button class="gh-gv-send gh-press" data-gact="send">Send</button>
+        <button class="gh-gv-btn gh-hit" data-gact="info" aria-label="Info"></button>
+        <button class="gh-gv-btn gh-hit" data-gact="delete" aria-label="Delete"></button>
+      </div>
+    `;
+    layer.appendChild(wrap);
+    const q = (s) => wrap.querySelector(s);
+    q('[data-gact="close"]').appendChild(icon("back", 24));
+    q('[data-gact="more"]').appendChild(icon("more", 22));
+    q('[data-gact="share"]').appendChild(icon("share", 22));
+    q('[data-gact="edit"]').appendChild(icon("edit", 22));
+    q('[data-gact="info"]').appendChild(icon("info", 22));
+    q('[data-gact="delete"]').appendChild(icon("trash", 22));
+    const v = {
+      el: wrap, track: q(".gh-gv-track"), bg: q(".gh-gv-bg"), t1: q(".gh-gv-t1"), t2: q(".gh-gv-t2"),
+      favBtn: q('[data-gact="fav"]'), editBtn: q('[data-gact="edit"]'), moreBtn: q('[data-gact="more"]'), dl: q(".gh-gv-dl"),
+      src: null, index: 0, slides: [], zoom: { s: 1, x: 0, y: 0 },
+    };
+    for (let k = 0; k < 3; k++) { const s = el("div", "gh-gv-slide"); v.track.appendChild(s); v.slides.push(s); }
+    q('[data-gact="close"]').addEventListener("click", () => { haptic("light"); closeGalViewer(ctx); });
+    q('[data-gact="share"]').addEventListener("click", () => { const it = galViewerItem(ctx); if (it) (it.vault && typeof vaultShareIds === "function" ? vaultShareIds(ctx, [it.id]) : galShareIds(ctx, [it.id])); });
+    v.favBtn.addEventListener("click", () => galViewerToggleFav(ctx));
+    v.editBtn.addEventListener("click", () => { const it = galViewerItem(ctx); if (it && typeof openGalEditor === "function") openGalEditor(ctx, it); });
+    q('[data-gact="send"]').addEventListener("click", () => galViewerSend(ctx));
+    q('[data-gact="info"]').addEventListener("click", () => { const it = galViewerItem(ctx); if (it) { haptic("light"); openGalInfo(ctx, it); } });
+    q('[data-gact="delete"]').addEventListener("click", () => galViewerDelete(ctx));
+    v.moreBtn.addEventListener("click", () => { const it = galViewerItem(ctx); if (it && typeof openGalMoreMenu === "function") openGalMoreMenu(ctx, it); });
+    initGalViewerGestures(ctx, v);
+    return v;
+  }
+  function galViewerItem(ctx) { const v = ctx.gallery.viewer; return v.src ? v.src.get(v.index) : null; }
+  function openGalViewer(ctx, src, index) {
+    const v = ctx.gallery.viewer;
+    v.src = src; v.index = clamp(index, 0, Math.max(0, src.count() - 1));
+    v.el.dataset.open = "1"; v.el.dataset.chrome = "1";
+    v.el.dataset.vault = src.vault ? "1" : "0";
+    v.el.style.transform = ""; v.bg.style.opacity = "";
+    v.moreBtn.style.display = typeof openGalMoreMenu === "function" ? "" : "none";
+    v.editBtn.style.display = typeof openGalEditor === "function" ? "" : "none";
+    for (const s of v.slides) { s._want = null; clearGalSlide(s); }
+    renderGalSlides(ctx);
+  }
+  function closeGalViewer(ctx) {
+    const v = ctx.gallery.viewer;
+    v.el.dataset.open = "0";
+    for (const s of v.slides) { s._want = null; clearGalSlide(s); }
+    v.src = null;
+    v.dl.style.display = "none";
+  }
+  function clearGalSlide(slide) {
+    const vid = slide.querySelector("video");
+    if (vid) { try { vid.pause(); } catch (e) {} vid.removeAttribute("src"); try { vid.load(); } catch (e) {} }
+    slide.innerHTML = ""; slide._id = null; slide._item = null;
+  }
+  function positionGalSlides(v, dx, animate) {
+    v.slides.forEach((s, k) => {
+      s.classList.toggle("gh-anim", !!animate);
+      s.style.transform = `translate3d(calc(${(k - 1) * 100}% + ${dx || 0}px), 0, 0)`;
+    });
+  }
+  function renderGalSlides(ctx) {
+    const v = ctx.gallery.viewer;
+    v.zoom = { s: 1, x: 0, y: 0 };
+    positionGalSlides(v, 0, false);
+    v.slides.forEach((slide, k) => {
+      const idx = v.index + k - 1;
+      if (idx < 0 || idx >= v.src.count()) { slide._want = null; clearGalSlide(slide); return; }
+      if (slide._want === idx && slide._item) { applyGalZoom(v, slide); setGalSlideActive(ctx, slide, k === 1); return; }
+      slide._want = idx;
+      v.src.ensure(idx).then((item) => {
+        if (slide._want !== idx || !v.src || !item) return;
+        fillGalSlide(ctx, slide, item);
+        setGalSlideActive(ctx, slide, v.slides.indexOf(slide) === 1);
+      });
+    });
+    paintGalViewerChrome(ctx);
+    // warm the next page of metadata so a fast swipe doesn't wait
+    if (v.src.kind === "grid") v.src.ensure(Math.min(v.src.count() - 1, v.index + 3));
+  }
+  function fillGalSlide(ctx, slide, item) {
+    if (slide._id === item.id) { slide._item = item; return; }
+    clearGalSlide(slide);
+    slide._id = item.id; slide._item = item;
+    const zoom = el("div", "gh-gv-zoom");
+    const low = el("img", "gh-gv-img gh-gv-low"); low.alt = ""; low.decoding = "async";
+    low.src = item.vault ? vaultAssetUrl("thumb", item.id) : galAssetUrl("thumb", item.id, 256);
+    const hi = el("img", "gh-gv-img"); hi.alt = ""; hi.decoding = "async";
+    hi.addEventListener("load", () => { hi.dataset.loaded = "1"; }, { once: true });
+    hi.src = item.vault ? vaultAssetUrl("view", item.id) : galAssetUrl("view", item.id, 2400);
+    zoom.append(low, hi);
+    slide.appendChild(zoom);
+    if (item.mediaType === "video") {
+      const play = el("button", "gh-gv-play gh-press"); play.appendChild(icon("play", 30)); play.setAttribute("aria-label", "Play");
+      play.addEventListener("click", (e) => { e.stopPropagation(); startGalVideo(ctx, slide); });
+      slide.appendChild(play);
+    }
+  }
+  function setGalSlideActive(ctx, slide, active) {
+    const item = slide._item;
+    if (!item) return;
+    if (!active) {
+      const vid = slide.querySelector("video");
+      if (vid) { try { vid.pause(); } catch (e) {} vid.removeAttribute("src"); try { vid.load(); } catch (e) {} vid.remove(); slide.dataset.playing = "0"; }
+      return;
+    }
+    if (item.mediaType === "video" && !slide.querySelector("video")) startGalVideo(ctx, slide);
+  }
+  function startGalVideo(ctx, slide) {
+    const item = slide._item;
+    if (!item || slide.querySelector("video")) return;
+    const vid = el("video", "gh-gv-video");
+    vid.playsInline = true; vid.controls = true; vid.autoplay = true; vid.preload = "auto";
+    vid.setAttribute("playsinline", "");
+    vid.addEventListener("playing", () => { slide.dataset.playing = "1"; }, { once: true });
+    vid.addEventListener("error", () => { if (slide.contains(vid)) { slide.dataset.playing = "0"; ctx.showToast("Couldn't play that video"); } }, { once: true });
+    vid.src = item.vault ? vaultAssetUrl("video", item.id) : galAssetUrl("video", item.id);
+    slide.appendChild(vid);
+    const p = vid.play && vid.play();
+    if (p && p.catch) p.catch(() => {});
+  }
+  function paintGalViewerChrome(ctx) {
+    const v = ctx.gallery.viewer;
+    const item = v.src && v.src.get(v.index);
+    if (!item) { v.t1.textContent = ""; v.t2.textContent = ""; return; }
+    if (v.src.title) { v.t1.textContent = v.src.title; v.t2.textContent = fmtLongDate(item.date) + " · " + fmtClock(item.date); }
+    else { v.t1.textContent = fmtLongDate(item.date); v.t2.textContent = fmtClock(item.date); }
+    v.favBtn.innerHTML = "";
+    v.favBtn.appendChild(icon(item.favorite ? "heartFill" : "heart", 22));
+    v.favBtn.dataset.on = item.favorite ? "1" : "0";
+    v.favBtn.style.display = item.vault ? "none" : "";
+    v.dl.style.display = "none";
+  }
+  function galViewerProgress(ctx, id, p) {
+    const v = ctx.gallery.viewer;
+    const item = galViewerItem(ctx);
+    if (!item || item.id !== id || v.el.dataset.open !== "1") return;
+    if (p >= 1) { v.dl.style.display = "none"; return; }
+    v.dl.style.display = "";
+    v.dl.textContent = "Downloading from iCloud… " + Math.round(p * 100) + "%";
+  }
+  function galViewerStep(ctx, dir) {
+    const v = ctx.gallery.viewer;
+    const next = v.index + dir;
+    if (next < 0 || next >= v.src.count()) { positionGalSlides(v, 0, true); return; }
+    const cur = v.slides[1];
+    applyGalZoom(v, cur, { s: 1, x: 0, y: 0 });
+    positionGalSlides(v, -dir * v.track.clientWidth, true);
+    setTimeout(() => {
+      if (!v.src) return;
+      if (dir > 0) v.slides.push(v.slides.shift()); else v.slides.unshift(v.slides.pop());
+      for (const s of v.slides) v.track.appendChild(s);
+      v.index = next;
+      renderGalSlides(ctx);
+    }, 230);
+  }
+  async function galViewerToggleFav(ctx) {
+    const v = ctx.gallery.viewer, g = ctx.gallery;
+    const item = galViewerItem(ctx);
+    if (!item || item.vault) return;
+    const on = !item.favorite;
+    haptic("light");
+    item.favorite = on; paintGalViewerChrome(ctx);
+    try { await dgPost("galleryFavorite", { id: item.id, on }); }
+    catch (e) { item.favorite = !on; paintGalViewerChrome(ctx); ctx.showToast("Couldn't change favorite"); return; }
+    const known = g.byId.get(item.id); if (known) known.favorite = on;
+    for (const [key, tile] of g.mounted) if (typeof key === "number" && tile._item && tile._item.id === item.id) tile.dataset.fav = on ? "1" : "0";
+    void v;
+  }
+  function galViewerSend(ctx) {
+    const item = galViewerItem(ctx);
+    if (!item) return;
+    haptic("light");
+    openSendPage(ctx, { count: 1, onSend: async (dest) => (await galSendItems(ctx, [item], dest)).ok > 0 });
+  }
+  async function galViewerDelete(ctx) {
+    const v = ctx.gallery.viewer;
+    const item = galViewerItem(ctx);
+    if (!item) return;
+    const src = v.src;
+    let deleted = [];
+    if (item.vault) deleted = typeof vaultDeleteIds === "function" ? await vaultDeleteIds(ctx, [item.id]) : [];
+    else deleted = await galDeleteIds(ctx, [item.id]);
+    if (!deleted.length || v.src !== src) return;
+    if (src.kind !== "grid") await src.afterDelete(deleted);
+    if (!src.count()) { closeGalViewer(ctx); return; }
+    v.index = clamp(v.index, 0, src.count() - 1);
+    for (const s of v.slides) { s._want = null; clearGalSlide(s); }
+    renderGalSlides(ctx);
+  }
+
+  // zoom state lives on the viewer; only the middle (current) slide is ever zoomed
+  function applyGalZoom(v, slide, z) {
+    if (z) v.zoom = z;
+    const zoom = slide && slide.querySelector(".gh-gv-zoom");
+    if (zoom) zoom.style.transform = v.zoom.s === 1 ? "" : `translate(${v.zoom.x}px, ${v.zoom.y}px) scale(${v.zoom.s})`;
+    v.el.dataset.zoomed = v.zoom.s > 1 ? "1" : "0";
+  }
+  function clampGalPan(v, slide) {
+    const W = slide.clientWidth, H = slide.clientHeight, s = v.zoom.s;
+    v.zoom.x = clamp(v.zoom.x, W - W * s, 0);
+    v.zoom.y = clamp(v.zoom.y, H - H * s, 0);
+  }
+  function initGalViewerGestures(ctx, v) {
+    let g = null, lastTap = 0, tapTimer = null;
+    const cur = () => v.slides[1];
+    const isImage = () => { const it = cur()._item; return it && it.mediaType !== "video"; };
+    v.track.addEventListener("touchstart", (e) => {
+      if (!v.src) return;
+      const slide = cur();
+      if (e.touches.length === 2 && isImage()) {
+        const a = toLocal(slide, e.touches[0].clientX, e.touches[0].clientY), b = toLocal(slide, e.touches[1].clientX, e.touches[1].clientY);
+        g = { mode: "pinch", d0: Math.hypot(b.x - a.x, b.y - a.y) || 1, m0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, z0: Object.assign({}, v.zoom) };
+        return;
+      }
+      if (e.touches.length !== 1) { g = null; return; }
+      const t = e.touches[0];
+      g = { mode: null, x0: t.clientX, y0: t.clientY, t0: Date.now(), z0: Object.assign({}, v.zoom), onVideo: !!(e.target.closest && e.target.closest("video, .gh-gv-play")) };
+    }, { passive: true });
+    v.track.addEventListener("touchmove", (e) => {
+      if (!g || !v.src) return;
+      const slide = cur();
+      if (g.mode === "pinch") {
+        if (e.touches.length < 2) return;
+        const a = toLocal(slide, e.touches[0].clientX, e.touches[0].clientY), b = toLocal(slide, e.touches[1].clientX, e.touches[1].clientY);
+        const d = Math.hypot(b.x - a.x, b.y - a.y) || 1, m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        const s = clamp(g.z0.s * d / g.d0, 1, 5);
+        const px = (g.m0.x - g.z0.x) / g.z0.s, py = (g.m0.y - g.z0.y) / g.z0.s;
+        v.zoom = { s, x: m.x - px * s, y: m.y - py * s };
+        clampGalPan(v, slide); applyGalZoom(v, slide);
+        return;
+      }
+      const t = e.touches[0];
+      const k = pagePxToLocal();
+      const dx = (t.clientX - g.x0) * k, dy = (t.clientY - g.y0) * k;
+      if (!g.mode) {
+        if (Math.hypot(dx, dy) < 8) return;
+        if (v.zoom.s > 1) g.mode = "pan";
+        else if (Math.abs(dx) > Math.abs(dy)) g.mode = "page";
+        else if (dy > 0) g.mode = "dismiss";
+        else g.mode = "none";
+        clearTimeout(tapTimer);
+      }
+      if (g.mode === "pan") { v.zoom = { s: g.z0.s, x: g.z0.x + dx, y: g.z0.y + dy }; clampGalPan(v, slide); applyGalZoom(v, slide); }
+      else if (g.mode === "page") {
+        const atEdge = (dx > 0 && v.index === 0) || (dx < 0 && v.index >= v.src.count() - 1);
+        positionGalSlides(v, atEdge ? dx / 3 : dx, false);
+      } else if (g.mode === "dismiss") {
+        v.track.style.transform = `translateY(${dy}px) scale(${clamp(1 - dy / 1600, 0.8, 1)})`;
+        v.bg.style.opacity = String(clamp(1 - dy / 400, 0, 1));
+        v.el.dataset.chrome = "0";
+      }
+    }, { passive: true });
+    const end = (e) => {
+      if (!g || !v.src) { g = null; return; }
+      const slide = cur();
+      const t = e.changedTouches && e.changedTouches[0];
+      const k = pagePxToLocal();
+      const dx = t ? (t.clientX - g.x0) * k : 0, dy = t ? (t.clientY - g.y0) * k : 0;
+      const mode = g.mode, dt = Date.now() - g.t0, onVideo = g.onVideo;
+      if (mode === "pinch") {
+        if (e.touches && e.touches.length) return; // one finger still down
+        if (v.zoom.s < 1.05) applyGalZoom(v, slide, { s: 1, x: 0, y: 0 });
+        g = null; return;
+      }
+      g = null;
+      if (mode === "page") {
+        const W = v.track.clientWidth || 1;
+        const fast = dt < 300 && Math.abs(dx) > 40;
+        if ((dx < -W * 0.2 || (fast && dx < 0)) && v.index < v.src.count() - 1) galViewerStep(ctx, 1);
+        else if ((dx > W * 0.2 || (fast && dx > 0)) && v.index > 0) galViewerStep(ctx, -1);
+        else positionGalSlides(v, 0, true);
+        return;
+      }
+      if (mode === "dismiss") {
+        if (dy > 110) { closeGalViewer(ctx); v.track.style.transform = ""; v.bg.style.opacity = ""; return; }
+        v.track.classList.add("gh-anim"); v.track.style.transform = ""; v.bg.style.opacity = ""; v.el.dataset.chrome = "1";
+        setTimeout(() => v.track.classList.remove("gh-anim"), 300);
+        return;
+      }
+      if (mode || onVideo || dt > 350) return;
+      // tap: single = chrome on/off, double = zoom in/out at that point
+      const now = Date.now();
+      if (now - lastTap < 280 && isImage()) {
+        lastTap = 0; clearTimeout(tapTimer);
+        if (v.zoom.s > 1) applyGalZoom(v, slide, { s: 1, x: 0, y: 0 });
+        else if (t) {
+          const p = toLocal(slide, t.clientX, t.clientY), s = 2.5;
+          v.zoom = { s, x: p.x * (1 - s), y: p.y * (1 - s) };
+          clampGalPan(v, slide); applyGalZoom(v, slide);
+        }
+        return;
+      }
+      lastTap = now;
+      clearTimeout(tapTimer);
+      tapTimer = setTimeout(() => { v.el.dataset.chrome = v.el.dataset.chrome === "1" ? "0" : "1"; }, 260);
+    };
+    v.track.addEventListener("touchend", end, { passive: true });
+    v.track.addEventListener("touchcancel", end, { passive: true });
+  }
+
+  // ---- Send To page (Gallery sends; also used by the editor for gallery/vault sources) ---------------------
+  // Snap = disappears after viewing (sendSnap, can include My Story); Chat = stays in the chat (sendMedia).
+  function buildSendPage(ctx) {
+    const wrap = el("div", "gh-cam-picker gh-send-page");
+    wrap.innerHTML = `
+      <div class="gh-cam-picker-head">
+        <button class="gh-cam-picker-back gh-hit" data-gact="back" aria-label="Back"></button>
+        <div class="gh-cam-picker-title">Send To</div>
+        <div style="width:44px"></div>
+      </div>
+      <div class="gh-send-mode" role="tablist">
+        <button data-mode="snap" role="tab">Snap</button>
+        <button data-mode="chat" role="tab">Chat</button>
+      </div>
+      <div class="gh-send-mode-hint"></div>
+      <div class="gh-cam-search"><input type="search" placeholder="Search" autocapitalize="off" autocomplete="off" spellcheck="false"></div>
+      <div class="gh-cam-list gh-scroll"></div>
+      <div class="gh-cam-sendbar">
+        <div class="gh-cam-chosen"></div>
+        <button class="gh-cam-send" data-gact="send" aria-label="Send"></button>
+      </div>
+    `;
+    const q = (s) => wrap.querySelector(s);
+    q('[data-gact="back"]').appendChild(icon("back", 24));
+    q('[data-gact="send"]').appendChild(icon("send", 22));
+    const sp = {
+      el: wrap, list: q(".gh-cam-list"), search: q(".gh-cam-search input"), chosen: q(".gh-cam-chosen"),
+      sendBtn: q('[data-gact="send"]'), hint: q(".gh-send-mode-hint"), modeBtns: Array.from(wrap.querySelectorAll("[data-mode]")),
+      mode: "snap", picked: new Set(), opts: null, sending: false,
+    };
+    q('[data-gact="back"]').addEventListener("click", () => { haptic("light"); closeSendPage(ctx); });
+    for (const b of sp.modeBtns) b.addEventListener("click", () => { haptic("light"); setSendMode(ctx, b.dataset.mode); });
+    sp.search.addEventListener("input", () => renderSendPage(ctx));
+    sp.sendBtn.addEventListener("click", () => doSendPage(ctx));
+    return sp;
+  }
+  function openSendPage(ctx, opts) {
+    const sp = ctx.sendPage;
+    sp.opts = opts || {};
+    sp.picked = new Set(sp.opts.preselect ? [sp.opts.preselect] : []);
+    sp.search.value = "";
+    sp.sending = false; sp.sendBtn.dataset.sending = "0";
+    setSendMode(ctx, sp.opts.mode || (() => { try { return localStorage.getItem("ghost.sendMode") || "snap"; } catch (e) { return "snap"; } })());
+    sp.el.dataset.open = "1";
+  }
+  function closeSendPage(ctx) { const sp = ctx.sendPage; sp.el.dataset.open = "0"; sp.opts = null; }
+  function setSendMode(ctx, mode) {
+    const sp = ctx.sendPage;
+    sp.mode = mode === "chat" ? "chat" : "snap";
+    try { localStorage.setItem("ghost.sendMode", sp.mode); } catch (e) {}
+    for (const b of sp.modeBtns) b.dataset.on = b.dataset.mode === sp.mode ? "1" : "0";
+    sp.hint.textContent = sp.mode === "snap" ? "Opens once, then it's gone." : "Stays in the chat.";
+    if (sp.mode === "chat") sp.picked.delete("__story__");
+    renderSendPage(ctx);
+  }
+  function renderSendPage(ctx) {
+    const sp = ctx.sendPage;
+    const qv = sp.search.value.trim().toLowerCase();
+    sp.list.innerHTML = "";
+    const all = ctx.state.conversations.filter((conv) => !qv || (conv.title || "").toLowerCase().includes(qv));
+    const rows = [...all.filter((x) => sp.picked.has(x.id)), ...all.filter((x) => !sp.picked.has(x.id))].slice(0, qv ? 80 : 60);
+    if (!qv && sp.mode === "snap") {
+      const sh = el("div", "gh-cam-section"); sh.textContent = "Stories"; sp.list.appendChild(sh);
+      const row = el("div", "gh-friend-row gh-press gh-story-dest");
+      row.dataset.picked = sp.picked.has("__story__") ? "1" : "0";
+      const av = el("div", "gh-story-dest-ic"); av.appendChild(makeAvatar(ctx.state.me || { name: "Me" }, 44)); row.appendChild(av);
+      const name = el("div", "gh-friend-name"); name.innerHTML = "My Story<span>Friends can view for 24 hours</span>";
+      const check = el("div", "gh-friend-check"); check.appendChild(icon("check", 14));
+      row.append(name, check);
+      row.addEventListener("click", () => { haptic("light"); if (sp.picked.has("__story__")) sp.picked.delete("__story__"); else sp.picked.add("__story__"); row.dataset.picked = sp.picked.has("__story__") ? "1" : "0"; paintSendChosen(ctx); });
+      sp.list.appendChild(row);
+    }
+    const head = el("div", "gh-cam-section"); head.textContent = qv ? "Results" : "Recents"; sp.list.appendChild(head);
+    for (const conv of rows) {
+      const row = el("div", "gh-friend-row gh-press");
+      row.dataset.picked = sp.picked.has(conv.id) ? "1" : "0";
+      row.dataset.conv = conv.id;
+      row.appendChild(makeAvatar(convAvatarUser(conv), 44));
+      const name = el("div", "gh-friend-name"); name.textContent = conv.title;
+      const check = el("div", "gh-friend-check"); check.appendChild(icon("check", 14));
+      row.append(name, check);
+      row.addEventListener("click", () => {
+        haptic("light");
+        if (sp.picked.has(conv.id)) sp.picked.delete(conv.id); else sp.picked.add(conv.id);
+        row.dataset.picked = sp.picked.has(conv.id) ? "1" : "0";
+        paintSendChosen(ctx);
+      });
+      sp.list.appendChild(row);
+    }
+    paintSendChosen(ctx);
+  }
+  function paintSendChosen(ctx) {
+    const sp = ctx.sendPage;
+    const names = [...sp.picked].map((id) => id === "__story__" ? "My Story" : (ctx.state.convById.get(id) || {}).title || "").filter(Boolean);
+    const n = (sp.opts && sp.opts.count) || 1;
+    sp.chosen.textContent = names.length ? (n > 1 ? n + " items → " : "") + names.join(", ") : "Pick friends";
+    sp.sendBtn.disabled = !names.length || sp.sending;
+    sp.el.dataset.has = names.length ? "1" : "0";
+  }
+  async function doSendPage(ctx) {
+    const sp = ctx.sendPage;
+    if (!sp.opts || sp.sending || !sp.picked.size) return;
+    haptic();
+    sp.sending = true; sp.sendBtn.dataset.sending = "1"; paintSendChosen(ctx);
+    const ids = [...sp.picked];
+    const dest = { mode: sp.mode, convIds: ids.filter((x) => x !== "__story__"), story: ids.includes("__story__") };
+    let ok = false;
+    try { ok = await sp.opts.onSend(dest); } catch (e) { gtrail("send page failed " + (e && e.message || e)); ctx.showToast("Couldn't send"); }
+    sp.sending = false; sp.sendBtn.dataset.sending = "0";
+    if (ok) closeSendPage(ctx); else paintSendChosen(ctx);
+  }
+
+  // ---- Gallery editing (stage 2): the camera's snap editor over a library/vault item ------------------------
+  // The item is shown whole (fit "contain"); only the overlay (drawing/text/stickers) is rendered here, capped at
+  // 2048 px, and GalleryLibrary.swift composites it onto the full-resolution original (galleryRender / vaultRender).
+  function openGalEditor(ctx, item) {
+    const c = ctx.camera;
+    haptic();
+    c.preselect = null; c.toEl.textContent = ""; c.toEl.style.display = "none";
+    closeReview(ctx);
+    c.editSource = { type: item.vault ? "vault" : "library", id: item.id, item };
+    c.el.dataset.editsrc = "1";
+    c.el.dataset.open = "1";
+    requestAnimationFrame(() => { c.el.dataset.shown = "1"; });
+    const isVideo = item.mediaType === "video";
+    const url = item.vault ? vaultAssetUrl(isVideo ? "video" : "view", item.id) : galAssetUrl(isVideo ? "video" : "view", item.id, 2400);
+    openReview(ctx, null, isVideo ? "video" : "image", false, { width: item.width, height: item.height, hasAudio: true }, { url, fit: "contain" });
+  }
+  async function renderGalOverlayB64(ed, mw, mh) {
+    mw = Math.max(1, mw || 1080); mh = Math.max(1, mh || 1920);
+    const f = Math.min(1, 2048 / Math.max(mw, mh));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(mw * f)); canvas.height = Math.max(1, Math.round(mh * f));
+    const octx = canvas.getContext("2d");
+    octx.scale(canvas.width / mw, canvas.height / mh);
+    paintEditorOverlay(ed, octx, mw, mh);
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+    if (!blob) throw new Error("overlay render failed");
+    return blobToB64(blob);
+  }
+  function galRenderOp(src) { return src.type === "vault" ? "vaultRender" : "galleryRender"; }
+  function choiceSheet(ctx, title, options) {
+    return new Promise((res) => {
+      const ov = el("div", "gh-confirm gh-choice");
+      const box = el("div", "gh-confirm-box");
+      const t = el("div", "gh-confirm-text"); t.textContent = title; box.appendChild(t);
+      const col = el("div", "gh-choice-col");
+      for (const o of options) { const b = el("button", "gh-choice-btn gh-press"); b.textContent = o.label; b.dataset.key = o.key; col.appendChild(b); }
+      const cancel = el("button", "gh-choice-btn gh-choice-cancel gh-press"); cancel.textContent = "Cancel"; col.appendChild(cancel);
+      box.appendChild(col); ov.appendChild(box);
+      ov.addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b && e.target !== ov) return; ov.remove(); res(b && b.dataset.key ? b.dataset.key : null); });
+      ctx.root.appendChild(ov);
+    });
+  }
+  async function saveGalEdit(ctx) {
+    const c = ctx.camera, src = c.editSource;
+    if (!src || c.saving) return;
+    commitPendingEdits(ctx, c);
+    if (!c.editor || !c.editor.hasEdits()) { ctx.showToast("Draw, add text or a sticker first"); return; }
+    const choice = await choiceSheet(ctx, "Save your edit", [
+      { key: "replace", label: src.type === "vault" ? "Replace the copy in My Eyes Only" : "Replace original" },
+      { key: "copy", label: "Save as new copy" },
+    ]);
+    if (!choice || c.editSource !== src) return;
+    c.saving = true;
+    ctx.showToast("Saving…");
+    try {
+      const overlay = await renderGalOverlayB64(c.editor, src.item.width, src.item.height);
+      await dgPost(galRenderOp(src), { source: { type: src.type, id: src.id }, overlay, mode: choice });
+      haptic("success");
+      if (choice === "replace") galItemReplaced(ctx, src.id);
+      if (src.type === "vault") await loadVaultList(ctx);
+      ctx.showToast(choice === "replace" ? "Saved over the original" : "Saved as a new copy");
+      closeCamera(ctx);
+    } catch (e) {
+      gtrail("gallery save failed " + (e && e.message || e));
+      ctx.showToast("Couldn't save" + (e && e.message ? ": " + e.message : ""));
+    } finally { c.saving = false; }
+  }
+  function openGalEditSend(ctx) {
+    const c = ctx.camera, src = c.editSource;
+    if (!src) return;
+    commitPendingEdits(ctx, c);
+    haptic();
+    openSendPage(ctx, {
+      count: 1,
+      onSend: async (dest) => {
+        const item = Object.assign({}, src.item);
+        if (c.editor && c.editor.hasEdits()) {
+          const overlay = await renderGalOverlayB64(c.editor, item.width, item.height);
+          const res = await dgPost(galRenderOp(src), { source: { type: src.type, id: src.id }, overlay, mode: "send" });
+          if (!res || !res.data) throw new Error("render failed");
+          item.blob = b64ToBlob(res.data, res.mime || (item.mediaType === "video" ? "video/mp4" : "image/jpeg"));
+          if (item.mediaType !== "video" && item.width && item.height) { // native caps a sent photo at 2560 px
+            const k = Math.min(1, 2560 / Math.max(item.width, item.height));
+            item.width = Math.round(item.width * k); item.height = Math.round(item.height * k);
+          }
+        }
+        const r = await galSendItems(ctx, [item], dest);
+        if (r.ok) closeCamera(ctx);
+        return r.ok > 0;
+      },
+    });
+  }
+  // after "Replace original": new URLs for that item so the grid tile and the open viewer show the edit
+  function galItemReplaced(ctx, id) {
+    const g = ctx.gallery;
+    galVersions.set(id, Date.now());
+    for (const [key, tile] of g.mounted) {
+      if (typeof key === "number" && tile._item && tile._item.id === id) { const it = tile._item; tile._item = null; fillGalTile(ctx, tile, it); }
+    }
+    const v = g.viewer;
+    if (v.el.dataset.open === "1") {
+      for (const s of v.slides) if (s._id === id) { s._want = null; clearGalSlide(s); }
+      renderGalSlides(ctx);
+    }
+  }
+
+  // =====================================================================================================
+  // My Eyes Only (stage 3): Ghost's private vault, separate from the phone's Photos. Native: ios/Sources/
+  // Vault.swift ("vault*" ops + ghostvault://thumb|view|video/<id>?t=<session token>). Unlock with a 6-digit PIN
+  // or Face ID; Face ID can reset a forgotten PIN. It locks when you leave it, when Ghost goes to the background,
+  // and after 2 minutes without a touch. Items reuse the Gallery viewer/editor/send flows with item.vault = true.
+  // =====================================================================================================
+  const VAULT_IDLE_MS = 120000;
+  const VAULT_FREE_TRIES = 5;
+
+  function vaultAssetUrl(kind, id) {
+    const V = ctxVault();
+    if (typeof window.__ghostVaultUrlOverride === "function") return window.__ghostVaultUrlOverride(kind, id, V && V.token);
+    const v = galVersions.has(id) ? "&v=" + galVersions.get(id) : "";
+    return "ghostvault://" + kind + "/" + encodeURIComponent(id) + "?t=" + encodeURIComponent((V && V.token) || "") + v;
+  }
+  let vaultCtxRef = null;
+  function ctxVault() { return vaultCtxRef && vaultCtxRef.vault; }
+
+  function buildVault(ctx, layer) {
+    vaultCtxRef = ctx;
+    const wrap = el("div", "gh-vault");
+    wrap.dataset.open = "0";
+    wrap.innerHTML = `
+      <div class="gh-vault-head">
+        <button class="gh-gv-btn gh-hit" data-gact="vault-close" aria-label="Lock and close"></button>
+        <div class="gh-vault-title"><span class="gh-vault-lockic"></span>My Eyes Only</div>
+        <button class="gh-gal-select gh-press" data-gact="vault-select">Select</button>
+        <button class="gh-gv-btn gh-hit" data-gact="vault-menu" aria-label="My Eyes Only settings"></button>
+      </div>
+      <div class="gh-vault-scroll gh-scroll">
+        <div class="gh-vault-grid"></div>
+        <div class="gh-vault-empty" style="display:none">
+          <div class="gh-vault-empty-ic"></div>
+          <div class="gh-vault-empty-title">Nothing here yet</div>
+          <div class="gh-vault-empty-text">Move photos and videos here to keep them private. They're encrypted and removed from your Photos.</div>
+        </div>
+      </div>
+      <button class="gh-vault-add gh-press" data-gact="vault-add" aria-label="Add photos"></button>
+      <div class="gh-vault-selbar" data-show="0" data-has="0">
+        <button class="gh-hit" data-gact="vsel-share" aria-label="Share"></button>
+        <button class="gh-hit" data-gact="vsel-out" aria-label="Move to Photos"></button>
+        <div class="gh-gal-selcount">Select items</div>
+        <button class="gh-gal-selgo gh-press" data-gact="vsel-send">Send</button>
+        <button class="gh-hit" data-gact="vsel-delete" aria-label="Delete"></button>
+      </div>
+    `;
+    layer.appendChild(wrap);
+    const q = (s) => wrap.querySelector(s);
+    q('[data-gact="vault-close"]').appendChild(icon("back", 24));
+    q('[data-gact="vault-menu"]').appendChild(icon("more", 22));
+    q(".gh-vault-lockic").appendChild(icon("lock", 18));
+    q(".gh-vault-empty-ic").appendChild(icon("lock", 40));
+    q('[data-gact="vault-add"]').appendChild(icon("plus", 26));
+    q('[data-gact="vsel-share"]').appendChild(icon("share", 22));
+    q('[data-gact="vsel-out"]').appendChild(icon("download", 22));
+    q('[data-gact="vsel-delete"]').appendChild(icon("trash", 22));
+    const V = {
+      el: wrap, grid: q(".gh-vault-grid"), scroll: q(".gh-vault-scroll"), emptyEl: q(".gh-vault-empty"),
+      selbar: q(".gh-vault-selbar"), selCount: q(".gh-vault-selbar .gh-gal-selcount"), selectBtn: q('[data-gact="vault-select"]'),
+      items: [], token: "", selecting: false, selected: [], lastActivity: 0, thumbs: makeThumbQueue(4), tiles: [],
+    };
+    ctx.vault = V;
+    V.pin = buildPinPad(ctx, layer);
+    V.progress = el("div", "gh-vault-progress");
+    V.progress.innerHTML = '<div class="gh-vault-progress-box"><div class="gh-spinner"></div><div class="gh-vault-progress-text"></div><div class="gh-vault-progress-bar"><i></i></div></div>';
+    V.progress.dataset.open = "0";
+    layer.appendChild(V.progress);
+    window.__ghostVaultProgress = (p) => { const bar = V.progress.querySelector("i"); if (bar) bar.style.width = Math.round(clamp(p, 0, 1) * 100) + "%"; };
+
+    q('[data-gact="vault-close"]').addEventListener("click", () => { haptic("light"); closeVault(ctx); });
+    V.selectBtn.addEventListener("click", () => { haptic("light"); setVaultSelecting(ctx, !V.selecting); });
+    q('[data-gact="vault-menu"]').addEventListener("click", () => openVaultMenu(ctx));
+    q('[data-gact="vault-add"]').addEventListener("click", () => startVaultPick(ctx));
+    q('[data-gact="vsel-share"]').addEventListener("click", () => vaultShareIds(ctx, V.selected.slice()));
+    q('[data-gact="vsel-out"]').addEventListener("click", () => vaultMoveOut(ctx, V.selected.slice()));
+    q('[data-gact="vsel-send"]').addEventListener("click", () => {
+      const items = V.selected.map((id) => V.items.find((x) => x.id === id)).filter(Boolean);
+      if (!items.length) return;
+      if (items.length > GAL_SEND_MAX) { ctx.showToast("Send up to " + GAL_SEND_MAX + " at a time"); return; }
+      openSendPage(ctx, { count: items.length, onSend: async (dest) => { const r = await galSendItems(ctx, items, dest); if (r.ok) setVaultSelecting(ctx, false); return r.ok > 0; } });
+    });
+    q('[data-gact="vsel-delete"]').addEventListener("click", async () => { const d = await vaultDeleteIds(ctx, V.selected.slice()); if (d.length) setVaultSelecting(ctx, false); });
+
+    // activity + auto-lock
+    const touch = () => { V.lastActivity = Date.now(); };
+    for (const node of [wrap, ctx.gallery.el, ctx.gallery.viewer.el, ctx.camera.el, ctx.sendPage.el]) node.addEventListener("touchstart", touch, { passive: true });
+    setInterval(() => {
+      if (!vaultIsOpen(ctx)) return;
+      if (Date.now() - V.lastActivity > VAULT_IDLE_MS) { closeVault(ctx); ctx.showToast("My Eyes Only locked"); }
+    }, 10000);
+    document.addEventListener("visibilitychange", () => { if (document.hidden && vaultIsOpen(ctx)) closeVault(ctx); });
+    return V;
+  }
+  function vaultIsOpen(ctx) { const V = ctx.vault; return !!V && (V.el.dataset.open === "1" || V.token !== ""); }
+
+  // ---- PIN pad ---------------------------------------------------------------------------------------------
+  function buildPinPad(ctx, layer) {
+    const wrap = el("div", "gh-pin");
+    wrap.dataset.open = "0";
+    wrap.innerHTML = `
+      <button class="gh-gv-btn gh-hit gh-pin-close" aria-label="Cancel"></button>
+      <div class="gh-pin-lock"></div>
+      <div class="gh-pin-title"></div>
+      <div class="gh-pin-sub"></div>
+      <div class="gh-pin-dots"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="gh-pin-err"></div>
+      <div class="gh-pin-keys"></div>
+      <button class="gh-pin-forgot gh-press">Forgot PIN?</button>
+    `;
+    layer.appendChild(wrap);
+    const q = (s) => wrap.querySelector(s);
+    q(".gh-pin-close").appendChild(icon("close", 22));
+    q(".gh-pin-lock").appendChild(icon("lock", 30));
+    const keys = q(".gh-pin-keys");
+    const P = { el: wrap, title: q(".gh-pin-title"), sub: q(".gh-pin-sub"), dots: Array.from(wrap.querySelectorAll(".gh-pin-dots i")), err: q(".gh-pin-err"), forgot: q(".gh-pin-forgot"),
+      digits: "", resolve: null, opts: null, lockedUntil: 0, lockTimer: null };
+    const labels = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "bio", "0", "del"];
+    for (const k of labels) {
+      const b = el("button", "gh-pin-key gh-press");
+      b.dataset.k = k;
+      if (k === "bio") { b.appendChild(icon("person", 26)); b.setAttribute("aria-label", "Use Face ID"); }
+      else if (k === "del") { b.appendChild(icon("back", 26)); b.setAttribute("aria-label", "Delete"); }
+      else b.textContent = k;
+      b.addEventListener("click", () => pinKey(ctx, k));
+      keys.appendChild(b);
+    }
+    P.bioKey = keys.querySelector('[data-k="bio"]');
+    q(".gh-pin-close").addEventListener("click", () => { haptic("light"); pinFinish(ctx, null); });
+    P.forgot.addEventListener("click", () => { haptic("light"); pinFinish(ctx, { forgot: true }); });
+    return P;
+  }
+  function pinPaint(ctx) {
+    const P = ctx.vault.pin;
+    P.dots.forEach((d, i) => { d.dataset.on = i < P.digits.length ? "1" : "0"; });
+  }
+  function pinKey(ctx, k) {
+    const P = ctx.vault.pin;
+    if (!P.resolve || P.busy) return;
+    if (k === "bio") { if (P.opts && P.opts.bio) { haptic("light"); pinFinish(ctx, { bio: true }); } return; }
+    if (P.lockedUntil > Date.now()) { haptic("light"); return; }
+    if (k === "del") { P.digits = P.digits.slice(0, -1); pinPaint(ctx); return; }
+    if (P.digits.length >= 6) return;
+    haptic("light");
+    P.digits += k;
+    P.err.textContent = "";
+    pinPaint(ctx);
+    if (P.digits.length === 6) { const v = P.digits; P.busy = true; setTimeout(() => { P.busy = false; pinFinish(ctx, v); }, 110); }
+  }
+  function pinFinish(ctx, value) {
+    const P = ctx.vault.pin;
+    const r = P.resolve;
+    P.resolve = null;
+    P.digits = ""; pinPaint(ctx);
+    if (r) r(value);
+  }
+  // Resolves with the 6-digit string, null (cancelled), {bio: true} or {forgot: true}. The pad stays up until pinClose().
+  function pinAsk(ctx, opts) {
+    const P = ctx.vault.pin;
+    P.opts = opts || {};
+    P.title.textContent = P.opts.title || "Enter PIN";
+    P.sub.textContent = P.opts.sub || "";
+    P.err.textContent = P.opts.err || "";
+    P.digits = ""; pinPaint(ctx);
+    P.bioKey.style.visibility = P.opts.bio ? "visible" : "hidden";
+    P.forgot.style.display = P.opts.forgot ? "" : "none";
+    P.el.dataset.open = "1";
+    if (P.opts.lockedUntil && P.opts.lockedUntil > Date.now()) pinLockFor(ctx, P.opts.lockedUntil);
+    return new Promise((res) => { P.resolve = res; });
+  }
+  function pinShake(ctx, msg) {
+    const P = ctx.vault.pin;
+    haptic("heavy");
+    P.err.textContent = msg || "";
+    P.el.classList.remove("gh-pin-shake"); void P.el.offsetWidth; P.el.classList.add("gh-pin-shake");
+  }
+  function pinLockFor(ctx, until) {
+    const P = ctx.vault.pin;
+    P.lockedUntil = until;
+    clearInterval(P.lockTimer);
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((P.lockedUntil - Date.now()) / 1000));
+      if (!left) { clearInterval(P.lockTimer); P.err.textContent = ""; P.el.dataset.locked = "0"; return; }
+      P.el.dataset.locked = "1";
+      P.err.textContent = "Too many tries. Try again in " + (left >= 60 ? Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0") : left + " s");
+    };
+    tick();
+    P.lockTimer = setInterval(tick, 1000);
+  }
+  function pinClose(ctx) {
+    const P = ctx.vault.pin;
+    P.el.dataset.open = "0"; P.resolve = null; P.digits = ""; pinPaint(ctx);
+    clearInterval(P.lockTimer); P.el.dataset.locked = "0";
+  }
+  function bioName(st) { return st && st.bioType === "touchID" ? "Touch ID" : "Face ID"; }
+
+  // ---- unlock / setup / forgot ------------------------------------------------------------------------------
+  async function vaultEnsureUnlocked(ctx) {
+    const V = ctx.vault;
+    let st = null;
+    try { st = await dgPost("vaultStatus"); } catch (e) { ctx.showToast("My Eyes Only isn't available"); return false; }
+    if (!st) return false;
+    if (!st.setUp) return vaultSetupFlow(ctx, st);
+    if (!st.locked && st.token) { V.token = st.token; V.lastActivity = Date.now(); return true; }
+    if (st.bioEnabled && !(st.lockedUntil > Date.now())) {
+      try { const r = await dgPost("vaultUnlockBio"); if (r && r.ok) { V.token = r.token; V.lastActivity = Date.now(); return true; } } catch (e) {}
+    }
+    let err = "";
+    for (;;) {
+      const res = await pinAsk(ctx, { title: "My Eyes Only", sub: "Enter your PIN", bio: st.bioEnabled, forgot: true, err, lockedUntil: st.lockedUntil });
+      err = "";
+      if (res === null) { pinClose(ctx); return false; }
+      if (res && res.bio) {
+        try { const r = await dgPost("vaultUnlockBio"); if (r && r.ok) { V.token = r.token; V.lastActivity = Date.now(); pinClose(ctx); return true; } } catch (e) {}
+        continue;
+      }
+      if (res && res.forgot) {
+        const ok = await vaultForgotFlow(ctx, st);
+        if (ok) { pinClose(ctx); return true; }
+        if (ok === null) { pinClose(ctx); return false; } // erased
+        try { st = await dgPost("vaultStatus"); } catch (e) {}
+        continue;
+      }
+      let r = null;
+      V.pin.sub.textContent = "Checking…";
+      try { r = await dgPost("vaultUnlockPin", { pin: res }); } catch (e) {}
+      V.pin.sub.textContent = "Enter your PIN";
+      if (r && r.ok) { V.token = r.token; V.lastActivity = Date.now(); pinClose(ctx); return true; }
+      st.lockedUntil = (r && r.lockedUntil) || 0; st.fails = (r && r.fails) || 0;
+      const left = VAULT_FREE_TRIES - st.fails;
+      pinShake(ctx, left > 0 ? "Wrong PIN · " + left + (left === 1 ? " try" : " tries") + " before a wait" : "Wrong PIN");
+      err = V.pin.err.textContent;
+    }
+  }
+  async function vaultSetupFlow(ctx, st) {
+    const V = ctx.vault;
+    let err = "", pin1 = null;
+    for (;;) {
+      pin1 = await pinAsk(ctx, { title: "Create a PIN", err,
+        sub: "6 digits. What you move to My Eyes Only is encrypted and opens only with this PIN" + (st.bioAvailable ? " or " + bioName(st) + "." : ".") });
+      if (typeof pin1 !== "string") { pinClose(ctx); return false; }
+      const pin2 = await pinAsk(ctx, { title: "Confirm your PIN", sub: "Enter the same 6 digits again." });
+      if (typeof pin2 !== "string") { pinClose(ctx); return false; }
+      if (pin2 === pin1) break;
+      pinShake(ctx, "");
+      err = "Those didn't match. Try again.";
+    }
+    let bio = false;
+    if (st.bioAvailable) {
+      const c = await choiceSheet(ctx, "Use " + bioName(st) + " to open My Eyes Only? It can also reset a forgotten PIN.", [{ key: "yes", label: "Use " + bioName(st) }, { key: "no", label: "PIN only" }]);
+      bio = c === "yes";
+    }
+    let r = null;
+    try { r = await dgPost("vaultSetup", { pin: pin1, bio }); } catch (e) {}
+    pinClose(ctx);
+    if (!r || !r.ok) { ctx.showToast("Couldn't set up My Eyes Only"); return false; }
+    V.token = r.token; V.lastActivity = Date.now();
+    ctx.showToast(bio ? "My Eyes Only is ready" : "My Eyes Only is ready. A forgotten PIN can't be recovered without " + bioName(st) + ".");
+    return true;
+  }
+  // true = unlocked with a new PIN, false = back to the PIN pad, null = vault erased
+  async function vaultForgotFlow(ctx, st) {
+    const V = ctx.vault;
+    if (st.bioResetAvailable) {
+      let err = "";
+      for (;;) {
+        const p1 = await pinAsk(ctx, { title: "New PIN", sub: "Choose a new 6-digit PIN. " + bioName(st) + " will confirm it's you.", err });
+        if (typeof p1 !== "string") return false;
+        const p2 = await pinAsk(ctx, { title: "Confirm new PIN", sub: "Enter it again." });
+        if (typeof p2 !== "string") return false;
+        if (p1 !== p2) { err = "Those didn't match. Try again."; continue; }
+        let r = null;
+        try { r = await dgPost("vaultResetPinBio", { pin: p1 }); } catch (e) {}
+        if (r && r.ok) { V.token = r.token; V.lastActivity = Date.now(); ctx.showToast("PIN changed"); return true; }
+        pinShake(ctx, bioName(st) + " didn't confirm it. Your old PIN still works.");
+        return false;
+      }
+    }
+    const a = await confirmSheet(ctx, bioName(st) + " isn't set up for My Eyes Only, so a forgotten PIN can't be recovered. Erase My Eyes Only and start over?", "Erase");
+    if (!a) return false;
+    const b = await confirmSheet(ctx, "This permanently deletes everything in My Eyes Only. It can't be undone.", "Erase Everything");
+    if (!b) return false;
+    try { await dgPost("vaultErase"); } catch (e) {}
+    V.token = ""; V.items = [];
+    ctx.showToast("My Eyes Only erased");
+    return null;
+  }
+
+  // ---- vault screen --------------------------------------------------------------------------------------
+  async function openVault(ctx) {
+    const V = ctx.vault;
+    if (!(await vaultEnsureUnlocked(ctx))) return;
+    V.el.dataset.open = "1";
+    V.lastActivity = Date.now();
+    await loadVaultList(ctx);
+  }
+  function closeVault(ctx) {
+    const V = ctx.vault, g = ctx.gallery;
+    if (V.selecting) setVaultSelecting(ctx, false);
+    if (g.vaultPick) { g.vaultPick = false; setGalSelecting(ctx, false); }
+    V.el.dataset.open = "0";
+    if (g.viewer.src && g.viewer.src.vault) closeGalViewer(ctx);
+    const c = ctx.camera;
+    if (c.editSource && c.editSource.type === "vault") closeCamera(ctx);
+    if (ctx.sendPage.el.dataset.open === "1" && ctx.sendPage.opts && ctx.sendPage.opts.vault) closeSendPage(ctx);
+    pinClose(ctx);
+    V.token = "";
+    V.thumbs.reset();
+    for (const t of V.tiles) V.thumbs.release(t);
+    V.tiles = []; V.grid.innerHTML = ""; V.items = [];
+    dgPost("vaultLock").catch(() => {});
+  }
+  async function loadVaultList(ctx) {
+    const V = ctx.vault;
+    let r = null;
+    try { r = await dgPost("vaultList"); } catch (e) {}
+    if (!r) { ctx.showToast("My Eyes Only locked"); closeVault(ctx); return; }
+    if (r.token) V.token = r.token;
+    V.items = (r.items || []).map((it) => Object.assign({}, it, { vault: true }));
+    V.thumbs.reset();
+    for (const t of V.tiles) V.thumbs.release(t);
+    V.tiles = [];
+    V.grid.innerHTML = "";
+    V.emptyEl.style.display = V.items.length ? "none" : "";
+    V.items.forEach((item, i) => {
+      const tile = el("div", "gh-gal-tile gh-vault-tile");
+      tile.setAttribute("role", "button");
+      tile.dataset.id = item.id;
+      tile.dataset.video = item.mediaType === "video" ? "1" : "0";
+      tile.dataset.selected = V.selected.includes(item.id) ? "1" : "0";
+      const check = el("span", "gh-gal-check"); check.appendChild(icon("check", 13)); tile.appendChild(check);
+      if (item.mediaType === "video") { const d = el("span", "gh-gal-dur"); d.textContent = fmtDuration(item.duration || 0); tile.appendChild(d); }
+      tile._item = item;
+      tile.addEventListener("click", () => {
+        haptic("light");
+        if (V.selecting) { toggleVaultSelect(ctx, item); return; }
+        const src = galArraySource(V.items, null);
+        src.vault = true;
+        src.afterDelete = async (ids) => { V.items = V.items.filter((x) => !ids.includes(x.id)); };
+        src.count = () => V.items.length;
+        src.get = (k) => V.items[k] || null;
+        src.ensure = (k) => Promise.resolve(V.items[k] || null);
+        openGalViewer(ctx, src, i);
+      });
+      V.thumbs.load(tile, vaultAssetUrl("thumb", item.id));
+      V.tiles.push(tile);
+      V.grid.appendChild(tile);
+    });
+  }
+  function setVaultSelecting(ctx, on) {
+    const V = ctx.vault;
+    V.selecting = on; V.el.dataset.selecting = on ? "1" : "0";
+    V.selectBtn.textContent = on ? "Cancel" : "Select";
+    if (!on) V.selected = [];
+    V.selbar.dataset.show = on ? "1" : "0";
+    paintVaultSelection(ctx);
+  }
+  function toggleVaultSelect(ctx, item) {
+    const V = ctx.vault;
+    const i = V.selected.indexOf(item.id);
+    if (i !== -1) V.selected.splice(i, 1); else V.selected.push(item.id);
+    paintVaultSelection(ctx);
+  }
+  function paintVaultSelection(ctx) {
+    const V = ctx.vault;
+    for (const t of V.tiles) t.dataset.selected = V.selected.includes(t.dataset.id) ? "1" : "0";
+    const n = V.selected.length;
+    V.selCount.textContent = n ? (n === 1 ? "1 selected" : n + " selected") : "Select items";
+    V.selbar.dataset.has = n ? "1" : "0";
+  }
+  async function vaultInfoFor(ctx, item) { return dgPost("vaultInfo", { id: item.id }); }
+  async function vaultShareIds(ctx, ids) {
+    if (!ids.length) return;
+    haptic("light");
+    try { await dgPost("vaultShare", { ids }); } catch (e) { ctx.showToast("Couldn't share that"); }
+  }
+  // Ghost asks itself (iOS won't: these aren't in Photos). Returns the deleted ids.
+  async function vaultDeleteIds(ctx, ids) {
+    if (!ids.length) return [];
+    const ok = await confirmSheet(ctx, ids.length === 1 ? "Delete this from My Eyes Only? It can't be undone." : "Delete these " + ids.length + " items from My Eyes Only? It can't be undone.", "Delete");
+    if (!ok) return [];
+    let r = null;
+    try { r = await dgPost("vaultDelete", { ids }); } catch (e) { ctx.showToast("Couldn't delete"); return []; }
+    const deleted = (r && r.deleted) || [];
+    ctx.vault.items = ctx.vault.items.filter((x) => !deleted.includes(x.id));
+    await loadVaultList(ctx);
+    return deleted;
+  }
+  async function vaultMoveOut(ctx, ids) {
+    if (!ids.length) return [];
+    haptic("light");
+    vaultProgress(ctx, "Moving to Photos…");
+    let r = null;
+    try { r = await dgPost("vaultExportToPhotos", { ids, remove: true }); } catch (e) {}
+    vaultProgress(ctx, null);
+    const saved = (r && r.saved) || [];
+    if (!saved.length) { ctx.showToast("Couldn't move to Photos"); return []; }
+    ctx.showToast(saved.length === 1 ? "Moved back to Photos" : "Moved " + saved.length + " back to Photos");
+    if (ctx.vault.selecting) setVaultSelecting(ctx, false);
+    await loadVaultList(ctx);
+    return saved;
+  }
+  function vaultProgress(ctx, text) {
+    const P = ctx.vault.progress;
+    if (!text) { P.dataset.open = "0"; return; }
+    P.querySelector(".gh-vault-progress-text").textContent = text;
+    P.querySelector("i").style.width = "0%";
+    P.dataset.open = "1";
+  }
+
+  // ---- moving library items in -----------------------------------------------------------------------------
+  async function galMoveToVault(ctx, ids) {
+    const g = ctx.gallery, V = ctx.vault;
+    if (!ids.length) return null;
+    const wasOpen = V.el.dataset.open === "1" || g.vaultPick;
+    if (!(await vaultEnsureUnlocked(ctx))) return null;
+    vaultProgress(ctx, ids.length === 1 ? "Moving to My Eyes Only…" : "Moving " + ids.length + " to My Eyes Only…");
+    let r = null;
+    try { r = await dgPost("vaultAddFromLibrary", { ids, deleteOriginals: true }); } catch (e) { gtrail("vault add failed " + (e && e.message || e)); }
+    vaultProgress(ctx, null);
+    const n = (r && r.added && r.added.length) || 0;
+    if (!n) ctx.showToast("Couldn't move " + (ids.length === 1 ? "that" : "those"));
+    else if (r.deleted) ctx.showToast((n === 1 ? "Moved to My Eyes Only" : "Moved " + n + " to My Eyes Only") + (r.failed ? " · " + r.failed + " couldn't be moved" : ""));
+    else if (r.deleteCancelled) ctx.showToast("Copied to My Eyes Only. The originals are still in Photos.");
+    else ctx.showToast("Copied to My Eyes Only");
+    if (!wasOpen) { V.token = ""; dgPost("vaultLock").catch(() => {}); }
+    if (r && r.deleted) {
+      for (const id of ids) g.byId.delete(id);
+      if (g.selecting) setGalSelecting(ctx, false);
+      await reloadGallery(ctx, true);
+      loadGalOnThisDay(ctx);
+    }
+    return r;
+  }
+  // "+" in My Eyes Only: pick from the gallery grid, then come back
+  function startVaultPick(ctx) {
+    const g = ctx.gallery, V = ctx.vault;
+    haptic("light");
+    V.el.dataset.open = "0";
+    g.vaultPick = true;
+    setGalSelecting(ctx, true);
+    ctx.showToast("Choose photos to move to My Eyes Only");
+  }
+  async function finishVaultPick(ctx) {
+    const g = ctx.gallery, V = ctx.vault;
+    const ids = g.selected.slice();
+    if (!ids.length) return;
+    const r = await galMoveToVault(ctx, ids);
+    g.vaultPick = false;
+    setGalSelecting(ctx, false);
+    if (V.token) { V.el.dataset.open = "1"; await loadVaultList(ctx); }
+    void r;
+  }
+
+  // ---- menus -----------------------------------------------------------------------------------------------
+  async function openGalMoreMenu(ctx, item) {
+    haptic("light");
+    if (item.vault) {
+      const c = await choiceSheet(ctx, "My Eyes Only", [{ key: "out", label: "Move to Photos" }]);
+      if (c === "out") {
+        const moved = await vaultMoveOut(ctx, [item.id]);
+        const v = ctx.gallery.viewer;
+        if (moved.length && v.src && v.src.vault) {
+          if (!v.src.count()) closeGalViewer(ctx);
+          else { v.index = clamp(v.index, 0, v.src.count() - 1); for (const s of v.slides) { s._want = null; clearGalSlide(s); } renderGalSlides(ctx); }
+        }
+      }
+      return;
+    }
+    const c = await choiceSheet(ctx, "Photo", [{ key: "vault", label: "Move to My Eyes Only" }]);
+    if (c !== "vault") return;
+    const v = ctx.gallery.viewer, src = v.src;
+    const r = await galMoveToVault(ctx, [item.id]);
+    if (r && r.deleted && v.src === src) {
+      if (src.kind !== "grid") await src.afterDelete([item.id]);
+      if (!src.count()) { closeGalViewer(ctx); return; }
+      v.index = clamp(v.index, 0, src.count() - 1);
+      for (const s of v.slides) { s._want = null; clearGalSlide(s); }
+      renderGalSlides(ctx);
+    }
+  }
+  function galAlbumSheetExtras(ctx) {
+    const row = el("button", "gh-gal-album-row gh-press gh-vault-row");
+    const cov = el("div", "gh-gal-album-cover"); cov.appendChild(icon("lock", 22));
+    const txt = el("div", "gh-gal-album-text");
+    const t = el("div", "gh-gal-album-name"); t.textContent = "My Eyes Only";
+    const c = el("div", "gh-gal-album-count"); c.textContent = "Private · PIN or Face ID";
+    txt.append(t, c); row.append(cov, txt);
+    row.addEventListener("click", () => { const s = ctx.gallery.albumSheet; closeSheetGeneric(s.backdrop, s.sheet); openVault(ctx); });
+    return row;
+  }
+  async function openVaultMenu(ctx) {
+    const V = ctx.vault;
+    haptic("light");
+    let st = null;
+    try { st = await dgPost("vaultStatus"); } catch (e) {}
+    if (!st || st.locked) { closeVault(ctx); return; }
+    const opts = [{ key: "pin", label: "Change PIN" }];
+    if (st.bioAvailable) opts.push({ key: "bio", label: (st.bioEnabled ? "Turn off " : "Turn on ") + bioName(st) });
+    opts.push({ key: "export", label: "Export backup" }, { key: "import", label: "Import backup" }, { key: "erase", label: "Erase My Eyes Only" });
+    let usage = "";
+    try { const u = await dgPost("vaultUsage"); if (u && u.bytes) usage = " · " + fmtBytes(u.bytes); } catch (e) {}
+    const c = await choiceSheet(ctx, "My Eyes Only · " + V.items.length + (V.items.length === 1 ? " item" : " items") + usage, opts);
+    V.lastActivity = Date.now();
+    if (c === "pin") {
+      let err = "";
+      for (;;) {
+        const p1 = await pinAsk(ctx, { title: "New PIN", sub: "Choose a new 6-digit PIN.", err });
+        if (typeof p1 !== "string") break;
+        const p2 = await pinAsk(ctx, { title: "Confirm new PIN", sub: "Enter it again." });
+        if (typeof p2 !== "string") break;
+        if (p1 !== p2) { err = "Those didn't match. Try again."; continue; }
+        try { await dgPost("vaultChangePin", { pin: p1 }); ctx.showToast("PIN changed"); } catch (e) { ctx.showToast("Couldn't change the PIN"); }
+        break;
+      }
+      pinClose(ctx);
+    } else if (c === "bio") {
+      try { await dgPost("vaultSetBio", { on: !st.bioEnabled }); ctx.showToast(bioName(st) + (st.bioEnabled ? " turned off" : " turned on")); }
+      catch (e) { ctx.showToast(String(e && e.message || "Couldn't change " + bioName(st))); }
+    } else if (c === "export") {
+      vaultProgress(ctx, "Preparing backup…");
+      try {
+        const r = await dgPost("vaultExport");
+        vaultProgress(ctx, null);
+        if (r && r.exported) ctx.showToast("Backup saved. It opens with your current PIN.");
+      } catch (e) { vaultProgress(ctx, null); ctx.showToast("Couldn't export"); }
+    } else if (c === "import") {
+      let picked = null;
+      try { picked = await dgPost("vaultImportPick"); } catch (e) { ctx.showToast(String(e && e.message || "Couldn't read that file")); }
+      if (!picked || !picked.picked) return;
+      let err = "";
+      for (;;) {
+        const pin = await pinAsk(ctx, { title: "Backup PIN", sub: "Enter the PIN this backup was made with (" + (picked.count || 0) + " items).", err });
+        if (typeof pin !== "string") { pinClose(ctx); dgPost("vaultImportCancel").catch(() => {}); return; }
+        vaultProgress(ctx, "Importing…");
+        let r = null;
+        try { r = await dgPost("vaultImportFinish", { pin }); } catch (e) { vaultProgress(ctx, null); pinClose(ctx); ctx.showToast(String(e && e.message || "Couldn't import")); return; }
+        vaultProgress(ctx, null);
+        if (r && r.ok) { pinClose(ctx); ctx.showToast("Imported " + r.imported + (r.skipped ? " · " + r.skipped + " already here" : "")); await loadVaultList(ctx); return; }
+        pinShake(ctx, "That's not this backup's PIN");
+        err = "That's not this backup's PIN";
+      }
+    } else if (c === "erase") {
+      const a = await confirmSheet(ctx, "Erase My Eyes Only? Everything in it is deleted for good.", "Erase");
+      if (!a) return;
+      const b = await confirmSheet(ctx, "Really delete all " + V.items.length + " items? This can't be undone.", "Erase Everything");
+      if (!b) return;
+      try { await dgPost("vaultErase"); } catch (e) {}
+      closeVault(ctx);
+      ctx.showToast("My Eyes Only erased");
+    }
   }
 
   // =====================================================================================================

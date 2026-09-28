@@ -90,6 +90,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     // Ghost's built-in photo/gallery picker (composer's gallery button): PhotoKit behind a WKURLSchemeHandler,
     // registered on the config below before the web view exists. nil outside Ghost mode.
     private var photoPicker: GhostPhotoPicker?
+    private var gallery: GhostGallery?
+    private var vault: GhostVault?
     // The app switcher cover shows Ghost's own logo - the same picture as the Home Screen icon the user picked
     // (Settings > Appearance > App Icon), as a rounded app-icon tile - instead of the ghost emoji.
     private let shieldLogo = UIImageView()
@@ -235,12 +237,20 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             let picker = GhostPhotoPicker(presenter: self)
             config.setURLSchemeHandler(picker, forURLScheme: GhostPhotoPicker.scheme)
             photoPicker = picker
+            let lib = GhostGallery(presenter: self, picker: picker)
+            picker.gallery = lib
+            gallery = lib
+            let eyes = GhostVault(presenter: self)
+            config.setURLSchemeHandler(eyes, forURLScheme: GhostVault.scheme)
+            vault = eyes
         }
 
         Self.preferHighRefresh(config.preferences)
         webView = WKWebView(frame: .zero, configuration: config)
         webView.customUserAgent = Self.userAgent
         photoPicker?.attach(to: webView)
+        gallery?.attach(to: webView)
+        vault?.attach(to: webView)
         // lets Safari's Web Inspector protocol (ios-webkit-debug-proxy on the PC, phone on USB) attach to the page
         if #available(iOS 16.4, *) { webView.isInspectable = true }
         webView.navigationDelegate = self
@@ -792,6 +802,12 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "photoFull":
             guard let photoPicker, let id = body["id"] as? String else { return replyHandler(nil, "bad id") }
             photoPicker.handleFull(id: id, reply: replyHandler)
+        case let galleryOp where galleryOp.hasPrefix("gallery"): // Ghost's Gallery tab (GalleryLibrary.swift)
+            guard let gallery else { return replyHandler(nil, "unavailable") }
+            gallery.handle(op: galleryOp, body: body, reply: replyHandler)
+        case let vaultOp where vaultOp.hasPrefix("vault"): // My Eyes Only (Vault.swift)
+            guard let vault else { return replyHandler(nil, "unavailable") }
+            vault.handle(op: vaultOp, body: body, reply: replyHandler)
         case "cutout": // Ghost's sticker maker: lift the subject out of a photo (iOS 17 Vision), transparent PNG back
             guard let b64 = body["image"] as? String, let data = Data(base64Encoded: b64),
                   let image = UIImage(data: data), let cg = image.cgImage else { return replyHandler(nil, "bad image") }

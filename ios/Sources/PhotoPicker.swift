@@ -28,6 +28,7 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
     private var stoppedTaskIds = Set<ObjectIdentifier>()
     private var fetchResult: PHFetchResult<PHAsset>?
     private var assetsByLocalId: [String: PHAsset] = [:]
+    weak var gallery: GhostGallery?
 
     init(presenter: UIViewController) {
         self.presenter = presenter
@@ -60,9 +61,13 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
         case "thumb":
             let sizeParam = components.queryItems?.first(where: { $0.name == "s" })?.value
             let pixelSize: CGFloat = sizeParam.flatMap { Double($0) }.map { CGFloat($0) } ?? 300
-            serveThumb(id: id, pixelSize: pixelSize, task: urlSchemeTask)
+            let highQuality = components.queryItems?.first(where: { $0.name == "hq" })?.value == "1"
+            serveThumb(id: id, pixelSize: pixelSize, highQuality: highQuality, task: urlSchemeTask)
         case "full":
             serveFull(id: id, task: urlSchemeTask)
+        case "video": // Gallery viewer playback, Range-capable (GalleryLibrary.swift)
+            guard let gallery else { return fail(urlSchemeTask, 404) }
+            gallery.serveVideo(id: id, task: urlSchemeTask)
         default:
             fail(urlSchemeTask, 404)
         }
@@ -104,6 +109,57 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
         task.didFinish()
     }
 
+    func failTask(_ task: WKURLSchemeTask, _ code: Int) { fail(task, code) }
+
+    /// Serves a file on disk, honouring a single "Range: bytes=a-b" (206) the way <video> asks for media.
+    /// The file is memory-mapped, so only the requested slice is ever read. Open-ended ranges are capped
+    /// to 8 MB per response (a valid partial answer; the media loader asks again for the rest).
+    func respondFile(_ task: WKURLSchemeTask, url: URL, mime: String) {
+        guard !isStopped(task), let reqURL = task.request.url else { return }
+        guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return fail(task, 500) }
+        let total = data.count
+        var status = 200
+        var slice = 0..<total
+        if let range = task.request.value(forHTTPHeaderField: "Range"), range.hasPrefix("bytes="), total > 0 {
+            let spec = range.dropFirst(6).split(separator: ",").first.map(String.init) ?? ""
+            let parts = spec.split(separator: "-", omittingEmptySubsequences: false).map { String($0).trimmingCharacters(in: .whitespaces) }
+            if parts.count == 2 {
+                var start: Int
+                var end: Int
+                if parts[0].isEmpty { // suffix range: last N bytes
+                    let n = Int(parts[1]) ?? 0
+                    start = max(0, total - n); end = total - 1
+                } else {
+                    start = Int(parts[0]) ?? 0
+                    end = parts[1].isEmpty ? min(total - 1, start + 8 * 1024 * 1024 - 1) : min(total - 1, Int(parts[1]) ?? (total - 1))
+                }
+                if start >= total || start > end {
+                    let headers = ["Content-Range": "bytes */\(total)"]
+                    if let r = HTTPURLResponse(url: reqURL, statusCode: 416, httpVersion: "HTTP/1.1", headerFields: headers) {
+                        task.didReceive(r); if !isStopped(task) { task.didFinish() }
+                    }
+                    return
+                }
+                start = max(0, start); end = max(start, end)
+                slice = start..<(end + 1)
+                status = 206
+            }
+        }
+        var headers = [
+            "Content-Type": mime,
+            "Content-Length": String(slice.count),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+        ]
+        if status == 206 { headers["Content-Range"] = "bytes \(slice.lowerBound)-\(slice.upperBound - 1)/\(total)" }
+        guard let response = HTTPURLResponse(url: reqURL, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers) else { return fail(task, 500) }
+        task.didReceive(response)
+        guard !isStopped(task) else { return }
+        task.didReceive(data.subdata(in: slice))
+        guard !isStopped(task) else { return }
+        task.didFinish()
+    }
+
     private func asset(for id: String) -> PHAsset? {
         if let cached = assetsByLocalId[id] { return cached }
         let found = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject
@@ -111,10 +167,12 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
         return found
     }
 
-    private func serveThumb(id: String, pixelSize: CGFloat, task: WKURLSchemeTask) {
+    private func serveThumb(id: String, pixelSize: CGFloat, highQuality: Bool = false, task: WKURLSchemeTask) {
         guard let asset = asset(for: id) else { return fail(task, 404) }
         let options = PHImageRequestOptions()
-        options.deliveryMode = .opportunistic
+        // hq=1 (the Gallery viewer's full-screen image): one high-quality callback instead of .opportunistic's
+        // blurry first pass, which the "first callback wins" rule below would otherwise serve at full screen size
+        options.deliveryMode = highQuality ? .highQualityFormat : .opportunistic
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = true
         options.isSynchronous = false
