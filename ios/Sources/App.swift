@@ -92,6 +92,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var photoPicker: GhostPhotoPicker?
     private var gallery: GhostGallery?
     private var vault: GhostVault?
+    private var notifications: GhostNotifications?
     // The app switcher cover shows Ghost's own logo - the same picture as the Home Screen icon the user picked
     // (Settings > Appearance > App Icon), as a rounded app-icon tile - instead of the ghost emoji.
     private let shieldLogo = UIImageView()
@@ -243,6 +244,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             let eyes = GhostVault(presenter: self)
             config.setURLSchemeHandler(eyes, forURLScheme: GhostVault.scheme)
             vault = eyes
+            notifications = GhostNotifications()
         }
 
         Self.preferHighRefresh(config.preferences)
@@ -251,6 +253,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         photoPicker?.attach(to: webView)
         gallery?.attach(to: webView)
         vault?.attach(to: webView)
+        notifications?.attach(to: webView)
         // lets Safari's Web Inspector protocol (ios-webkit-debug-proxy on the PC, phone on USB) attach to the page
         if #available(iOS 16.4, *) { webView.isInspectable = true }
         webView.navigationDelegate = self
@@ -805,6 +808,14 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case let galleryOp where galleryOp.hasPrefix("gallery"): // Ghost's Gallery tab (GalleryLibrary.swift)
             guard let gallery else { return replyHandler(nil, "unavailable") }
             gallery.handle(op: galleryOp, body: body, reply: replyHandler)
+        case "notifyMessage": // new-message notification while in the background (GhostNotifications.swift)
+            guard let notifications, let id = body["id"] as? String else { return replyHandler(nil, "unavailable") }
+            notifications.post(id: id, title: body["title"] as? String ?? "Ghost", body: body["body"] as? String ?? "New Chat", reply: replyHandler)
+        case "clearMessageNotifications":
+            notifications?.clear(id: body["id"] as? String)
+            replyHandler(true, nil)
+        case "pendingChat": // a notification tapped before ui.js was ready
+            if let id = notifications?.takePendingChat() { replyHandler(id, nil) } else { replyHandler(nil, nil) }
         case let vaultOp where vaultOp.hasPrefix("vault"): // My Eyes Only (Vault.swift)
             guard let vault else { return replyHandler(nil, "unavailable") }
             vault.handle(op: vaultOp, body: body, reply: replyHandler)

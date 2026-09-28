@@ -4,6 +4,14 @@ import Photos
 import AVFoundation
 import CoreLocation
 
+extension WKWebView {
+    /// Runs JS in the "darkmobile" content world, where ghost/ui.js (and its window.__ghost* hooks) actually live -
+    /// a plain evaluateJavaScript runs in the PAGE world, which can't see them (App.swift's own calls pass `world`).
+    func ghostEval(_ js: String) {
+        evaluateJavaScript(js, in: nil, in: WKContentWorld.world(name: "darkmobile"), completionHandler: nil)
+    }
+}
+
 /// Ghost's Gallery tab (ghost/ui.js "Gallery" section): albums, month index, paged listing, "N years ago today",
 /// info, favorite, delete, share, and Range-capable video playback for the viewer.
 ///
@@ -595,7 +603,7 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
     private func reportProgress(id: String, _ progress: Double) {
         DispatchQueue.main.async { [weak self] in
             guard let data = try? JSONSerialization.data(withJSONObject: [id]), let s = String(data: data, encoding: .utf8) else { return }
-            self?.webView?.evaluateJavaScript("window.__ghostGalleryProgress && window.__ghostGalleryProgress(\(s)[0], \(progress))", completionHandler: nil)
+            self?.webView?.ghostEval("window.__ghostGalleryProgress && window.__ghostGalleryProgress(\(s)[0], \(progress))")
         }
     }
 
@@ -628,7 +636,7 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
             DispatchQueue.main.async {
                 guard !changed.isEmpty, let data = try? JSONSerialization.data(withJSONObject: changed),
                       let s = String(data: data, encoding: .utf8) else { return }
-                self.webView?.evaluateJavaScript("window.__ghostGalleryChanged && window.__ghostGalleryChanged(\(s))", completionHandler: nil)
+                self.webView?.ghostEval("window.__ghostGalleryChanged && window.__ghostGalleryChanged(\(s))")
             }
         }
     }

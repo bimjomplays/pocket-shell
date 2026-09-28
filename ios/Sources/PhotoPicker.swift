@@ -338,7 +338,7 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
                 self.fetchResult = nil // no fetch yet, or no change details for it - a fresh handleList() re-fetches
             }
             self.assetsByLocalId.removeAll()
-            self.webView?.evaluateJavaScript("window.__ghostPhotoChanged && window.__ghostPhotoChanged()", completionHandler: nil)
+            self.webView?.ghostEval("window.__ghostPhotoChanged && window.__ghostPhotoChanged()")
         }
     }
 }

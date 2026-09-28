@@ -658,7 +658,7 @@ final class GhostVault: NSObject, WKURLSchemeHandler, UIDocumentPickerDelegate {
 
     private func progress(_ p: Double) {
         DispatchQueue.main.async { [weak self] in
-            self?.webView?.evaluateJavaScript("window.__ghostVaultProgress && window.__ghostVaultProgress(\(p))", completionHandler: nil)
+            self?.webView?.ghostEval("window.__ghostVaultProgress && window.__ghostVaultProgress(\(p))")
         }
     }
 

@@ -874,6 +874,8 @@
       }, { messageId: "" }) : undefined,
       reactions: reactions.length ? reactions : undefined,
       saved: (md.savedBy || []).length > 0,
+      // edited on a phone (Snapchat+): web only renders it - main.js "metadata.isEdited" -> "(Edited)"
+      edited: md.isEdited ? true : undefined,
       // Snapchat's own rule (main.js, search 'viewedByCurrentUser'): a snap YOU received is opened only when
       // YOUR id is in openedBy (the sender is always in it - that's why every received snap said "Opened");
       // one you sent is opened when anyone else is.
@@ -1115,6 +1117,16 @@
       else if (norm && (norm.kind === "call" || norm.kind === "system")) { kind2 = "call"; text = norm.text; } // e.g. "Missed video call"
     }
     if (kind === "call" && !text) text = "Call";
+    // the newest message's own text for the chat list (Settings > Chats > Chat List): what the store has for an opened
+    // chat, else a quiet-fetch peek, but only if the peek is at least as new as the feed item (never a stale message)
+    let body;
+    if (kind === "text") {
+      if (text) body = text;
+      else {
+        const pk = peeks.get(key), shown = toNum(info.displayTimestamp) || 0;
+        if (pk && pk.text && (!shown || pk.ts >= shown - 3000)) body = pk.text;
+      }
+    }
     // no text loaded yet (Snapchat only has message text for chats that were opened): say what Snapchat's list says
     if (kind === "text" && !text) text = fromMe ? (info.viewed ? "Opened" : "Delivered") : (unread ? "New Chat" : "Received");
     if (kind === "snap" && !text) text = fromMe ? (info.viewed ? "Opened" : "Delivered") : (unread ? "New Snap" : "Received");
@@ -1125,7 +1137,7 @@
       participants,
       avatarUrl: undefined,
       lastActivityTs: toNum(info.displayTimestamp) || toNum(feed.lastEventUpdateTimestamp) || newestTimestamp(feed, 3) || 0,
-      preview: { kind: kind2, text, fromMe, status: info.viewed ? (fromMe ? "opened" : "viewed") : (fromMe ? "delivered" : "received"),
+      preview: { kind: kind2, text, body, fromMe, status: info.viewed ? (fromMe ? "opened" : "viewed") : (fromMe ? "delivered" : "received"),
         state: feedState(item, !!info.viewed, fromMe) },
       unreadCount: unread ? Math.max(1, unreadChats) : 0,
       hasUnreadSnap: unread && kind === "snap",
@@ -1244,6 +1256,71 @@
       pumpArchiveMedia();
     }).catch(retentionError);
   }
+  // Chat-list previews + long-press peek for chats whose text Snapchat hasn't loaded (it only has text for chats that
+  // were opened). Same exported helper as retention's quiet capture: ONLY fetchConversationWithMessages - never
+  // enterConversation / displayedMessages / presence - so nothing is marked read and friends see nothing.
+  const peeks = new Map(); // cid -> { text, kind, fromMe, ts } of the newest message seen by a quiet fetch
+  const peekQueue = new Map(), peekStamps = new Map();
+  let peekBusy = false, previewPeekOn = false;
+  function quietFetcher() {
+    quietFetch = quietFetch || exportBySource(".fetchConversationWithMessages(");
+    if (!quietFetch || !messaging().client) throw new Error("quiet fetch unavailable");
+    return quietFetch;
+  }
+  async function quietFetchMessages(cid) {
+    const fetcher = quietFetcher();
+    let timer;
+    const result = await Promise.race([fetcher(messaging().client, convIdObj(cid)),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("quiet fetch timeout")), 20000); })]).finally(() => clearTimeout(timer));
+    return result && result.messages;
+  }
+  function rawEntries(rawMessages) {
+    return rawMessages instanceof Map ? [...rawMessages.entries()] : Array.isArray(rawMessages)
+      ? rawMessages.map((raw) => [raw && raw.descriptor && raw.descriptor.messageId, raw]) : [];
+  }
+  function notePeek(cid, rawMessages) {
+    let best = null;
+    for (const [id, raw] of rawEntries(rawMessages)) {
+      const m = safe("peek-normalize", () => toMessage(cid, id, raw), null);
+      if (!m || m.deleted || m.kind === "system") continue;
+      if (!best || m.ts >= best.ts) best = m;
+    }
+    if (!best) return;
+    const prev = peeks.get(cid);
+    const next = { text: best.kind === "text" ? best.text : undefined, kind: best.kind, fromMe: !!best.fromMe, ts: best.ts };
+    if (prev && prev.ts === next.ts && prev.text === next.text) return;
+    peeks.set(cid, next);
+    emitConversations();
+  }
+  function observePeeks() {
+    if (!previewPeekOn || !loggedIn()) return;
+    const convs = messaging().conversations || {};
+    const feed = Object.entries(messaging().feed || {})
+      .sort((a, b) => toNum(((b[1] || {}).displayInfo || {}).displayTimestamp) - toNum(((a[1] || {}).displayInfo || {}).displayTimestamp));
+    for (const [cid, f] of feed.slice(0, 60)) {
+      const info = (f && f.displayInfo) || {}, item = info.feedItem || {};
+      if (!(item.chat || item.$case === "chat")) continue; // snaps/calls have no text to show
+      const stamp = String(info.displayTimestamp || f.lastEventUpdateTimestamp || "");
+      if (peekStamps.get(cid) === stamp) continue;
+      peekStamps.set(cid, stamp);
+      const entry = convs[cid];
+      if (entry && entry.messages && entry.messages.size) continue; // the store already has this chat's text
+      if (archive && archive.enabled && quietQueue.has(cid)) continue; // retention's quiet capture notes it anyway
+      if (peekQueue.size < 60) peekQueue.set(cid, true);
+    }
+    pumpPeeks();
+  }
+  async function pumpPeeks() {
+    if (peekBusy) return;
+    peekBusy = true;
+    try {
+      while (peekQueue.size && previewPeekOn) {
+        const cid = peekQueue.keys().next().value; peekQueue.delete(cid);
+        try { notePeek(cid, await quietFetchMessages(cid)); } catch (_) { /* next feed change retries */ peekStamps.delete(cid); }
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+    } finally { peekBusy = false; }
+  }
   async function pumpQuietCapture() {
     if (quietBusy || !archive) return;
     quietBusy = true;
@@ -1260,6 +1337,7 @@
           const result = await Promise.race([quietFetch(messaging().client, convIdObj(cid)),
             new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("quiet fetch timeout")), 20000); })]).finally(() => clearTimeout(timer));
           if (gen === archive.generation && archive.enabled) captureRawMessages(cid, result && result.messages);
+          notePeek(cid, result && result.messages);
         } catch (_) { retentionError(); }
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
@@ -1326,7 +1404,7 @@
       post({ ghost: "event", type: "messages", data: { conversationId: cid, messages: list, hasMore } });
     });
   }
-  setInterval(() => { if (store) observeRetention(); }, 5000);
+  setInterval(() => { if (store) { observeRetention(); observePeeks(); } }, 5000);
 
   const emitConversations = throttle(() => {
     const convs = safe("conversations", () => {
@@ -2355,6 +2433,22 @@
     // event never populate `media` for these kinds themselves (loading every photo/video/voice-note in a long
     // chat eagerly would be slow and would fetch+decrypt media nobody scrolled to) - `text`/reactions/etc. are
     // still delivered eagerly as before.
+    // Settings > Chats > Chat List: whether rows want message text (quiet-fetch peeks for chats never opened)
+    setPreviewPeek(on) { previewPeekOn = !!on; if (previewPeekOn && store) observePeeks(); else peekQueue.clear(); return true; },
+    // Long-press preview: the chat's recent messages WITHOUT opening it (no enterConversation, no read receipt).
+    async peekConversation(conversationId) {
+      const entry = (messaging().conversations || {})[conversationId];
+      let raw = entry && entry.messages;
+      if (!raw || !(raw.size || raw.length)) raw = await quietFetchMessages(conversationId);
+      const list = [];
+      for (const [id, r] of rawEntries(raw)) {
+        const m = safe("peek", () => toMessage(conversationId, id, r), null);
+        if (m && !m.deleted) list.push(Object.assign({}, m, { media: undefined }));
+      }
+      list.sort((a, b) => a.ts - b.ts);
+      notePeek(conversationId, raw);
+      return { messages: list.slice(-40) };
+    },
     setReadReceipts(on) { readReceiptsOn = on !== false; if (readReceiptsOn) for (const id of openConversations) safe("displayed", () => markDisplayed(id)); return true; },
 
     // setPresence(conversationId) = I'm looking at this chat; setPresence(null) = I left it / the app is hidden.

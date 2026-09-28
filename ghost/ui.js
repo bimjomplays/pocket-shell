@@ -223,6 +223,8 @@
     sendMedia: (id, blob, opts) => bridge.call("sendMedia", [id, blob, opts || {}], 120000), // uploads can be slow on cellular
     sendSnap: (ids, blob, opts) => bridge.call("sendSnap", [ids, blob, opts || {}], 120000),
     react: (id, messageId, emoji) => bridge.call("react", [id, messageId, emoji]),
+    setPreviewPeek: (on) => bridge.call("setPreviewPeek", [on]),
+    peekConversation: (id) => bridge.call("peekConversation", [id], 30000),
     shareInfo: (id, messageId) => bridge.call("shareInfo", [id, messageId], 30000),
     loadShare: (id, messageId) => bridge.call("loadShare", [id, messageId], 60000),
     deleteMessage: (id, messageId) => bridge.call("deleteMessage", [id, messageId]),
@@ -538,6 +540,7 @@
         if (last && state.convById.has(last)) setTimeout(() => openConversationScreen(ctx, last), 300);
       }).catch(() => {});
       startStreakKeeper(ctx);
+      initMessageNotifications(ctx);
       api.friendRequests().then((r) => { ctx.friendReqCount = (r || []).length; }).catch(() => {});
       ctx.revealHome = () => { boot.classList.add("gh-boot-fade"); markReady(true); };
       if (state.listShown) ctx.revealHome();
@@ -555,6 +558,7 @@
 
     bridge.on("ready", handleReady);
     bridge.on("conversations", (data) => {
+      try { maybeNotifyMessages(ctx, (data && data.conversations) || []); } catch (e) { uiTrail("notify failed: " + e.message); }
       try { applyConversations(ctx, (data && data.conversations) || []); }
       catch (e) { uiTrail("list render failed: " + e.message + " | " + String(e.stack || "").split("\n").slice(0, 3).join(" < ")); }
     });
@@ -1029,7 +1033,9 @@
     wrap.innerHTML = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">${paths[shape] || ""}</svg>`;
     return wrap;
   }
-  function snapchatStatusLine(conv) {
+  // mode "status": Snapchat's own list (glyph + status word); "both": glyph + status word + the message itself when
+  // Ghost knows it (p.body: an opened chat's text, or a quiet-fetch peek - see bridge.js observePeeks)
+  function snapchatStatusLine(conv, mode) {
     const p = conv.preview, st = p.state;
     const color = st.media === "snap" ? (st.audio ? SNAP_PURPLE : SNAP_RED) : st.media === "call" ? (st.status === "missed" ? SNAP_RED : "#8e8e93") : CHAT_BLUE;
     let shape, filled = false;
@@ -1060,15 +1066,25 @@
       text = you + p.text;
       if (st.status === "new") emph = "var(--gh-text)";
     }
+    const body = st.media === "chat" ? (p.body || (p.kind === "text" && p.text && !/^(New Chat|Received|Delivered|Opened)$/.test(p.text) ? p.text : "")) : "";
+    if (mode === "status" && st.media === "chat" && !["screenshot", "replayed", "sending", "failed", "reacted"].includes(st.status)) {
+      text = st.status === "new" ? (st.voice ? "New Voice Note" : "New Chat") : (STATUS_WORD[st.status] || "");
+      emph = st.status === "new" ? color : null;
+    } else if (mode !== "status" && body) {
+      const word = st.status === "new" ? (st.voice ? "New Voice Note" : "New Chat") : (STATUS_WORD[st.status] || "");
+      text = (word ? word + " \u00b7 " : "") + you + body;
+      emph = st.status === "new" ? color : null;
+    }
     return { text, glyph: statusGlyph(shape, glyphColor, filled), emph };
   }
   function previewLine(conv) {
     const p = conv.preview || { kind: "none" };
-    if (p.state && p.state.status && p.kind !== "system") return snapchatStatusLine(conv);
+    const mode = pref("chatRowStyle") || "both";
+    if (mode !== "preview" && p.state && p.state.status && p.kind !== "system") return snapchatStatusLine(conv, mode);
     const you = p.fromMe ? "You: " : "";
     const tick = p.fromMe ? tickFor(p.status) : null;
     switch (p.kind) {
-      case "text": return { text: you + (p.text || ""), iconName: null, tick };
+      case "text": return { text: you + (p.body || p.text || ""), iconName: null, tick, emph: !p.fromMe && p.state && p.state.status === "new" ? "var(--gh-text)" : null };
       case "chat-media": return { text: you + "Sent a photo", iconName: "photo", tick };
       case "gif": return { text: you + "Sent a GIF", iconName: "gifBadge", tick };
       case "audio": return { text: you + "Sent a voice message", iconName: "mic", tick };
@@ -1151,7 +1167,7 @@
     // first tap (no waiting to see if a second one comes); the camera then slides up over it.
     // hold a chat: pin / hide
     let holdT = null, held = false;
-    rowEl.addEventListener("touchstart", () => { held = false; holdT = setTimeout(() => { held = true; haptic("medium"); openRowMenu(ctx, conv.id); }, 480); }, { passive: true });
+    rowEl.addEventListener("touchstart", () => { held = false; holdT = setTimeout(() => { held = true; haptic("medium"); openChatPeek(ctx, conv.id); }, 480); }, { passive: true });
     const cancelHold = () => clearTimeout(holdT);
     rowEl.addEventListener("touchmove", cancelHold, { passive: true });
     rowEl.addEventListener("touchend", cancelHold, { passive: true });
@@ -1183,6 +1199,59 @@
     renderHomeList(ctx);
   }
   // the menu you get by holding a chat in the list
+  // Long-press a chat: read it without opening it (bridge peekConversation - a quiet fetch, no read receipt, nothing
+  // Snapchat counts as "Opened"), with the row's actions underneath. Snaps are never shown or opened from here.
+  async function openChatPeek(ctx, id) {
+    const cd = ctx.state.convById.get(id);
+    if (!cd) return;
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const head = el("div", "gh-peek-head");
+    head.appendChild(makeAvatar(convAvatarUser(cd), 40));
+    const nm = el("div", "gh-peek-name"); nm.textContent = cd.title || "Chat";
+    const sub = el("div", "gh-peek-sub"); sub.textContent = "Preview · they won't see it opened";
+    const col = el("div", "gh-peek-titles"); col.append(nm, sub); head.appendChild(col);
+    s.sheet.appendChild(head);
+    const box = el("div", "gh-peek-box gh-scroll");
+    box.innerHTML = '<div class="gh-peek-loading"><div class="gh-spinner"></div></div>';
+    s.sheet.appendChild(box);
+    const g = el("div", "gh-set-group gh-peek-actions"); s.sheet.appendChild(g);
+    const close = () => closeSheetGeneric(s.backdrop, s.sheet);
+    const pinned = (pref("pinnedChats") || []).includes(id);
+    setRow(g, { icon: "newMsg", tint: "#3e88f7", label: "Open Chat", onClick: () => { close(); openConversationScreen(ctx, id); } });
+    setRow(g, { icon: "pin", tint: "#ff9433", label: pinned ? "Unpin" : "Pin to Top", onClick: () => { const now = togglePin(ctx, id); close(); ctx.showToast(now ? "Pinned" : "Unpinned"); } });
+    setRow(g, { icon: "camera", tint: "#f23c57", label: "Send a Snap", onClick: () => { close(); openCamera(ctx, { to: id }); } });
+    setRow(g, { icon: "eyeOff", tint: "#8e8e93", label: "Hide Chat", onClick: () => { setHidden(ctx, id, true); close(); ctx.showToast("Hidden - find it in Settings > Chats > Hidden Chats"); } });
+    openSheetGeneric(s.backdrop, s.sheet);
+    const token = (s.peekToken = (s.peekToken || 0) + 1);
+    let res = null, failed = false;
+    try { res = await api.peekConversation(id); } catch (e) { failed = true; }
+    // only the token: data-open flips a frame after openSheetGeneric, so a fast (store-cached) peek would bail
+    if (s.peekToken !== token) return;
+    box.innerHTML = "";
+    const msgs = ((res && res.messages) || []).filter((m) => m.kind !== "system" || m.text);
+    if (!msgs.length) {
+      const e = el("div", "gh-peek-empty"); e.textContent = failed ? "Couldn't load a preview. Open the chat to read it." : "No messages to preview.";
+      box.appendChild(e); return;
+    }
+    const label = { "chat-media": "📷 Photo", snap: "Snap", audio: "🎤 Voice note", sticker: "Sticker", gif: "GIF", call: "📞 Call" };
+    let lastDay = null;
+    for (const m of msgs.slice(-25)) {
+      const day = fmtDaySeparator(m.ts);
+      if (day !== lastDay) { const d = el("div", "gh-peek-day"); d.textContent = day; box.appendChild(d); lastDay = day; }
+      const b = el("div", "gh-peek-msg");
+      b.dataset.me = m.fromMe ? "1" : "0";
+      if (cd.isGroup && !m.fromMe) { const who = el("div", "gh-peek-who"); who.textContent = (m.from && m.from.name) || ""; b.appendChild(who); }
+      const t = el("div", "gh-peek-text");
+      t.textContent = m.kind === "text" ? (m.text || "") : (label[m.kind] || m.text || "Message");
+      if (m.kind !== "text") t.classList.add("gh-peek-kind");
+      const time = el("span", "gh-peek-time"); time.textContent = fmtClock(m.ts);
+      b.append(t, time);
+      box.appendChild(b);
+    }
+    box.scrollTop = box.scrollHeight;
+  }
   function openRowMenu(ctx, id) {
     const cd = ctx.state.convById.get(id);
     if (!cd) return;
@@ -1534,6 +1603,7 @@
   }
   async function openConversationScreen(ctx, conversationId) {
     haptic("light");
+    dgPost("clearMessageNotifications", { id: conversationId }).catch(() => {});
     closeChatSearch(ctx);
     storage.set("ghostLastConv", conversationId);
     if (ctx.state.currentConvId && ctx.state.currentConvId !== conversationId) {
@@ -1901,6 +1971,7 @@
   // read-receipt field in the contract, so a normally-sent message always shows the "delivered" double tick.
   function tickMetaEl(m, isMe, extraClass) {
     const meta = el("span", (extraClass ? "gh-bubble-meta " + extraClass : "gh-bubble-meta"));
+    if (m.edited) { const ed = el("span", "gh-edited"); ed.textContent = "edited "; meta.appendChild(ed); }
     meta.appendChild(document.createTextNode(fmtClock(m.ts)));
     if (isMe && !m.retained) {
       if (m.failed) meta.appendChild(icon("close", 14, "gh-tick gh-tick-fail"));
@@ -3500,8 +3571,8 @@
   };
   const PREF_DEFAULTS = {
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
-    compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true,
-    doubleTapCamera: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
+    compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true, chatRowStyle: "both",
+    doubleTapCamera: true, messageNotifications: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
     wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {}, pinnedChats: [], hiddenChats: [], streakKeeper: {}, nicknames: {},
     bookmarks: [], chatBubbles: {},
   };
@@ -3578,6 +3649,8 @@
     // the app's own background (seen for a moment while the keyboard moves) follows the theme
     try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST theme " + pref("theme") + "/" + pref("accent") }).catch(() => {}); } catch (e) {}
     if (ctx.lastRR !== !!pref("readReceipts")) { ctx.lastRR = !!pref("readReceipts"); api.setReadReceipts(ctx.lastRR).catch(() => {}); }
+    const wantPeek = pref("chatRowStyle") !== "status" && !pref("hidePreviews");
+    if (ctx.lastPeek !== wantPeek) { ctx.lastPeek = wantPeek; api.setPreviewPeek(wantPeek).catch(() => {}); }
   }
 
   function nativeSetting(key, def) { try { return typeof window.dgSetting === "function" ? window.dgSetting(key, def) : def; } catch (e) { return def; } }
@@ -4057,6 +4130,11 @@
     chats(ctx, body) {
       let g = setGroup(body, null, "Friends see your Bitmoji (as on a phone) at the bottom of the chat you have open.");
       setRow(g, { label: "Show Me in Chats", toggle: { get: () => nativeSetting("showInChats", true) !== false, set: (v) => setNativeSetting("showInChats", v) } });
+      g = setGroup(body, "Chat List", "Both shows Snapchat's square or arrow and the newest message, like \"■ New Chat · hey\". Reading a new chat's text for the list or a long-press preview never marks it opened.");
+      setChoice(g, [["both", "Status + Message"], ["status", "Snapchat Status Only"], ["preview", "Message Preview Only"]], () => pref("chatRowStyle") || "both",
+        (v) => { setPref(ctx, "chatRowStyle", v); renderHomeList(ctx); });
+      g = setGroup(body, null, "A banner when a new chat or snap arrives while Ghost is in the background. iOS only lets Ghost run for a while after you leave it; Keep Ghost Awake (Storage & Data) makes that last longer. Tap one to open the chat.");
+      setRow(g, { label: "Message Notifications", toggle: { get: () => pref("messageNotifications") !== false, set: (v) => setPref(ctx, "messageNotifications", v) } });
       g = setGroup(body);
       setRow(g, { label: "Double-Tap a Chat for Camera", toggle: { get: () => !!pref("doubleTapCamera"), set: (v) => setPref(ctx, "doubleTapCamera", v) } });
       setRow(g, { label: "Send with Return Key", toggle: { get: () => !!pref("sendOnReturn"), set: (v) => setPref(ctx, "sendOnReturn", v) } });
@@ -4595,6 +4673,49 @@
     s.el.innerHTML = ""; s.stack = []; s.rootLabel = rootLabel || "Chat";
     s.el.dataset.open = "1";
     pushSettingsPage(ctx, name);
+  }
+
+  // ---- new-message notifications while Ghost is in the background ----------------------------------------------
+  // Local notifications (native GhostNotifications.swift): Snapchat's pushes go to Snapchat's own app and iOS web push
+  // doesn't reach a WKWebView, so Ghost posts its own when the feed shows a new incoming chat/snap while hidden. A
+  // chat's text comes from a quiet-fetch peek (never marks it opened). Tapping the banner opens that chat.
+  const notifySeen = new Map();
+  let notifyHiddenAt = 0;
+  function initMessageNotifications(ctx) {
+    window.__ghostOpenChat = (id) => { if (id && ctx.state.convById.has(id)) { closeViewer(ctx); closeCamera(ctx); openConversationScreen(ctx, id); } };
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) return;
+      notifyHiddenAt = Date.now();
+      for (const c of ctx.state.conversations) notifySeen.set(c.id, c.lastActivityTs || 0);
+    });
+    dgPost("pendingChat").then((id) => { if (id) setTimeout(() => window.__ghostOpenChat(id), 400); }).catch(() => {});
+  }
+  async function maybeNotifyMessages(ctx, convs) {
+    if (!document.hidden || pref("messageNotifications") === false || !notifyHiddenAt) return;
+    for (const c of convs) {
+      const ts = c.lastActivityTs || 0, prev = notifySeen.get(c.id);
+      notifySeen.set(c.id, Math.max(prev || 0, ts));
+      const p = c.preview || {};
+      const incoming = !p.fromMe && (c.unreadCount > 0 || c.hasUnreadSnap);
+      if (!incoming || c.muted || ts <= (prev === undefined ? notifyHiddenAt : prev)) continue;
+      const st = p.state || {};
+      let body = st.media === "snap" || p.kind === "snap" ? "New Snap" : st.media === "call" ? (p.text || "Missed call") : st.voice ? "New Voice Note" : "New Chat";
+      if (!pref("hidePreviews") && body === "New Chat") {
+        let text = p.body || "";
+        if (!text) {
+          try {
+            const r = await Promise.race([api.peekConversation(c.id), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 6000))]);
+            const last = ((r && r.messages) || []).filter((m) => !m.fromMe).pop();
+            if (last && last.ts >= ts - 3000) {
+              text = last.kind === "text" ? last.text : { "chat-media": "📷 Photo", audio: "🎤 Voice note", sticker: "Sticker", gif: "GIF" }[last.kind] || "";
+              if (text && c.isGroup && last.from && last.from.name) text = last.from.name + ": " + text;
+            }
+          } catch (e) {}
+        }
+        if (text) body = text;
+      }
+      dgPost("notifyMessage", { id: c.id, title: c.title || "Snapchat", body }).catch(() => {});
+    }
   }
 
   // ---- Streak Keeper -----------------------------------------------------------------------------------
