@@ -980,8 +980,63 @@
     if (status === "delivered" || status === "opened" || status === "viewed" || status === "received") return "double";
     return null;
   }
+  // Snapchat's chat-list status, in Snapchat's colours but Ghost's shapes/sizes: red = snap without sound,
+  // purple = snap with sound, blue = chat. Filled arrow = delivered, hollow arrow = opened, filled square = new,
+  // hollow square = received (you opened it), crossed arrows = screenshot, circle arrow = replayed.
+  const SNAP_RED = "#f23c57", SNAP_PURPLE = "#a05dcd", CHAT_BLUE = "#0eadff";
+  const STATUS_WORD = { new: null, received: "Received", delivered: "Delivered", opened: "Opened", screenshot: "Screenshot",
+    replayed: "Replayed", sending: "Sending\u2026", failed: "Failed to send", reacted: "Reacted" };
+  function statusGlyph(shape, color, filled) {
+    const f = filled ? color : "none";
+    const paths = {
+      arrow: `<path d="M3.2 2.8L13.4 8 3.2 13.2 5.4 8z" fill="${f}" stroke="${color}" stroke-width="1.6" stroke-linejoin="round"/>`,
+      square: `<rect x="3" y="3" width="10" height="10" rx="2.6" fill="${f}" stroke="${color}" stroke-width="1.8"/>`,
+      screenshot: `<path d="M2.2 5.2h8.6M8.4 2.8l2.4 2.4-2.4 2.4M13.8 10.8H5.2M7.6 8.4l-2.4 2.4 2.4 2.4" fill="none" stroke="${color}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`,
+      replay: `<path d="M12.6 8a4.6 4.6 0 11-1.4-3.3M11.4 1.9v2.9H8.5" fill="none" stroke="${color}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`,
+      failed: `<circle cx="8" cy="8" r="5.6" fill="none" stroke="${color}" stroke-width="1.7"/><path d="M8 5v3.4M8 10.7v.1" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>`,
+      phone: `<path d="M13.4 10.9v1.6a1.3 1.3 0 01-1.4 1.3 12.8 12.8 0 01-5.6-2 12.6 12.6 0 01-3.9-3.9A12.8 12.8 0 01.5 2.3 1.3 1.3 0 011.8 1h1.6a1.3 1.3 0 011.3 1.1c.1.6.2 1.2.4 1.7a1.3 1.3 0 01-.3 1.4l-.7.7a10.3 10.3 0 003.9 3.9l.7-.7a1.3 1.3 0 011.4-.3c.5.2 1.1.3 1.7.4a1.3 1.3 0 011.1 1.3z" transform="translate(1.2 .6)" fill="${f}" stroke="${color}" stroke-width="1.3" stroke-linejoin="round"/>`,
+    };
+    const wrap = document.createElement("span");
+    wrap.className = "gh-status-glyph";
+    wrap.innerHTML = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">${paths[shape] || ""}</svg>`;
+    return wrap;
+  }
+  function snapchatStatusLine(conv) {
+    const p = conv.preview, st = p.state;
+    const color = st.media === "snap" ? (st.audio ? SNAP_PURPLE : SNAP_RED) : st.media === "call" ? (st.status === "missed" ? SNAP_RED : "#8e8e93") : CHAT_BLUE;
+    let shape, filled = false;
+    switch (st.status) {
+      case "new": shape = "square"; filled = true; break;
+      case "received": shape = "square"; break;
+      case "delivered": shape = "arrow"; filled = true; break;
+      case "opened": case "reacted": shape = p.fromMe ? "arrow" : "square"; break;
+      case "screenshot": shape = "screenshot"; break;
+      case "replayed": shape = "replay"; break;
+      case "sending": shape = "arrow"; break;
+      case "failed": shape = "failed"; break;
+      default: shape = "phone"; filled = st.status === "missed";
+    }
+    const glyphColor = st.status === "sending" ? "#8e8e93" : st.status === "failed" ? SNAP_RED : color;
+    const you = p.fromMe ? "You: " : "";
+    let text, emph = null;
+    if (st.media === "call") {
+      text = p.text || (st.status === "missed" ? (st.video ? "Missed video call" : "Missed call") : (st.video ? "Video call" : "Call"));
+      if (st.status === "missed" && !p.fromMe) emph = SNAP_RED;
+    } else if (st.media === "snap" || ["screenshot", "replayed", "sending", "failed", "reacted"].includes(st.status) || !(p.kind === "text" && p.text && !/^(New Chat|Received|Delivered|Opened)$/.test(p.text))) {
+      // a status word, like Snapchat's list: snaps always; chats when there's an event or no text to show
+      if (st.status === "new") { text = st.media === "snap" ? "New Snap" : st.voice ? "New Voice Note" : "New Chat"; emph = color; }
+      else text = STATUS_WORD[st.status] || "";
+      if (st.media === "chat" && st.voice && (st.status === "received" || st.status === "opened" || st.status === "delivered")) text = "Voice note \u00b7 " + text;
+    } else {
+      // a chat whose text we have: the glyph says delivered/opened/new/received, the line shows the message
+      text = you + p.text;
+      if (st.status === "new") emph = "var(--gh-text)";
+    }
+    return { text, glyph: statusGlyph(shape, glyphColor, filled), emph };
+  }
   function previewLine(conv) {
     const p = conv.preview || { kind: "none" };
+    if (p.state && p.state.status && p.kind !== "system") return snapchatStatusLine(conv);
     const you = p.fromMe ? "You: " : "";
     const tick = p.fromMe ? tickFor(p.status) : null;
     switch (p.kind) {
@@ -1141,12 +1196,14 @@
       dots.innerHTML = "<span></span><span></span><span></span>";
       previewEl.appendChild(dots);
     } else {
-      const { text, iconName, tick } = previewLine(conv);
+      const { text, iconName, tick, glyph, emph } = previewLine(conv);
       previewEl.innerHTML = "";
+      if (glyph) previewEl.appendChild(glyph);
       if (tick) previewEl.appendChild(icon(tick === "double" ? "checkDouble" : "check", 15, "gh-tick"));
       if (iconName) previewEl.appendChild(icon(iconName, 14));
       const span = el("span");
       span.textContent = text;
+      if (emph) { span.style.color = emph; span.style.fontWeight = "600"; } else { span.style.color = ""; span.style.fontWeight = ""; }
       span.style.overflow = "hidden";
       span.style.textOverflow = "ellipsis";
       span.style.whiteSpace = "nowrap";

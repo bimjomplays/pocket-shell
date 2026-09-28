@@ -1057,6 +1057,33 @@
   // bundle: conversationId, participants, conversationType, conversationTitle, streakMetadata {count,
   // expirationTimestampMs}, displayInfo { feedItem {snap|chat|call|...}, feedItemCreatorId, viewed,
   // lastSenderUserIds, isLocked }.
+  // Snapchat's chat-list status (the red/purple/blue arrows and squares), derived exactly like Snapchat Web's own
+  // feed code does (main.js: feedItem.chat.state / feedItem.snap.state / feedItem.call.state + displayInfo.viewed
+  // -> ChatNew/ChatViewed/SnapScreenshotted/SnapReplayed/...). State numbers are the bundle's own enums (2026-09):
+  //   snap: SCREENSHOTTED 2, RECORDED 3, REPLAYED 4, SENDING 5, WAITING_TO_SEND 6, SEND_FAILED 7, REACTION 13
+  //   chat: SCREENSHOTTED 2, RECORDED 3, SENDING 7, WAITING_TO_SEND 8, FAILED 9, REACTION 11, RECEIVEDVOICENOTE 15
+  //   call: MISSED 1, CALLED 2
+  // -> { media: "snap"|"chat"|"call", audio, status: new|received|delivered|opened|screenshot|replayed|sending|failed|reacted|missed|called, video }
+  function feedState(item, viewed, fromMe) {
+    try {
+      const plain = fromMe ? (viewed ? "opened" : "delivered") : (viewed ? "received" : "new");
+      if (item.snap) {
+        const st = toNum(item.snap.state);
+        const status = st === 2 || st === 3 ? "screenshot" : st === 4 ? "replayed" : st === 5 || st === 6 ? "sending" : st === 7 ? "failed" : st === 13 ? "reacted" : plain;
+        return { media: "snap", audio: !!item.snap.hasAudio, status };
+      }
+      if (item.chat) {
+        const st = toNum(item.chat.state);
+        const status = st === 2 || st === 3 ? "screenshot" : st === 7 || st === 8 ? "sending" : st === 9 ? "failed" : st === 11 ? "reacted" : plain;
+        return { media: "chat", audio: false, voice: st === 15, status };
+      }
+      if (item.call) {
+        const st = toNum(item.call.state);
+        return { media: "call", audio: false, video: !!item.call.isVideo, status: st === 1 ? "missed" : "called" };
+      }
+    } catch (e) { /* the plain status below */ }
+    return undefined;
+  }
   function fromFeed(key, feed, entry) {
     const me = meId();
     for (const p of feed.participants || []) { const k = idOf(p); if (k && p && typeof p === "object" && p.id) idObjs.set(k, p); }
@@ -1098,7 +1125,8 @@
       participants,
       avatarUrl: undefined,
       lastActivityTs: toNum(info.displayTimestamp) || toNum(feed.lastEventUpdateTimestamp) || newestTimestamp(feed, 3) || 0,
-      preview: { kind: kind2, text, fromMe, status: info.viewed ? (fromMe ? "opened" : "viewed") : (fromMe ? "delivered" : "received") },
+      preview: { kind: kind2, text, fromMe, status: info.viewed ? (fromMe ? "opened" : "viewed") : (fromMe ? "delivered" : "received"),
+        state: feedState(item, !!info.viewed, fromMe) },
       unreadCount: unread ? Math.max(1, unreadChats) : 0,
       hasUnreadSnap: unread && kind === "snap",
       streak,

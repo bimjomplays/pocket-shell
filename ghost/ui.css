@@ -479,6 +479,8 @@ input, textarea {
   gap: 4px;
 }
 .gh-row-preview svg { width: 14px; height: 14px; flex: none; opacity: 0.85; }
+.gh-status-glyph { display: inline-flex; flex: none; width: 15px; height: 15px; margin-right: 2px; }
+.gh-row-preview .gh-status-glyph svg { width: 15px; height: 15px; opacity: 1; }
 .gh-row-preview .gh-tick { width: 15px; height: 15px; flex: none; opacity: 0.65; margin-right: 1px; }
 .gh-row-streak {
   flex: none;
