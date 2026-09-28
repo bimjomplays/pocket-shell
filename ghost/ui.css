@@ -2021,3 +2021,34 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 /* floating date pill (markStuckDates in ui.js): shown while scrolling, fades out once you stop */
 .gh-day-sep { transition: opacity 0.25s ease; }
 .gh-messages:not([data-scrolling="1"]) .gh-day-sep[data-stuck="1"] { opacity: 0; pointer-events: none; }
+
+/* the editor's sticker sheet lives inside the camera, above the review screen (z-index 3) - it opened hidden
+   behind it (device report 2026-09-28: the sticker button lit up and nothing appeared) */
+.gh-camera > .gh-editor-sticker-backdrop { z-index: 20; }
+.gh-camera > .gh-editor-sticker-sheet { z-index: 21; }
+
+/* text sizes like Snapchat's (TEXT_STYLE_PX in ui.js): classic caption bar = 17px medium in a slim 60% black bar */
+.gh-editor-item-text[data-style="0"] .gh-editor-item-text-inner, .gh-editor-textinput[data-style="0"] {
+  font-size: 17px; font-weight: 500; line-height: 1.3; padding: 7.5px 14px; letter-spacing: 0;
+}
+.gh-editor-item-text[data-style="1"] .gh-editor-item-text-inner, .gh-editor-textinput[data-style="1"],
+.gh-editor-item-text[data-style="3"] .gh-editor-item-text-inner, .gh-editor-textinput[data-style="3"] {
+  font-size: 30px; font-weight: 800; line-height: 1.2; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+.gh-editor-item-text[data-style="2"] .gh-editor-item-text-inner, .gh-editor-textinput[data-style="2"] {
+  font-size: 21px; font-weight: 700; line-height: 1.2; padding: 7px 15px;
+}
+
+/* the tool rail and the review buttons stay above placed text/stickers (z 5) and the text editor (z 7), or a
+   caption dragged near the edge made the sticker / pencil / Send buttons untappable */
+.gh-editor-rail { z-index: 9; }
+.gh-cam-review > .gh-camera-top, .gh-cam-review-bottom, .gh-cam-review-bottom-l { z-index: 9; }
+
+/* emoji in the snap editor's sticker sheet: 6 across and big enough to read (they were tiny in huge cells) */
+.gh-editor-sticker-sheet .gh-sticker-grid { grid-template-columns: repeat(6, 1fr); gap: 2px; padding: 6px 10px calc(12px + var(--gh-safe-b)); }
+.gh-editor-sticker-sheet .gh-sticker-tile { font-size: 34px; line-height: 1; }
+/* typing a caption: the bar spans the full width, exactly like the placed caption */
+.gh-editor-textwrap[data-style="0"] { left: 0; right: 0; }
+
+/* the colour slider sits under the tool rail (it covered the pencil/sticker buttons), centred on it, like Snapchat */
+.gh-editor-colorbar { top: calc(var(--gh-safe-t) + 300px); bottom: calc(var(--gh-safe-b) + 120px); right: 27px; max-height: 300px; }

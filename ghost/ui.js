@@ -375,6 +375,9 @@
   }
   if (!customElements.get("ghost-app")) customElements.define("ghost-app", GhostApp);
 
+  // finger distances (zoomed page px) -> distances inside the host (its own CSS px): multiply by this, or things
+  // dragged under a finger move 25% further than the finger does (host zoom = 1 / __ghostScale)
+  function pagePxToLocal() { return (typeof window.__ghostScale === "number" && window.__ghostScale > 0) ? window.__ghostScale : 1; }
   function applyZoom(host) {
     const scale = (typeof window.__ghostScale === "number" && window.__ghostScale > 0) ? window.__ghostScale : 1;
     host.style.setProperty("--gh-zoom", String(1 / scale));
@@ -2688,7 +2691,7 @@
       e.preventDefault();
       const dx = Math.min(g.dx, REPLY_MAX);
       const swipe = g.wrap.querySelector(".gh-msg-swipe");
-      swipe.style.setProperty("--gh-swipe-x", dx * 0.72 + "px");
+      swipe.style.setProperty("--gh-swipe-x", dx * 0.72 * pagePxToLocal() + "px");
       const progress = clamp(dx / REPLY_TRIGGER, 0, 1);
       g.wrap.style.setProperty("--gh-reply-op", String(progress));
       g.wrap.style.setProperty("--gh-reply-scale", String(0.5 + 0.5 * progress));
@@ -3074,7 +3077,7 @@
     // swipe from the left edge to go back, like every iOS screen
     let x0 = null, dx = 0;
     page.addEventListener("touchstart", (e) => { const t = e.touches[0]; x0 = t.clientX < 28 ? t.clientX : null; dx = 0; }, { passive: true });
-    page.addEventListener("touchmove", (e) => { if (x0 == null) return; dx = Math.max(0, e.touches[0].clientX - x0); page.style.transition = "none"; page.style.transform = `translateX(${dx}px)`; }, { passive: true });
+    page.addEventListener("touchmove", (e) => { if (x0 == null) return; dx = Math.max(0, e.touches[0].clientX - x0); page.style.transition = "none"; page.style.transform = `translateX(${dx * pagePxToLocal()}px)`; }, { passive: true });
     page.addEventListener("touchend", () => { if (x0 == null) return; page.style.transition = ""; page.style.transform = ""; if (dx > 90) popSettingsPage(ctx); x0 = null; }, { passive: true });
   }
   function popSettingsPage(ctx) {
@@ -4354,11 +4357,11 @@
     // your own picture: drag it anywhere, it snaps to the nearest corner
     const pip = q(".gh-call-local");
     let drag = null;
-    pip.addEventListener("touchstart", (e) => { const t = e.touches[0], r = pip.getBoundingClientRect(); drag = { dx: t.clientX - r.left, dy: t.clientY - r.top }; pip.style.transition = "none"; }, { passive: true });
+    pip.addEventListener("touchstart", (e) => { const t = e.touches[0], r = pip.getBoundingClientRect(); drag = { dx: (t.clientX - r.left) * pagePxToLocal(), dy: (t.clientY - r.top) * pagePxToLocal() }; pip.style.transition = "none"; }, { passive: true });
     pip.addEventListener("touchmove", (e) => {
       if (!drag) return; e.preventDefault();
       const t = e.touches[0], W = wrap.clientWidth, H = wrap.clientHeight, w = pip.offsetWidth, h = pip.offsetHeight;
-      pip.style.left = clamp(t.clientX - drag.dx, 8, W - w - 8) + "px"; pip.style.top = clamp(t.clientY - drag.dy, 8, H - h - 8) + "px"; pip.style.right = "auto"; pip.style.bottom = "auto";
+      pip.style.left = clamp(t.clientX * pagePxToLocal() - drag.dx, 8, W - w - 8) + "px"; pip.style.top = clamp(t.clientY * pagePxToLocal() - drag.dy, 8, H - h - 8) + "px"; pip.style.right = "auto"; pip.style.bottom = "auto";
     }, { passive: false });
     pip.addEventListener("touchend", () => {
       if (!drag) return; drag = null;
@@ -4541,7 +4544,7 @@
     mic.addEventListener("touchmove", (e) => {
       if (!r.rec) return;
       const dx = Math.min(0, e.touches[0].clientX - r.x0);
-      bar.style.setProperty("--rec-x", dx + "px");
+      bar.style.setProperty("--rec-x", dx * pagePxToLocal() + "px");
       if (dx < -110) { haptic("light"); finish(true); }
     }, { passive: true });
     mic.addEventListener("touchend", () => finish(false));
@@ -5157,7 +5160,7 @@
       const dx = e.touches[0].clientX - startX, dy = e.touches[0].clientY - startY;
       if (!mode && Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { mode = dy > 0 ? "down" : "up"; clearTimeout(holdTimer); }
       if (mode === "down") {
-        wrap.style.transform = `translateY(${Math.max(0, dy)}px) scale(${clamp(1 - dy / 2000, 0.85, 1)})`;
+        wrap.style.transform = `translateY(${Math.max(0, dy) * pagePxToLocal()}px) scale(${clamp(1 - dy / 2000, 0.85, 1)})`;
         wrap.style.opacity = String(clamp(1 - dy / 500, 0.4, 1));
       } else if (mode === "up") {
         v.media.style.transform = `translateY(${Math.max(-60, dy / 3)}px)`;
@@ -5518,8 +5521,10 @@
         const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
         if (Math.hypot(t.clientX - cx, t.clientY - cy) < 34) lockRecording(ctx);
       }
-      const range = (c.zoomMax - c.zoomMin) || 1;
-      setZoom(ctx, clamp(holdZoom0 + (-dy / 260) * range, c.zoomMin, c.zoomMax), { showPill: true });
+      // Slide up to zoom while holding, like Snapchat - but gentler (device feedback 2026-09-28: a tiny thumb
+      // movement went all the way in): a 24px dead zone, then doubling every ~170px, so 1x -> 5x takes ~400px.
+      const lift = -dy > 24 ? -dy - 24 : dy > 24 ? -(dy - 24) : 0;
+      setZoom(ctx, clamp(holdZoom0 * Math.pow(2, lift / 170), c.zoomMin, c.zoomMax), { showPill: true });
       void dx; // horizontal delta only feeds the lock-target hit test above, not the zoom
     };
     const up = () => {
@@ -5550,7 +5555,7 @@
     c.toEl.textContent = conv ? conv.title : "";
     c.toEl.style.display = conv ? "" : "none";
     closeReview(ctx);
-    c.zoom = 1; c.usingUltra = false;
+    c.zoom = 1; c.zoomShown = 1; c.usingUltra = false;
     c.timerMode = 0; c.timerBtn.dataset.mode = "0"; c.timerLabel.textContent = "";
     c.flash = "off"; c.torchOn = false;
     c.el.dataset.open = "1";
@@ -5656,7 +5661,7 @@
       c.zoom = clamp(c.zoom || 1, c.zoomMin, c.zoomMax);
       throttledApplyHardwareZoom(ctx);
     } else {
-      c.zoomMin = 1; c.zoomMax = 5; c.zoom = 1; // digital crop-in only; see applyZoomVisual/captureFrame
+      c.zoomMin = 1; c.zoomMax = 5; c.zoom = 1; c.zoomShown = 1; // digital crop-in only; see applyZoomVisual/captureFrame
     }
     applyZoomVisual(ctx);
     setupTorchCapability(ctx, caps);
@@ -5717,10 +5722,17 @@
     };
     c.selfTimerTimer = setTimeout(step, 1000);
   }
+  // Ghost's host is CSS-zoomed (--gh-zoom = 1/appScale). WebKit reports touch clientX/Y and getBoundingClientRect
+  // in zoomed page pixels, but positions/canvas coordinates inside the host are in the host's own CSS pixels - so
+  // every finger position must be scaled back (device report 2026-09-28: drawing landed "an inch below" the finger).
+  function pageScaleOf(elx) { const r = elx.getBoundingClientRect(); return (r.width && elx.offsetWidth) ? r.width / elx.offsetWidth : 1; }
+  function toLocal(elx, clientX, clientY) {
+    const r = elx.getBoundingClientRect(), k = pageScaleOf(elx);
+    return { x: (clientX - r.left) / k, y: (clientY - r.top) / k };
+  }
   function tapToFocus(ctx, clientX, clientY) {
     const c = ctx.camera;
-    const rect = c.live.getBoundingClientRect();
-    const x = clientX - rect.left, y = clientY - rect.top;
+    const { x, y } = toLocal(c.live, clientX, clientY);
     c.focusRing.style.left = x + "px"; c.focusRing.style.top = y + "px";
     c.focusRing.dataset.show = "0"; void c.focusRing.offsetWidth; c.focusRing.dataset.show = "1";
     setTimeout(() => { c.focusRing.dataset.show = "0"; }, 700);
@@ -5769,7 +5781,7 @@
     haptic("light");
     freezeCurrentFrame(ctx, "lens");
     startCameraStream(ctx, { deviceId: targetId, label: "ultra-switch" }).then(() => {
-      c.zoom = 1;
+      c.zoom = 1; c.zoomShown = 1;
       if (c.pinch) c.pinch = { d0: c.pinch.d0, zoom0: 1 };
       applyZoomVisual(ctx);
       thawFrame(ctx);
@@ -5788,12 +5800,25 @@
     const display = c.usingUltra ? c.zoom * 0.5 : c.zoom;
     c.zoomPill.textContent = display.toFixed(1) + "x";
     if (!c.video) return;
-    if (c.zoomHardware || c.zoom === 1) { c.video.style.transform = ""; return; }
+    if (c.zoomHardware) { c.video.style.transform = ""; return; }
     // Digital zoom: scale (and later crop, in captureFrame) the preview. For video we deliberately only
     // zoom the live preview, not the recorded output - re-rendering every frame through a canvas into
     // MediaRecorder to bake the crop in would cost a per-frame draw for the whole clip's length, which is
     // exactly the "hurts recording" case the brief says to avoid; a still photo pays that cost exactly once.
-    c.video.style.transform = (c.facing === "user" ? "scaleX(-1) " : "") + "scale(" + c.zoom.toFixed(3) + ")";
+    // eased toward the target every frame instead of jumping with each touch event (device feedback: "needs to
+    // be smoother between different zooms")
+    if (!c.zoomAnim) {
+      const step = () => {
+        const v = c.video;
+        if (!v) { c.zoomAnim = 0; return; }
+        const cur = c.zoomShown || 1, target = c.zoomHardware ? 1 : c.zoom;
+        const next = Math.abs(target - cur) < 0.004 ? target : cur + (target - cur) * 0.3;
+        c.zoomShown = next;
+        v.style.transform = next === 1 && target === 1 ? "" : (c.facing === "user" ? "scaleX(-1) " : "") + "scale(" + next.toFixed(4) + ")";
+        c.zoomAnim = next === target ? 0 : requestAnimationFrame(step);
+      };
+      c.zoomAnim = requestAnimationFrame(step);
+    }
   }
   function throttledApplyHardwareZoom(ctx) {
     const c = ctx.camera;
@@ -5849,7 +5874,7 @@
     haptic("light");
     freezeCurrentFrame(ctx);
     c.facing = c.facing === "user" ? "environment" : "user";
-    c.torchOn = false; c.flash = "off"; c.zoom = 1; c.usingUltra = false;
+    c.torchOn = false; c.flash = "off"; c.zoom = 1; c.zoomShown = 1; c.usingUltra = false;
     const targetId = c.devices[c.facing];
     startCameraStream(ctx, targetId ? { deviceId: targetId, label: "flip" } : { label: "flip" }).then(() => thawFrame(ctx));
     setTimeout(() => thawFrame(ctx), 900); // never leave the freeze frame up if the new stream stalls
@@ -5982,7 +6007,7 @@
   function discardReview(ctx) {
     const c = ctx.camera;
     commitPendingEdits(ctx, c);
-    const go = () => { closeReview(ctx); c.zoom = 1; c.usingUltra = false; startCameraStream(ctx); }; // retake opens the normal lens at 1x
+    const go = () => { closeReview(ctx); c.zoom = 1; c.zoomShown = 1; c.usingUltra = false; startCameraStream(ctx); }; // retake opens the normal lens at 1x
     if (c.editor && c.editor.hasEdits()) confirmSheet(ctx, "Discard this Snap and your edits?", "Discard").then((ok) => { if (ok) go(); });
     else go();
   }
@@ -6093,6 +6118,9 @@
   const EDITOR_COLOR_STOPS = ["#ffffff", "#ff3b30", "#ff9500", "#ffd60a", "#34c759", "#00c7be", "#0a84ff", "#5e5ce6", "#bf5af2", "#ff2d55", "#000000"];
   const BRUSH_SIZES = [4, 9, 16];
   const TEXT_BASE_PX = 30;
+  // Font size per text style, matching Snapchat's own proportions (device feedback 2026-09-28: the caption was far
+  // too big): classic caption bar 17px medium, big text 30px heavy, pill 21px. Kept in sync with ui.css.
+  const TEXT_STYLE_PX = { 0: 17, 1: 30, 2: 21, 3: 30 };
 
   function hexToRgb(hex) {
     const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "#ffffff");
@@ -6123,7 +6151,7 @@
     return col || "#ffffff";
   }
   function bgColorFor(item) {
-    if (item.style === 0) return item.color ? hexToRgba(item.color, 0.55) : "rgba(0,0,0,0.55)";
+    if (item.style === 0) return item.color ? hexToRgba(item.color, 0.6) : "rgba(0,0,0,0.6)";
     if (item.style === 2) return item.color || "#ffffff";
     return "";
   }
@@ -6188,8 +6216,8 @@
     onTap(mediaEl, (e) => {
       if (ed.editingText) { commitTextEditing(ctx, c); return; }
       if (ed.tool) return;
-      const r = c.review.getBoundingClientRect();
-      startNewTextItem(ctx, c, e.clientX - r.left, e.clientY - r.top);
+      const p = toLocal(c.review, e.clientX, e.clientY);
+      startNewTextItem(ctx, c, p.x, p.y);
     });
 
     initDrawCanvas(ctx, c);
@@ -6212,8 +6240,7 @@
     if (ed.stickerSheetObj) closeSheetGeneric(ed.stickerSheetObj.backdrop, ed.stickerSheetObj.sheet);
     hideTrash(ctx, c);
     requestAnimationFrame(() => {
-      const rect = c.review.getBoundingClientRect();
-      ed.viewport = { w: rect.width || 393, h: rect.height || 852 };
+      ed.viewport = { w: c.review.offsetWidth || 393, h: c.review.offsetHeight || 852 }; // host CSS px, not zoomed page px
       sizeDrawCanvas(ed, ed.viewport.w, ed.viewport.h);
     });
   }
@@ -6276,7 +6303,7 @@
     requestAnimationFrame(() => { try { ed.textInput.focus(); } catch (e) {} });
   }
   function paintTextInputStyle(ed, item) {
-    ed.textInput.dataset.style = item.style;
+    ed.textInput.dataset.style = item.style; ed.textWrap.dataset.style = item.style;
     ed.textInput.style.color = textColorFor(item);
     ed.textInput.style.background = bgColorFor(item);
   }
@@ -6364,7 +6391,7 @@
   function initDrawCanvas(ctx, c) {
     const ed = c.editor;
     const canvas = ed.drawCanvas;
-    const localPt = (t) => { const r = canvas.getBoundingClientRect(); return { x: t.clientX - r.left, y: t.clientY - r.top }; };
+    const localPt = (t) => toLocal(canvas, t.clientX, t.clientY);
     canvas.addEventListener("touchstart", (e) => {
       if (ed.tool !== "draw" || !e.touches || e.touches.length !== 1) return;
       e.preventDefault();
@@ -6425,7 +6452,7 @@
   function ensureStickerSheet(ctx, c) {
     const ed = c.editor;
     if (ed.stickerSheetObj) return ed.stickerSheetObj;
-    const backdrop = el("div", "gh-backdrop");
+    const backdrop = el("div", "gh-backdrop gh-editor-sticker-backdrop");
     const sheet = el("div", "gh-sheet gh-gif-sheet gh-editor-sticker-sheet");
     sheet.style.display = "none";
     sheet.innerHTML = `
@@ -6533,8 +6560,8 @@
   function hideTrash(ctx, c) { c.editor.trash.dataset.show = "0"; c.editor.trash.classList.remove("gh-editor-trash-hover"); c.editor.trashOver = false; }
   function updateTrashHover(c, item) {
     const ed = c.editor;
-    const tr = ed.trash.getBoundingClientRect(), rr = c.review.getBoundingClientRect();
-    const tx = tr.left - rr.left + tr.width / 2, ty = tr.top - rr.top + tr.height / 2;
+    const tr = ed.trash.getBoundingClientRect(), rr = c.review.getBoundingClientRect(), k = pageScaleOf(c.review);
+    const tx = (tr.left - rr.left + tr.width / 2) / k, ty = (tr.top - rr.top + tr.height / 2) / k;
     const over = Math.hypot(item.x - tx, item.y - ty) < 55;
     if (over && !ed.trashOver) haptic("medium");
     ed.trashOver = over;
@@ -6553,7 +6580,7 @@
     const touches = new Map();
     let mode = null, start = null, downTime = 0, moved = false;
     const isBar = () => item.type === "text" && item.style === 0;
-    const pt = (t) => { const r = c.review.getBoundingClientRect(); return { x: t.clientX - r.left, y: t.clientY - r.top }; };
+    const pt = (t) => toLocal(c.review, t.clientX, t.clientY);
     function onStart(e) {
       if (ed.tool === "draw" || ed.editingText) return;
       e.stopPropagation();
@@ -6611,7 +6638,7 @@
     elx.addEventListener("touchcancel", onEnd, { passive: true });
     // mouse fallback (dev rig)
     elx.addEventListener("mousedown", (e) => { if (ed.tool === "draw" || ed.editingText) return; e.stopPropagation(); downTime = nowMs(); moved = false; bringToFront(ed, item); start = { x: item.x, y: item.y, mx: e.clientX, my: e.clientY }; mode = "drag"; if (!isBar()) showTrash(c); window.addEventListener("mouseup", onMouseUp, { once: true }); });
-    elx.addEventListener("mousemove", (e) => { if (mode !== "drag" || !e.buttons) return; const dx = e.clientX - start.mx, dy = e.clientY - start.my; if (Math.abs(dx) > 8 || Math.abs(dy) > 8) moved = true; if (isBar()) item.y = clamp(start.y + dy, 40, ed.viewport.h - 40); else { item.x = start.x + dx; item.y = start.y + dy; updateTrashHover(c, item); } positionItemEl(item); });
+    elx.addEventListener("mousemove", (e) => { if (mode !== "drag" || !e.buttons) return; const k = pageScaleOf(c.review), dx = (e.clientX - start.mx) / k, dy = (e.clientY - start.my) / k; if (Math.abs(dx) > 8 || Math.abs(dy) > 8) moved = true; if (isBar()) item.y = clamp(start.y + dy, 40, ed.viewport.h - 40); else { item.x = start.x + dx; item.y = start.y + dy; updateTrashHover(c, item); } positionItemEl(item); });
     // added per drag (once), not permanently: a window listener per sticker/text kept every item alive forever
     function onMouseUp() {
       if (mode !== "drag") return;
@@ -6635,15 +6662,15 @@
   function paintTextItemFinal(octx, item, t, vw) {
     if (!item.text) return;
     const big = item.style === 1 || item.style === 3;
-    const fontPx = Math.max(6, TEXT_BASE_PX * (big ? 1.15 : 1) * item.scale * t.scale);
+    const fontPx = Math.max(6, (TEXT_STYLE_PX[item.style] || TEXT_BASE_PX) * item.scale * t.scale);
     const lines = item.text.split("\n");
     octx.save();
     octx.textBaseline = "middle";
-    octx.font = `${big ? 800 : 700} ${fontPx}px -apple-system, "SF Pro Display", sans-serif`;
+    octx.font = `${big ? 800 : item.style === 0 ? 500 : 700} ${fontPx}px -apple-system, "SF Pro Text", sans-serif`;
     if (item.style === 0) {
       const my = (item.y - t.oy) / t.scale;
       const mLeft = (0 - t.ox) / t.scale, mRight = (vw - t.ox) / t.scale;
-      const lineH = fontPx * 1.25, padY = fontPx * 0.5;
+      const lineH = fontPx * 1.3, padY = fontPx * 0.45;
       const totalH = lines.length * lineH + padY * 2;
       octx.fillStyle = bgColorFor(item) || "rgba(0,0,0,0.55)";
       octx.fillRect(mLeft, my - totalH / 2, mRight - mLeft, totalH);
