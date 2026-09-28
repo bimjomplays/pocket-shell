@@ -1136,7 +1136,7 @@
     rowEl.addEventListener("click", () => {
       const t0 = ctx.state.rowTapTouch && nowMs() - ctx.state.rowTapTouch < 400 ? ctx.state.rowTapTouch : nowMs();
       ctx.state.rowTap = { id: conv.id, t: t0, row: rowEl }; // a 2nd tap lands on the chat screen - see the root listener
-      openConversationScreen(ctx, conv.id);
+      openChatFromRow(ctx, conv.id);
     });
     const row = { el: rowEl, id: conv.id };
     updateHomeRow(row, conv);
@@ -1473,6 +1473,30 @@
     conv.backBadge.textContent = otherUnread > 99 ? "99+" : String(otherUnread);
   }
 
+  // Tapping a chat row that has an unopened snap plays every unopened received snap in it (oldest first, any
+  // sender in a group), full-screen, before the chat itself appears - landing in the chat once the last one ends
+  // or the user swipes down to stop early (openSnapPlaythrough's teardown calls onDone either way). Only the row
+  // tap itself goes through here (never sent snaps, never other ways into a conversation - search, jump-to-
+  // message, resuming the last chat, gallery/bookmark jumps - which all still call openConversationScreen
+  // directly), and a row with no unread snap badge skips the extra fetch entirely.
+  function openChatFromRow(ctx, convId) {
+    const cd = ctx.state.convById.get(convId);
+    if (!cd || !cd.hasUnreadSnap) { openConversationScreen(ctx, convId); return; }
+    (async () => {
+      let entry;
+      try {
+        const res = await api.openConversation(convId);
+        entry = { messages: res.messages || [], hasMore: !!res.hasMore };
+        ctx.state.messagesByConv.set(convId, entry);
+      } catch (e) { openConversationScreen(ctx, convId); return; }
+      const unopened = entry.messages.filter((m) => m.kind === "snap" && !isFromMe(ctx, m) && !m.opened);
+      if (!unopened.length) { openConversationScreen(ctx, convId); return; }
+      openSnapPlaythrough(ctx, unopened, "unopened", {
+        title: cd.title || "Snaps", convId,
+        onDone: () => openConversationScreen(ctx, convId),
+      });
+    })();
+  }
   async function openConversationScreen(ctx, conversationId) {
     haptic("light");
     closeChatSearch(ctx);
@@ -2047,7 +2071,7 @@
         b.appendChild(tickMetaEl(m, isMe, "gh-sticker-meta"));
         return b;
       }
-      case "snap": return snapTileEl(ctx, m, isMe);
+      case "snap": return (m.saved && (isMe || m.opened)) ? savedSnapMediaEl(ctx, m, isMe) : snapTileEl(ctx, m, isMe);
       case "share": return shareCardEl(ctx, m, isMe);
       case "audio": return audioBubbleEl(ctx, m, isMe, isLast);
       case "unknown": {
@@ -2130,6 +2154,69 @@
     return b;
   }
 
+  // Snapchat splits a long recording into several ~10s video snaps sent back-to-back by the same sender; Ghost
+  // detects a run of same-sender "snap" messages sent within this many ms of each other as candidate parts of ONE
+  // continuous video (confirmed only once each part's media actually resolves to type "video" - see
+  // openSnapPlaythrough). Used both for the "play every unopened snap before the chat" queue and for chaining a
+  // tapped saved/replayed snap into its neighbouring parts.
+  const SNAP_GROUP_GAP_MS = 12000;
+  // m.fromMe is bridge.js's own convenience field (not part of API.md's documented Message shape), so it isn't
+  // guaranteed on every message a caller might hand in - same fallback the rest of ui.js already uses (search
+  // "m.fromMe ||" elsewhere) rather than trusting the bare field.
+  function isFromMe(ctx, m) {
+    const meId = ctx.state.me && ctx.state.me.id;
+    return !!(m && (m.fromMe || (m.from && meId && m.from.id === meId)));
+  }
+  function snapRunFrom(all, startIdx, eligible) {
+    const first = all[startIdx];
+    const out = [first];
+    let prevTs = first.ts;
+    for (let j = startIdx + 1; j < all.length; j++) {
+      const m = all[j];
+      if (!eligible(m)) break;
+      // same sender (this alone also implies the same fromMe-ness - no need to compare that separately)
+      if ((m.from && m.from.id) !== (first.from && first.from.id)) break;
+      if (m.ts - prevTs > SNAP_GROUP_GAP_MS) break;
+      out.push(m); prevTs = m.ts;
+    }
+    return out;
+  }
+
+  // A snap saved in chat renders inline like a photo/video message, the same way Snapchat Web shows it, instead of
+  // the small tap-to-view row: media loads/caches/releases exactly like chat-media (fetchMediaFor/mediaCache/
+  // releaseMedia), respects aspect ratio via the shared .gh-media sizing, and a video autoplays muted+looping like
+  // every other video bubble in Ghost. Tapping it opens the full viewer (openSnapPlaythrough, mode "saved") with an
+  // Unsave control, chained into any neighbouring same-sender video parts (see SNAP_GROUP_GAP_MS above).
+  function savedSnapMediaEl(ctx, m, isMe) {
+    const b = el("div", "gh-bubble gh-gif-bubble gh-snap-media");
+    const build = (ref) => {
+      const media = mediaEl(ref, { ctx, message: m, autoplay: ref && ref.type === "video" });
+      media.appendChild(tickMetaEl(m, isMe, "gh-media-meta"));
+      const badge = el("span", "gh-snap-media-badge"); badge.appendChild(icon("bookmark", 12));
+      media.appendChild(badge);
+      media.classList.add("gh-press");
+      media.addEventListener("click", () => openSavedSnapFromChat(ctx, m, isMe));
+      return media;
+    };
+    let media = build(m.media && m.media[0]);
+    b.appendChild(media);
+    if (!(m.media && m.media.length)) fetchMediaFor(m).then((list) => {
+      if (!list.length || (!b.isConnected && !b.parentNode)) return;
+      const fresh = build(list[0]);
+      media.replaceWith(fresh); media = fresh;
+    });
+    return b;
+  }
+  function openSavedSnapFromChat(ctx, m, isMe) {
+    haptic();
+    const convId = m.conversationId || ctx.state.currentConvId;
+    const entry = ctx.state.messagesByConv.get(convId);
+    const all = (entry && entry.messages) || [m];
+    const idx = all.findIndex((x) => x.id === m.id);
+    const msgs = idx < 0 ? [m] : snapRunFrom(all, idx, (x) => x.kind === "snap" && x.saved && (isFromMe(ctx, x) || x.opened));
+    openSnapPlaythrough(ctx, msgs, "saved", { title: isMe ? "Your Snap" : (m.from && m.from.name) || "Snap", convId });
+  }
+
   // Snaps look like Snapchat's own chat rows: a small coloured square (red = photo / silent video, purple = video
   // with sound), filled while new, outlined once opened, plus a short status. Tap a new one you received to view it.
   function snapTileEl(ctx, m, isMe) {
@@ -2147,7 +2234,9 @@
         : isMe ? (m.opened ? "Opened" : "Delivered") : (m.opened ? (m.replayable ? "Opened · Tap to replay" : "Opened") : "New Snap");
       if (saveBtn) { saveBtn.dataset.on = m.saved ? "1" : "0"; saveBtn.setAttribute("aria-label", m.saved ? "Unsave in Chat" : "Save in Chat"); }
     };
-    // Save in Chat, like Snapchat Web's own button: your own snaps any time, received ones once opened
+    // Save in Chat, like Snapchat Web's own button: your own snaps any time, received ones once opened. Saving
+    // flips this tile into the inline media bubble (savedSnapMediaEl) instead, so this button only ever runs the
+    // false -> true direction here; unsaving happens from the full viewer's "Unsave in Chat" control instead.
     let saveBtn = null;
     if (isMe || m.opened) {
       saveBtn = el("button", "gh-snap-save gh-hit");
@@ -2155,63 +2244,54 @@
       saveBtn.addEventListener("click", async (e) => {
         e.stopPropagation();
         haptic("light");
-        const next = !m.saved;
-        m.saved = next; paint();
-        try { await api.saveMessage(m.conversationId || ctx.state.currentConvId, m.id, next); ctx.showToast(next ? "Saved in chat" : "Unsaved"); }
-        catch (err) { m.saved = !next; paint(); ctx.showToast("Couldn't " + (next ? "save" : "unsave") + " that Snap"); }
+        const convId = m.conversationId || ctx.state.currentConvId;
+        m.saved = true;
+        if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv);
+        try { await api.saveMessage(convId, m.id, true); ctx.showToast("Saved in chat"); }
+        catch (err) { m.saved = false; if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv); ctx.showToast("Couldn't save that Snap"); }
       });
     }
     paint();
     const time = el("span", "gh-snap-time"); time.textContent = fmtClock(m.ts);
     b.append(mark, label, time);
     if (saveBtn) b.appendChild(saveBtn);
-    // a saved snap can be watched again (no receipts - bridge loadMedia)
-    if (isMe || m.opened) {
-      b.addEventListener("click", async () => {
-        if (!m.saved || b.dataset.loading === "1") return;
-        haptic(); b.dataset.loading = "1";
-        try {
-          const res = await api.loadMedia(m.conversationId || ctx.state.currentConvId, m.id);
-          const items = (res && res.media) || [];
-          if (!items.length) throw new Error("empty");
-          openViewerSequence(ctx, items, { title: isMe ? "Your Snap" : (m.from && m.from.name) || "Snap" });
-        } catch (e) { ctx.showToast("Couldn't load that Snap"); }
-        finally { delete b.dataset.loading; }
-      });
-    }
-    if (!isMe && m.opened && m.replayable) { // one replay, like Snapchat
+    if (!isMe && m.opened && m.replayable) { // one replay, like Snapchat - chains into any neighbouring video parts
       b.classList.add("gh-press");
-      b.addEventListener("click", async () => {
+      b.addEventListener("click", () => {
         if (b.dataset.loading === "1" || !m.replayable || m.saved) return;
         haptic(); b.dataset.loading = "1";
-        try {
-          const res = await api.replaySnap(m.conversationId || ctx.state.currentConvId, m.id);
-          const items = (res && res.media) || [];
-          if (!items.length) throw new Error("empty");
-          m.replayable = false;
-          openViewerSequence(ctx, items, { title: (m.from && m.from.name) || "Snap" });
-          ctx.viewer.snap = { convId: m.conversationId || ctx.state.currentConvId, msgId: m.id, onClose: () => paint() };
-        } catch (e) { ctx.showToast("Couldn't replay that Snap"); }
-        finally { delete b.dataset.loading; paint(); }
+        const convId = m.conversationId || ctx.state.currentConvId;
+        const entry = ctx.state.messagesByConv.get(convId);
+        const all = (entry && entry.messages) || [m];
+        const idx = all.findIndex((x) => x.id === m.id);
+        const msgs = idx < 0 ? [m] : snapRunFrom(all, idx, (x) => x.kind === "snap" && !isFromMe(ctx, x) && x.opened && x.replayable && !x.saved);
+        m.replayable = false;
+        openSnapPlaythrough(ctx, msgs, "replay", {
+          title: (m.from && m.from.name) || "Snap", convId,
+          onDone: () => { if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv); },
+        });
+        delete b.dataset.loading;
       });
     }
     if (!isMe && !m.opened) {
       b.classList.add("gh-press");
       b.setAttribute("role", "button");
       b.setAttribute("aria-label", "View Snap");
-      b.addEventListener("click", async () => {
+      b.addEventListener("click", () => {
         if (m.opened || b.dataset.loading === "1") return;
         haptic();
         b.dataset.loading = "1";
         label.textContent = "Loading…";
-        try {
-          const res = await api.openSnap(m.conversationId || ctx.state.currentConvId, m.id);
-          const items = (res && res.media) || [];
-          if (!items.length) throw new Error("empty");
-          openViewerSequence(ctx, items, { title: (m.from && m.from.name) || "Snap" });
-          ctx.viewer.snap = { convId: m.conversationId || ctx.state.currentConvId, msgId: m.id, onClose: () => { m.opened = true; paint(); } };
-        } catch (e) { gtrail("snap open failed " + (e && e.message || e)); ctx.showToast("Couldn't load that Snap"); paint(); }
-        finally { delete b.dataset.loading; if (!m.opened) paint(); }
+        const convId = m.conversationId || ctx.state.currentConvId;
+        const entry = ctx.state.messagesByConv.get(convId);
+        const all = (entry && entry.messages) || [m];
+        const idx = all.findIndex((x) => x.id === m.id);
+        const msgs = idx < 0 ? [m] : snapRunFrom(all, idx, (x) => x.kind === "snap" && !isFromMe(ctx, x) && !x.opened);
+        openSnapPlaythrough(ctx, msgs, "unopened", {
+          title: (m.from && m.from.name) || "Snap", convId,
+          onDone: () => { if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv); },
+        });
+        delete b.dataset.loading;
       });
     }
     return b;
@@ -5119,6 +5199,7 @@
       <div class="gh-viewer-top">
         <div class="gh-viewer-top-name"></div>
         <button class="gh-viewer-save gh-hit" aria-label="Save to Photos"></button>
+        <button class="gh-viewer-unsave gh-hit" aria-label="Unsave in Chat"></button>
         <button class="gh-viewer-close gh-hit"></button>
       </div>
       <div class="gh-viewer-media"></div>
@@ -5132,11 +5213,34 @@
     wrap.querySelector(".gh-viewer-close").appendChild(icon("close", 20));
     wrap.querySelector(".gh-viewer-close").setAttribute("aria-label", "Close");
     wrap.querySelector(".gh-viewer-save").appendChild(icon("download", 20));
-    wrap.querySelector(".gh-viewer-save").addEventListener("click", (e) => { e.stopPropagation(); const v = ctx.viewer; const ref = v.items[v.idx]; if (ref) saveRefToPhotos(ctx, ref); });
+    wrap.querySelector(".gh-viewer-save").addEventListener("click", (e) => { e.stopPropagation(); const ref = ctx.viewer.currentRef; if (ref) saveRefToPhotos(ctx, ref); });
+    // Unsave in Chat: only shown while viewing a saved-in-chat snap (openSnapPlaythrough mode "saved" sets
+    // el.dataset.unsave). Confirms, calls the existing saveMessage(convId, id, false) path, then closes and lets
+    // the chat's own repaint swap the bubble back to the small snap row.
+    const unsaveBtn = wrap.querySelector(".gh-viewer-unsave");
+    unsaveBtn.appendChild(icon("bookmark", 18));
+    unsaveBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const v = ctx.viewer;
+      const q = v.snapQ;
+      if (!q || q.mode !== "saved") return;
+      const m = q.msgs[v.idx];
+      if (!m) return;
+      haptic("light");
+      const ok = await confirmSheet(ctx, "Unsave this Snap? It'll show as a Snap you have to tap to view again.", "Unsave");
+      if (!ok || v.snapQ !== q) return;
+      const convId = m.conversationId || q.convId || ctx.state.currentConvId;
+      m.saved = false;
+      closeViewer(ctx);
+      if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv);
+      try { await api.saveMessage(convId, m.id, false); ctx.showToast("Unsaved"); }
+      catch (err) { m.saved = true; if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv); ctx.showToast("Couldn't unsave that Snap"); }
+    });
     const v = {
       el: wrap, bars: wrap.querySelector(".gh-viewer-bars"), media: wrap.querySelector(".gh-viewer-media"),
       nameEl: wrap.querySelector(".gh-viewer-top-name"), avatarSlot: wrap.querySelector(".gh-viewer-top"),
       items: [], idx: 0, timer: null, startedAt: 0, elapsedAtPause: 0, paused: false, single: false,
+      currentRef: null, snapQ: null,
     };
     wrap.querySelector(".gh-viewer-close").addEventListener("click", () => { haptic("light"); closeViewer(ctx); });
     // a tap that ends a hold (or a swipe) must not also count as "next": swallow the click that follows
@@ -5190,7 +5294,7 @@
   }
   function openViewerSingle(ctx, mediaRef) {
     const v = ctx.viewer;
-    v.story = null;
+    v.story = null; v.snapQ = null; v.el.dataset.unsave = "0";
     v.single = true; v.items = [mediaRef]; v.idx = 0;
     v.el.dataset.open = "1"; v.bars.style.display = "none"; v.avatarSlot.style.display = "none";
     paintViewerItem(ctx);
@@ -5198,6 +5302,7 @@
   function openViewerSequence(ctx, items, opts) {
     const v = ctx.viewer;
     if (!(opts && opts.keepStory)) v.story = null;
+    v.snapQ = null; v.el.dataset.unsave = "0";
     v.single = false; v.items = items || []; v.idx = 0;
     v.el.dataset.open = "1"; v.bars.style.display = "flex"; v.avatarSlot.style.display = "flex";
     v.nameEl.textContent = (opts && opts.title) || "";
@@ -5215,6 +5320,7 @@
     const v = ctx.viewer;
     const token = (v.loadToken = (v.loadToken || 0) + 1);
     clearTimeout(v.timer);
+    v.snapQ = null; v.el.dataset.unsave = "0";
     v.single = true; v.items = [];
     v.el.dataset.open = "1"; v.bars.innerHTML = ""; v.avatarSlot.style.display = "flex";
     v.nameEl.textContent = (story.user && story.user.name) || "";
@@ -5236,6 +5342,7 @@
     v.media.innerHTML = "";
     const ref = v.items[v.idx];
     if (!ref) { closeViewer(ctx); return; }
+    v.currentRef = ref;
     if (ref.type === "video") {
       const video = el("video");
       video.src = ref.url || (ref.blob && URL.createObjectURL(ref.blob)) || "";
@@ -5291,7 +5398,10 @@
       if (video) video.play().catch(() => {});
       const remaining = Math.max(200, (v.dur || 5000) - v.elapsedAtPause);
       v.startedAt = nowMs() - v.elapsedAtPause;
-      v.timer = setTimeout(() => viewerStep(ctx, 1), remaining);
+      // A snap-queue video segment resumes on its own (the <video> itself, paused above, just keeps playing) and
+      // its 'ended' event is what drives the swap to the next part - a second timer here racing that would double-
+      // advance. Everything else (images, queue or not; stories; single/sequence video) keeps the timer-driven step.
+      if (!(v.snapQ && video)) v.timer = setTimeout(() => { if (v.snapQ) advanceSnapQueue(ctx, v.snapQ, v.idx); else viewerStep(ctx, 1); }, remaining);
       if (!v.single) {
         const fill = v.bars.querySelectorAll(".gh-viewer-bar-fill")[v.idx];
         if (fill) requestAnimationFrame(() => { fill.style.transitionDuration = remaining + "ms"; fill.style.width = "100%"; });
@@ -5300,6 +5410,7 @@
   }
   function viewerStep(ctx, dir) {
     const v = ctx.viewer;
+    if (v.snapQ) { clearTimeout(v.timer); const next = v.idx + dir; if (next >= 0) paintSnapQueueItem(ctx, next); return; }
     if (v.single) { if (dir > 0) closeViewer(ctx); return; }
     clearTimeout(v.timer);
     v.idx += dir;
@@ -5339,7 +5450,7 @@
   }
   function closeViewer(ctx) {
     const v = ctx.viewer;
-    if (v.snap) { const sn = v.snap; v.snap = null; api.closeSnap(sn.convId, sn.msgId).catch(() => {}); if (sn.onClose) sn.onClose(); }
+    teardownSnapQueue(ctx);
     if (v.el.dataset.story === "1") {
       setTimeout(() => refreshStories(ctx), 600); // ring goes grey right away
       // openStory's resolved photos/videos are fresh blob URLs every open (bridge.js re-resolves each time) and
@@ -5354,6 +5465,188 @@
     v.el.dataset.open = "0";
     v.el.style.transform = ""; v.el.style.opacity = "";
     v.media.innerHTML = "";
+  }
+
+  // =====================================================================================================
+  // Snap playthrough (shared engine): plays one or more snap MESSAGES full-screen, resolving each one's media
+  // lazily (never before it's actually reached, matching openSnap's own "mark opened" semantics) via whichever
+  // bridge call the mode needs: "unopened" (api.openSnap, marks opened + a read for the peer), "replay" (a
+  // one-time api.replaySnap, also marks opened), "saved" (api.loadMedia - a saved-in-chat snap's media stays
+  // downloadable and re-viewing it is not a new view or a receipt, same as the resolver Snapchat Web itself
+  // uses to show a saved snap inline - see BRIDGE_NOTES.md's "Media loader" section).
+  //
+  // Consecutive same-sender parts within SNAP_GROUP_GAP_MS (snapRunFrom, defined above snapTileEl) are treated as
+  // candidate segments of one multi-part video; once a segment resolves to type "video", the NEXT candidate's
+  // media is resolved ahead of time (one segment ahead, only while a confirmed video plays) and, if it also turns
+  // out to be a video, swapped in on 'ended' with an already-loaded <video> element - no spinner, no black frame,
+  // no progress-bar reset - continuing the single per-snap-segment bar strip started by openSnapPlaythrough.
+  function teardownSnapQueue(ctx) {
+    const v = ctx.viewer;
+    const q = v.snapQ;
+    if (!q) return;
+    q.live = false;
+    v.snapQ = null;
+    v.el.dataset.unsave = "0";
+    // Finish (finishedViewingSnap) every part that actually got a real "started viewing" call, whether the user
+    // watched it (advanced past it) or it was already pre-resolved as the next segment of a video in progress
+    // when the viewer closed - it was already marked opened server-side either way. Never sent for "saved" (its
+    // loadMedia resolver never starts a viewing session to begin with, so there is nothing to finish).
+    if (q.mode === "unopened" || q.mode === "replay") {
+      for (const idx of q.openedForClose) {
+        const m = q.msgs[idx];
+        api.closeSnap(m.conversationId || q.convId || ctx.state.currentConvId, m.id).catch(() => {});
+      }
+    }
+    if (q.onDone) q.onDone();
+  }
+  function resolveSnapPart(ctx, m, mode, convId) {
+    if (mode === "saved") return api.loadMedia(convId, m.id).then((r) => (r && r.media) || []);
+    if (mode === "replay") return api.replaySnap(convId, m.id).then((r) => (r && r.media) || []);
+    return api.openSnap(convId, m.id).then((r) => (r && r.media) || []);
+  }
+  // Resolves (and caches) segment `idx`'s media, exactly once, the first time it's asked for - by the normal
+  // paint path when playback reaches it, or by maybePrefetchNext one segment early while the previous video plays.
+  function getSnapRef(ctx, q, idx) {
+    if (idx < 0 || idx >= q.msgs.length) return Promise.resolve(null);
+    if (q.cache.has(idx)) return q.cache.get(idx);
+    const m = q.msgs[idx];
+    const convId = m.conversationId || q.convId || ctx.state.currentConvId;
+    const p = resolveSnapPart(ctx, m, q.mode, convId).then((media) => {
+      const ref = (media && media[0]) || null;
+      if (ref) {
+        m.opened = true;
+        if (q.mode === "unopened" || q.mode === "replay") {
+          if (q.live) q.openedForClose.add(idx);
+          else api.closeSnap(convId, m.id).catch(() => {}); // the queue already closed before this resolved - finish the view we already started
+        }
+      }
+      return ref;
+    }).catch((e) => { gtrail("snap-queue part failed " + (e && e.message || e)); return null; });
+    q.cache.set(idx, p);
+    return p;
+  }
+  function inSameRun(msgs, i, j) {
+    if (j < 0 || j >= msgs.length || j <= i) return false;
+    const a = msgs[i], b = msgs[j];
+    if (b.kind !== "snap") return false;
+    // same sender (this alone also implies the same fromMe-ness - see isFromMe's comment above snapRunFrom)
+    if ((b.from && b.from.id) !== (a.from && a.from.id)) return false;
+    if (b.ts < a.ts || b.ts - a.ts > SNAP_GROUP_GAP_MS) return false;
+    return true;
+  }
+  function makeSnapVideoEl(ref) {
+    const video = el("video");
+    video.muted = false; video.playsInline = true; video.preload = "auto";
+    video.src = ref.url || (ref.blob && URL.createObjectURL(ref.blob)) || "";
+    return video;
+  }
+  // Only called once the CURRENT segment is confirmed to be a video - a photo never chains, so there's nothing to
+  // preload ahead of it (the next segment, if any, resolves fresh and lazily when actually reached, same as always).
+  function maybePrefetchNext(ctx, q, idx) {
+    const nextIdx = idx + 1;
+    if (!inSameRun(q.msgs, idx, nextIdx) || q.preloaded.has(nextIdx) || q.cache.has(nextIdx)) return;
+    getSnapRef(ctx, q, nextIdx).then((ref) => {
+      if (!q.live || ctx.viewer.snapQ !== q) return;
+      if (!ref || ref.type !== "video") { q.preloaded.set(nextIdx, { ref, video: null }); return; }
+      q.preloaded.set(nextIdx, { ref, video: makeSnapVideoEl(ref) });
+    });
+  }
+  function startSnapSegmentTimer(ctx, idx, durMs, onExpire) {
+    const v = ctx.viewer;
+    clearTimeout(v.timer);
+    v.startedAt = nowMs(); v.dur = durMs; v.paused = false;
+    const fills = v.bars.querySelectorAll(".gh-viewer-bar-fill");
+    fills.forEach((f, i) => { if (i !== idx) { f.classList.remove("gh-anim"); f.style.transition = "none"; f.style.width = i < idx ? "100%" : "0%"; } });
+    const fill = fills[idx];
+    if (fill) { fill.style.transition = "none"; fill.style.width = "0%"; requestAnimationFrame(() => { fill.classList.add("gh-anim"); fill.style.transitionDuration = durMs + "ms"; fill.style.width = "100%"; }); }
+    if (onExpire) v.timer = setTimeout(onExpire, durMs);
+  }
+  function advanceSnapQueue(ctx, q, idx) {
+    const v = ctx.viewer;
+    if (v.snapQ !== q || v.idx !== idx) return; // stale timer racing a real advance/close
+    clearTimeout(v.timer);
+    paintSnapQueueItem(ctx, idx + 1);
+  }
+  function showSnapImage(ctx, q, idx, ref) {
+    const v = ctx.viewer;
+    v.media.innerHTML = "";
+    const img = el("img");
+    img.src = ref.url || (ref.blob && URL.createObjectURL(ref.blob)) || "";
+    v.media.appendChild(img);
+    if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); }
+    v.currentRef = ref;
+    startSnapSegmentTimer(ctx, idx, 5000, () => advanceSnapQueue(ctx, q, idx));
+  }
+  function showSnapVideo(ctx, q, idx, ref, video) {
+    const v = ctx.viewer;
+    v.media.innerHTML = "";
+    v.media.appendChild(video);
+    if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); }
+    v.currentRef = ref;
+    video.currentTime = 0;
+    video.play().catch(() => {});
+    video.addEventListener("ended", () => {
+      if (ctx.viewer.snapQ !== q || v.idx !== idx) return;
+      const nextIdx = idx + 1;
+      const pre = q.preloaded.get(nextIdx);
+      if (pre && pre.video) { q.preloaded.delete(nextIdx); v.idx = nextIdx; showSnapVideo(ctx, q, nextIdx, pre.ref, pre.video); }
+      else advanceSnapQueue(ctx, q, idx);
+    }, { once: true });
+    // 'ended' is the real advance signal; the timer here only drives the visual bar fill (no onExpire - see the
+    // pauseViewer resume-branch note for why a competing advance timer would double-fire for a queue video).
+    if (ref.durationSec) startSnapSegmentTimer(ctx, idx, ref.durationSec * 1000, null);
+    else video.addEventListener("loadedmetadata", () => {
+      if (isFinite(video.duration) && video.duration > 0 && ctx.viewer.snapQ === q && v.idx === idx) startSnapSegmentTimer(ctx, idx, video.duration * 1000 + 200, null);
+    }, { once: true });
+    maybePrefetchNext(ctx, q, idx);
+  }
+  async function paintSnapQueueItem(ctx, idx) {
+    const v = ctx.viewer;
+    const q = v.snapQ;
+    if (!q) return;
+    clearTimeout(v.timer);
+    if (idx >= q.msgs.length) { closeViewer(ctx); return; }
+    v.idx = idx;
+    const pre = q.preloaded.get(idx);
+    if (pre) {
+      q.preloaded.delete(idx);
+      if (pre.ref && pre.video) { showSnapVideo(ctx, q, idx, pre.ref, pre.video); return; }
+      if (pre.ref) { showSnapImage(ctx, q, idx, pre.ref); return; }
+      paintSnapQueueItem(ctx, idx + 1); return; // that prefetch failed to resolve - skip it, same as a fresh failure below
+    }
+    v.media.innerHTML = "";
+    v.media.appendChild(el("div", "gh-spinner gh-viewer-spinner"));
+    const token = (v.snapLoadToken = (v.snapLoadToken || 0) + 1);
+    const ref = await getSnapRef(ctx, q, idx);
+    if (v.snapQ !== q || v.snapLoadToken !== token) return; // closed, or advanced again while this was loading
+    if (!ref) {
+      if (idx === 0) ctx.showToast("Couldn't load that Snap");
+      paintSnapQueueItem(ctx, idx + 1);
+      return;
+    }
+    if (ref.type === "video") showSnapVideo(ctx, q, idx, ref, makeSnapVideoEl(ref));
+    else showSnapImage(ctx, q, idx, ref);
+  }
+  // msgs: ordered (oldest-first) snap messages to play through, already curated by the caller for `mode`'s
+  // eligibility (all unopened+received, all opened+replayable+unsaved, or all saved+viewable). A single caller-
+  // built run (snapTileEl's replay/open handlers, savedSnapMediaEl) is usually 1-4 messages (one logical clip);
+  // the pre-chat-open queue (openChatFromRow) can be the whole conversation's unopened snaps, independent clips
+  // and multi-part groups mixed together - grouping is detected automatically as adjacent entries resolve.
+  function openSnapPlaythrough(ctx, msgs, mode, opts) {
+    opts = opts || {};
+    const v = ctx.viewer;
+    v.story = null;
+    v.single = false;
+    v.snapQ = { msgs, mode, convId: opts.convId, cache: new Map(), preloaded: new Map(), openedForClose: new Set(), live: true, onDone: opts.onDone || null };
+    v.el.dataset.open = "1";
+    v.el.dataset.unsave = mode === "saved" ? "1" : "0";
+    v.avatarSlot.style.display = "flex";
+    v.bars.style.display = msgs.length > 1 ? "flex" : "none";
+    v.bars.innerHTML = "";
+    for (let i = 0; i < msgs.length; i++) { const bar = el("div", "gh-viewer-bar"); bar.appendChild(el("div", "gh-viewer-bar-fill")); v.bars.appendChild(bar); }
+    v.nameEl.textContent = opts.title || "";
+    v.idx = 0;
+    paintSnapQueueItem(ctx, 0);
   }
 
   // =====================================================================================================

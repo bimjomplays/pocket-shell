@@ -1818,7 +1818,19 @@ input, textarea {
 .gh-emoji-cell:active { background: rgba(255,255,255,0.1); }
 .gh-share-still svg { display: none; }
 .gh-viewer-save { margin-left: auto; width: 36px; height: 36px; color: #fff; }
-.gh-viewer-save + .gh-viewer-close { margin-left: 0; }
+.gh-viewer-unsave { display: none; width: 36px; height: 36px; color: #fff; }
+.gh-viewer[data-unsave="1"] .gh-viewer-unsave { display: inline-flex; }
+.gh-viewer-save + .gh-viewer-unsave { margin-left: 0; }
+.gh-viewer-unsave + .gh-viewer-close { margin-left: 0; }
+/* A saved-in-chat snap renders inline like a photo message; this small bookmark badge is the only thing that
+   distinguishes it from an ordinary chat photo/video at a glance (tapping it opens the same full viewer either way). */
+.gh-snap-media { position: relative; }
+.gh-snap-media-badge {
+  position: absolute; left: 6px; bottom: 6px;
+  display: flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: rgba(0,0,0,0.38); color: #fff;
+}
 .gh-call-pip { color: #fff; opacity: 0; pointer-events: none; transition: opacity 0.2s ease; }
 .gh-call[data-remote-video="1"] .gh-call-pip { opacity: 1; pointer-events: auto; }
 .gh-story-dest .gh-friend-name span { display: block; font-size: 12.5px; font-weight: 400; color: var(--gh-text-secondary); }
