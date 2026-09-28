@@ -1080,7 +1080,10 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
               let url = Self.launchPictureURL else { return }
         let config = WKSnapshotConfiguration()
         config.afterScreenUpdates = false
-        webView.evaluateJavaScript(Self.ghostMode ? "document.documentElement.hasAttribute('data-ghost-ready')" : "document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2") { [weak self] ready, _ in
+        // Ghost: never while something private is on screen (Gallery, My Eyes Only, a viewer, the PIN pad, the camera/
+        // editor) - this picture is shown at the next launch before any lock, and it sits unencrypted in Caches
+        let ghostSafe = "document.documentElement.hasAttribute('data-ghost-ready') && !(() => { const r = document.querySelector('ghost-app'); const s = r && r.shadowRoot; return !s || !!s.querySelector('.gh-gal[data-open=\"1\"], .gh-vault[data-open=\"1\"], .gh-gv[data-open=\"1\"], .gh-pin[data-open=\"1\"], .gh-camera[data-open=\"1\"], .gh-viewer[data-open=\"1\"], .gh-send-page[data-open=\"1\"]'); })()"
+        webView.evaluateJavaScript(Self.ghostMode ? ghostSafe : "document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2") { [weak self] ready, _ in
             guard (ready as? Bool) == true, let self else { return }
             self.webView.takeSnapshot(with: config) { image, _ in
                 guard let data = image?.pngData() else { return }

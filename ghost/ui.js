@@ -650,7 +650,9 @@
     api.listStories().then((list) => setStories(ctx, list || [])).catch(() => {});
   }
   function setStories(ctx, list) {
-    const sig = list.map((st) => (st.user && st.user.id) + ":" + st.count + ":" + (st.viewed ? 1 : 0)).join("|");
+    list = (list || []).filter((st) => st && st.user && st.user.id); // one malformed entry used to blank the whole rail
+    nickify(list.map((st) => st.user));
+    const sig = list.map((st) => st.user.id + ":" + st.user.name + ":" + st.count + ":" + (st.viewed ? 1 : 0)).join("|");
     if (sig === ctx.state.storiesSig) return;
     ctx.state.storiesSig = sig;
     ctx.state.stories = list;
@@ -694,7 +696,7 @@
     // chat, replay the "new message" pop and scroll - the jumping in group chats (device, 2026-09-27). Now:
     // nothing changed -> nothing; new messages at the end -> the normal arrival; anything else (reactions,
     // opened/saved state) -> repaint in place, scroll untouched.
-    const sig = (list) => list.map((m) => m.id + ":" + (m.reactions ? m.reactions.length : 0) + ":" + (m.saved ? 1 : 0) + (m.opened ? 1 : 0) + ":" + (m.text || "").length + ":" + (m.seenBy ? m.seenBy.length : 0) + ":" + !!m.retained + ":" + !!m.retainedMedia).join("|");
+    const sig = (list) => list.map((m) => m.id + ":" + (m.reactions ? m.reactions.length : 0) + ":" + (m.saved ? 1 : 0) + (m.opened ? 1 : 0) + ":" + (m.text || "") + ":" + !!m.edited + ":" + (m.seenBy ? m.seenBy.length : 0) + ":" + !!m.retained + ":" + !!m.retainedMedia).join("|");
     if (prev && sig(prev.messages) === sig(entry.messages) && prev.hasMore === entry.hasMore) return;
     const prevLast = prev && prev.messages.length ? prev.messages[prev.messages.length - 1].id : null;
     const newLast = entry.messages.length ? entry.messages[entry.messages.length - 1].id : null;
@@ -1708,6 +1710,7 @@
     setTimeout(() => {
       if (ctx.state.currentConvId === convId) return;
       for (const k of Array.from(mediaCache.keys())) if (k.startsWith(convId + "|")) mediaCache.delete(k);
+      revokeBlobUrls(convId);
       api.releaseMedia(convId).catch(() => {});
     }, 4000);
   }
@@ -2123,7 +2126,7 @@
         let media = build(m.media && m.media[0]);
         b.appendChild(media);
         if (!(m.media && m.media.length)) fetchMediaFor(m).then((list) => {
-          if (!list.length || !b.isConnected && !b.parentNode) return;
+          if (!list.length || !b.isConnected) return; // a detached subtree still has a parentNode
           const fresh = build(list[0]);
           media.replaceWith(fresh); media = fresh;
         });
@@ -2166,11 +2169,11 @@
         const b = el("div", "gh-bubble gh-sticker");
         const ref = m.media && m.media[0];
         const img = el("img");
-        const src = (ref && (ref.url || (ref.blob && URL.createObjectURL(ref.blob)))) || "";
+        const src = (ref && (ref.url || (ref.blob && blobUrl(ref.blob, m.conversationId)))) || "";
         if (src) img.src = src;
         else { // custom / GIF-style stickers are downloaded + decrypted on demand, like photos
           b.dataset.loading = "1";
-          fetchMediaFor(m).then((list) => { const r = list[0]; if (r && (r.url || r.blob)) { img.src = r.url || URL.createObjectURL(r.blob); delete b.dataset.loading; } });
+          fetchMediaFor(m).then((list) => { const r = list[0]; if (r && (r.url || r.blob)) { img.src = r.url || blobUrl(r.blob, m.conversationId); delete b.dataset.loading; } });
         }
         img.addEventListener("error", () => { b.dataset.broken = "1"; }, { once: true });
         b.appendChild(img);
@@ -2203,7 +2206,7 @@
     opts = opts || {};
     const wrap = el("div", "gh-media");
     if (!ref) { wrap.dataset.loading = "1"; return wrap; }
-    const src = ref.url || (ref.blob ? URL.createObjectURL(ref.blob) : "");
+    const src = ref.url || (ref.blob ? blobUrl(ref.blob, opts.message && opts.message.conversationId) : "");
     if (ref.type === "video") {
       const v = el("video");
       v.src = src; v.muted = true; v.playsInline = true; v.loop = !!opts.autoplay;
@@ -2307,7 +2310,7 @@
     let media = build(m.media && m.media[0]);
     b.appendChild(media);
     if (!(m.media && m.media.length)) fetchMediaFor(m).then((list) => {
-      if (!list.length || (!b.isConnected && !b.parentNode)) return;
+      if (!list.length || !b.isConnected) return;
       const fresh = build(list[0]);
       media.replaceWith(fresh); media = fresh;
     });
@@ -2407,6 +2410,24 @@
   // bridge for it (loadMedia -> Snapchat's own media resolver), 3 at a time, remembered per message.
   const mediaCache = new Map(), mediaWaiting = [];
   let mediaActive = 0;
+  // One blob: URL per Blob, reused on every repaint and revoked when its chat's media is released (bug hunt
+  // 2026-09-28: every repaint of a photo/sticker/voice bubble minted a new URL and none were ever revoked).
+  const blobUrls = new WeakMap(), liveBlobUrls = new Map(); // blob -> url; url -> { convId, blob }
+  function blobUrl(blob, convId) {
+    if (!blob) return "";
+    let url = blobUrls.get(blob);
+    if (!url) { url = URL.createObjectURL(blob); blobUrls.set(blob, url); }
+    if (convId && !liveBlobUrls.has(url)) liveBlobUrls.set(url, { convId, blob });
+    return url;
+  }
+  function revokeBlobUrls(convId) {
+    for (const [url, rec] of Array.from(liveBlobUrls)) {
+      if (convId && rec.convId !== convId) continue;
+      try { URL.revokeObjectURL(url); } catch (e) {}
+      blobUrls.delete(rec.blob); // the same Blob shown again later gets a fresh URL, never the revoked one
+      liveBlobUrls.delete(url);
+    }
+  }
   function fetchMediaFor(m) {
     if (m.retained && !m.retainedMedia) return Promise.resolve([]);
     const key = m.conversationId + "|" + m.id + (m.retained ? "|retained" : "");
@@ -2508,7 +2529,7 @@
       if (v.loaded) return v.loaded;
       v.loaded = ((ref.url || ref.blob) ? Promise.resolve([ref]) : fetchMediaFor(m)).then((list) => {
         const r = list[0];
-        const src = r && (r.url || (r.blob ? URL.createObjectURL(r.blob) : ""));
+        const src = r && (r.url || (r.blob ? blobUrl(r.blob, m && m.conversationId) : ""));
         if (!src) throw new Error("no file");
         if (r.durationSec) v.duration = r.durationSec;
         v.src = src;
@@ -2725,7 +2746,14 @@
       const res = await api.loadOlder(convId);
       const prevEntry = ctx.state.messagesByConv.get(convId) || { messages: [], hasMore: true };
       const prevTotal = prevEntry.messages.length;
-      const entry = { messages: res.messages || prevEntry.messages, hasMore: !!res.hasMore };
+      let msgs = res.messages || prevEntry.messages;
+      // a message that arrived (live "messages" event) while this fetch was in flight isn't in its slice: keep it
+      if (res.messages && prevEntry.messages.length) {
+        const have = new Set(msgs.map((m) => m.id)), lastTs = msgs.length ? msgs[msgs.length - 1].ts : 0;
+        const extra = prevEntry.messages.filter((m) => !have.has(m.id) && m.ts >= lastTs);
+        if (extra.length) msgs = msgs.concat(extra);
+      }
+      const entry = { messages: msgs, hasMore: !!res.hasMore };
       ctx.state.messagesByConv.set(convId, entry);
       // Navigated to a different chat while this fetch was in flight: `conv` is the single shared conversation
       // screen object, now showing that other chat, so update the cache above (harmless, keyed by convId) but
@@ -3134,7 +3162,7 @@
     ctx.picker = p;
     p.preview = buildPickerPreview(ctx, overlaysRoot);
 
-    backdrop.addEventListener("click", () => closePhotoSheet(ctx));
+    backdrop.addEventListener("click", () => { if (!p.sending) closePhotoSheet(ctx); }); // mid-send: reopening would start a second run
     p.browseBtn.addEventListener("click", () => { closePhotoSheet(ctx); ctx.conv.fileInput.click(); });
     p.limitedRow.addEventListener("click", () => { haptic("light"); dgPost("photoManage").catch(() => {}); });
     p.settingsBtn.addEventListener("click", () => { haptic("light"); dgPost("photoOpenSettings").catch(() => {}); });
@@ -3288,7 +3316,7 @@
     // get a smooth snap between half/full; a plain open passes false and just sets the height outright.
     if (animate) p.sheet.classList.add("gh-anim");
     p.sheet.style.height = (mode === "full" ? pickerMaxHeight(ctx) : pickerHalfHeight(ctx)) + "px";
-    requestAnimationFrame(() => layoutPickerGrid(ctx, true));
+    requestAnimationFrame(() => layoutPickerGrid(ctx)); // height-only: no forced rebuild (see the ResizeObserver note)
   }
   function initPhotoSheetDrag(ctx) {
     const p = ctx.picker;
@@ -3396,10 +3424,11 @@
     badge.textContent = selIdx !== -1 ? String(selIdx + 1) : "";
     queuePickerThumb(ctx, tile, item);
 
-    tile.addEventListener("click", (e) => { if (expandBtn.contains(e.target)) return; haptic("light"); togglePickerSelect(ctx, item); });
-    let pressTimer = null;
+    let pressTimer = null, previewed = false;
+    // the click iOS sends after a long-press (preview) must not also select/deselect the tile
+    tile.addEventListener("click", (e) => { if (previewed) { previewed = false; return; } if (expandBtn.contains(e.target)) return; haptic("light"); togglePickerSelect(ctx, item); });
     const clearPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
-    tile.addEventListener("touchstart", () => { clearPress(); pressTimer = setTimeout(() => { pressTimer = null; haptic("medium"); openPickerPreview(ctx, index); }, 420); }, { passive: true });
+    tile.addEventListener("touchstart", () => { clearPress(); previewed = false; pressTimer = setTimeout(() => { pressTimer = null; previewed = true; haptic("medium"); openPickerPreview(ctx, index); }, 420); }, { passive: true });
     tile.addEventListener("touchmove", clearPress, { passive: true });
     tile.addEventListener("touchend", clearPress, { passive: true });
     tile.addEventListener("touchcancel", clearPress, { passive: true });
@@ -4183,7 +4212,7 @@
     storage(ctx, body) {
       buildRetentionSettings(ctx, body);
       let g = setGroup(body, null, "Downloaded photos, stickers and the sticker list are kept while Ghost is open. Clearing frees memory; they load again when needed.");
-      setRow(g, { label: "Clear Media Cache", onClick: () => { mediaCache.clear(); storyThumbs.clear(); ctx.showToast("Media cache cleared"); } });
+      setRow(g, { label: "Clear Media Cache", onClick: () => { mediaCache.clear(); revokeBlobUrls(ctx.state.currentConvId ? "__none__" : null); storyThumbs.clear(); ctx.showToast("Media cache cleared"); } });
       setRow(g, { label: "Refresh Sticker List", onClick: async () => { stickerCatalog = null; await storage.set("ghostBitmojiCatalog", null); ctx.showToast("Sticker list will reload"); } });
       g = setGroup(body);
       setRow(g, { label: "Reset All Ghost Settings", danger: true, onClick: () => { prefs = Object.assign({}, PREF_DEFAULTS); storage.set("ghostPrefs", prefs); applyPrefs(ctx); ctx.showToast("Settings reset"); popSettingsPage(ctx); } });
@@ -4714,6 +4743,7 @@
         }
         if (text) body = text;
       }
+      if (!document.hidden || ctx.state.currentConvId === c.id) continue; // came back (maybe into this chat) during the peek
       dgPost("notifyMessage", { id: c.id, title: c.title || "Snapchat", body }).catch(() => {});
     }
   }
@@ -4870,6 +4900,9 @@
     openSheetGeneric(s.backdrop, s.sheet);
     // chat settings: notifications, when chats delete, saved messages; group tools
     const st = await api.chatSettings(convId).catch(() => ({}));
+    // the sheet is shared (row menu, peek, reactions, saved list): if something else refilled it meanwhile, stop -
+    // these rows would act on this (old) chat inside someone else's sheet
+    if (!s.sheet.contains(head)) return;
     const nt = el("div", "gh-set-group-title"); nt.textContent = "Notifications"; s.sheet.appendChild(nt);
     const ng = el("div", "gh-set-group"); s.sheet.appendChild(ng);
     let notif = st && st.notifications;
@@ -8663,12 +8696,15 @@
   }
   function galViewerStep(ctx, dir) {
     const v = ctx.gallery.viewer;
+    if (v.stepping) return; // a second flick during the 230 ms slide would compute from the old index
     const next = v.index + dir;
     if (next < 0 || next >= v.src.count()) { positionGalSlides(v, 0, true); return; }
     const cur = v.slides[1];
     applyGalZoom(v, cur, { s: 1, x: 0, y: 0 });
     positionGalSlides(v, -dir * v.track.clientWidth, true);
+    v.stepping = true;
     setTimeout(() => {
+      v.stepping = false;
       if (!v.src) return;
       if (dir > 0) v.slides.push(v.slides.shift()); else v.slides.unshift(v.slides.pop());
       for (const s of v.slides) v.track.appendChild(s);
@@ -8693,7 +8729,7 @@
     const item = galViewerItem(ctx);
     if (!item) return;
     haptic("light");
-    openSendPage(ctx, { count: 1, onSend: async (dest) => (await galSendItems(ctx, [item], dest)).ok > 0 });
+    openSendPage(ctx, { count: 1, vault: !!item.vault, onSend: async (dest) => (await galSendItems(ctx, [item], dest)).ok > 0 });
   }
   async function galViewerDelete(ctx) {
     const v = ctx.gallery.viewer;
@@ -8990,6 +9026,8 @@
     try {
       const overlay = await renderGalOverlayB64(c.editor, src.item.width, src.item.height);
       await dgPost(galRenderOp(src), { source: { type: src.type, id: src.id }, overlay, mode: choice });
+      if (choice === "replace") galVersions.set(src.id, Date.now()); // the file changed even if the editor was closed
+      if (c.editSource !== src) return;
       haptic("success");
       if (choice === "replace") galItemReplaced(ctx, src.id);
       if (src.type === "vault") await loadVaultList(ctx);
@@ -9118,13 +9156,13 @@
       const items = V.selected.map((id) => V.items.find((x) => x.id === id)).filter(Boolean);
       if (!items.length) return;
       if (items.length > GAL_SEND_MAX) { ctx.showToast("Send up to " + GAL_SEND_MAX + " at a time"); return; }
-      openSendPage(ctx, { count: items.length, onSend: async (dest) => { const r = await galSendItems(ctx, items, dest); if (r.ok) setVaultSelecting(ctx, false); return r.ok > 0; } });
+      openSendPage(ctx, { count: items.length, vault: true, onSend: async (dest) => { const r = await galSendItems(ctx, items, dest); if (r.ok) setVaultSelecting(ctx, false); return r.ok > 0; } });
     });
     q('[data-gact="vsel-delete"]').addEventListener("click", async () => { const d = await vaultDeleteIds(ctx, V.selected.slice()); if (d.length) setVaultSelecting(ctx, false); });
 
     // activity + auto-lock
-    const touch = () => { V.lastActivity = Date.now(); };
-    for (const node of [wrap, ctx.gallery.el, ctx.gallery.viewer.el, ctx.camera.el, ctx.sendPage.el]) node.addEventListener("touchstart", touch, { passive: true });
+    // any touch anywhere in Ghost counts (sheets, dialogs and the PIN pad live outside the vault screen)
+    ctx.root.addEventListener("touchstart", () => { V.lastActivity = Date.now(); }, { passive: true, capture: true });
     setInterval(() => {
       if (!vaultIsOpen(ctx)) return;
       if (Date.now() - V.lastActivity > VAULT_IDLE_MS) { closeVault(ctx); ctx.showToast("My Eyes Only locked"); }
@@ -9185,10 +9223,13 @@
     P.digits += k;
     P.err.textContent = "";
     pinPaint(ctx);
-    if (P.digits.length === 6) { const v = P.digits; P.busy = true; setTimeout(() => { P.busy = false; pinFinish(ctx, v); }, 110); }
+    if (P.digits.length === 6) { const v = P.digits; P.busy = true; P.submitTimer = setTimeout(() => { P.busy = false; P.submitTimer = null; pinFinish(ctx, v); }, 110); }
   }
   function pinFinish(ctx, value) {
     const P = ctx.vault.pin;
+    // Forgot PIN / close tapped inside the 110 ms after the 6th digit: that queued submit must not land in the
+    // NEXT prompt (it would silently become the "New PIN")
+    if (P.submitTimer) { clearTimeout(P.submitTimer); P.submitTimer = null; P.busy = false; }
     const r = P.resolve;
     P.resolve = null;
     P.digits = ""; pinPaint(ctx);
@@ -9229,6 +9270,7 @@
   }
   function pinClose(ctx) {
     const P = ctx.vault.pin;
+    if (P.submitTimer) { clearTimeout(P.submitTimer); P.submitTimer = null; P.busy = false; }
     P.el.dataset.open = "0"; P.resolve = null; P.digits = ""; pinPaint(ctx);
     clearInterval(P.lockTimer); P.el.dataset.locked = "0";
   }
@@ -9343,6 +9385,8 @@
     const c = ctx.camera;
     if (c.editSource && c.editSource.type === "vault") closeCamera(ctx);
     if (ctx.sendPage.el.dataset.open === "1" && ctx.sendPage.opts && ctx.sendPage.opts.vault) closeSendPage(ctx);
+    if (g.infoSheet.sheet.dataset.open === "1") closeSheetGeneric(g.infoSheet.backdrop, g.infoSheet.sheet);
+    g.infoSheet.body.innerHTML = "";
     pinClose(ctx);
     V.token = "";
     V.thumbs.reset();
@@ -9674,7 +9718,7 @@
         if (commit) {
           haptic("light");
           setProgress(1, true);
-          if (gs.rowId) { ctx.state.currentConvId = gs.rowId; const cd = ctx.state.convById.get(gs.rowId); if (cd) updateConvHeader(ctx, cd); openConversationScreen(ctx, gs.rowId); }
+          if (gs.rowId) { const cd = ctx.state.convById.get(gs.rowId); if (cd) updateConvHeader(ctx, cd); openConversationScreen(ctx, gs.rowId); } // it sets currentConvId after closing the previous chat
         } else {
           setProgress(0, true); // spring back to home, closed
         }

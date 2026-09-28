@@ -275,10 +275,12 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
 
     /// op "photoList": one page of the library, newest first, images and videos only.
     func handleList(offset: Int, limit: Int, reply: @escaping (Any?, String?) -> Void) {
+        // fetchResult/assetsByLocalId are main-thread state (the scheme handler reads them on main): only the
+        // PhotoKit work happens in the background, and the results are stored back on main
+        let existing = fetchResult
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return DispatchQueue.main.async { reply(["items": [], "hasMore": false], nil) } }
             let result: PHFetchResult<PHAsset>
-            if let existing = self.fetchResult {
+            if let existing {
                 result = existing
             } else {
                 let options = PHFetchOptions()
@@ -286,16 +288,16 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
                 options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d",
                                                  PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
                 result = PHAsset.fetchAssets(with: options)
-                self.fetchResult = result
             }
             let total = result.count
             let start = max(0, min(offset, total))
             let end = max(start, min(offset + max(0, limit), total))
             var items: [[String: Any]] = []
+            var found: [String: PHAsset] = [:]
             items.reserveCapacity(end - start)
             if start < end {
                 result.enumerateObjects(at: IndexSet(integersIn: start..<end)) { asset, _, _ in
-                    self.assetsByLocalId[asset.localIdentifier] = asset
+                    found[asset.localIdentifier] = asset
                     items.append([
                         "id": asset.localIdentifier,
                         "mediaType": asset.mediaType == .video ? "video" : "image",
@@ -306,7 +308,13 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
                     ])
                 }
             }
-            DispatchQueue.main.async { reply(["items": items, "hasMore": end < total], nil) }
+            DispatchQueue.main.async {
+                if let self {
+                    if self.fetchResult == nil { self.fetchResult = result }
+                    for (key, asset) in found { self.assetsByLocalId[key] = asset }
+                }
+                reply(["items": items, "hasMore": end < total], nil)
+            }
         }
     }
 

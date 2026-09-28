@@ -1241,7 +1241,8 @@
       list.push(m);
       if (["chat-media", "audio", "gif", "sticker"].includes(m.kind)) {
         // Decoder/resolver inputs must survive a deletion while their disk/network work is queued.
-        rawById.set(m.id, { messageContent: structuredClone(raw.messageContent), direct: m.media });
+        const cloned = safe("retention-clone", () => structuredClone(raw.messageContent), null);
+        if (cloned) rawById.set(m.id, { messageContent: cloned, direct: m.media });
       }
     }
     archive.capture(list).then((needed) => {
@@ -1404,7 +1405,7 @@
       post({ ghost: "event", type: "messages", data: { conversationId: cid, messages: list, hasMore } });
     });
   }
-  setInterval(() => { if (store) { observeRetention(); observePeeks(); } }, 5000);
+  setInterval(() => { if (store) { safe("retention-observe", observeRetention); safe("peeks-observe", observePeeks); } }, 5000);
 
   const emitConversations = throttle(() => {
     const convs = safe("conversations", () => {
@@ -1548,14 +1549,14 @@
         post({ ghost: "event", type: "ready", data: { loggedIn: now, me: meUser() } });
       }
       emitConversations();
-      observeRetention();
+      safe("retention-observe", observeRetention); // an exception here would stop Snapchat's own store listeners
       for (const id of openConversations) emitMessagesFor(id);
       safe("typing", checkTyping);
       safe("here", checkHere);
       safe("calls", checkCalls);
     }), null);
     emitConversations();
-    observeRetention();
+    safe("retention-observe", observeRetention);
     post({ ghost: "event", type: "ready", data: { loggedIn: loggedIn(), me: meUser() } });
   }
 
@@ -2014,7 +2015,17 @@
           if (!snaps.length) continue;
           const uid = idOf(key);
           if (uid && key && typeof key === "object" && key.id) idObjs.set(uid, key);
-          const user = safe("story-user", () => (story.userMetadata && toUser(story.userMetadata)) || personFor(uid), null) || { id: uid || "unknown", name: "Unknown" };
+          // the friend record's display name wins: a story's userMetadata sometimes only carries the username, which
+          // made the rail show "jsmith22" instead of "Jamie" (user report 2026-09-28)
+          const user = safe("story-user", () => {
+            const meta = story.userMetadata && toUser(story.userMetadata);
+            const pub = uid ? publicUser(uid) : null;
+            if (!meta) return pub || personFor(uid);
+            const real = (u) => !!(u && u.name && u.name !== "Unknown" && u.name !== u.username && u.name !== u.id);
+            const name = real(pub) ? pub.name : real(meta) ? meta.name : (meta.name || (pub && pub.name));
+            return Object.assign({}, meta, { name, username: meta.username || (pub && pub.username),
+              bitmojiUrl: meta.bitmojiUrl || (pub && pub.bitmojiUrl), avatarId: meta.avatarId || (pub && pub.avatarId) });
+          }, null) || { id: uid || "unknown", name: "Unknown" };
           let latestTs = 0;
           for (const sn of snaps) latestTs = Math.max(latestTs, toNum(sn.creationTimestampMs), toNum(sn.sourceCreationTimestamp), toNum(sn.displayTimestampMs));
           const watch = (fs.watchState.get(key)) || {};
@@ -2236,7 +2247,8 @@
       let conv = lastStory.conversationId;
       if (!conv && typeof m.getOneOnOneConversationId === "function") {
         const me = meId();
-        const r = await m.getOneOnOneConversationId([convIdObj(me), idObjs.get(userId) || convIdObj(userId)]);
+        // user ids need user id-objects (convIdObj only knows conversation ids and falls back to a bare string)
+        const r = await m.getOneOnOneConversationId([idObjs.get(me) || uuidObj(me), idObjs.get(userId) || uuidObj(userId)]);
         const hit = r && typeof r.get === "function" && (r.get(idObjs.get(userId)) || [...r.values()][0]);
         conv = hit && hit.conversationId;
       }
