@@ -105,6 +105,8 @@
     flash: '<path d="M13 2L4 14h6l-1 8 9-12h-6z" fill="currentColor" stroke="none"/>',
     timerIcon: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/>',
     expand: '<path d="M9 3H3v6"/><path d="M15 3h6v6"/><path d="M21 15v6h-6"/><path d="M3 15v6h6"/>',
+    scissors: '<circle cx="6" cy="7" r="2.6"/><circle cx="6" cy="17" r="2.6"/><path d="M8.2 8.4L20 17"/><path d="M8.2 15.6L20 7"/>',
+    loop: '<path d="M17 2.5l3 3-3 3"/><path d="M4 11.5v-1a5 5 0 015-5h11"/><path d="M7 21.5l-3-3 3-3"/><path d="M20 12.5v1a5 5 0 01-5 5H4"/>',
     share: '<path d="M12 3v12"/><path d="M8 7l4-4 4 4"/><path d="M6 11H5a2 2 0 00-2 2v6a2 2 0 002 2h14a2 2 0 002-2v-6a2 2 0 00-2-2h-1"/>',
     heart: '<path d="M12 20s-7.5-4.6-9.2-9.4C1.7 7.3 3.9 4 7.3 4c2 0 3.5 1.1 4.7 2.8C13.2 5.1 14.7 4 16.7 4c3.4 0 5.6 3.3 4.5 6.6C19.5 15.4 12 20 12 20z"/>',
     heartFill: '<path d="M12 20s-7.5-4.6-9.2-9.4C1.7 7.3 3.9 4 7.3 4c2 0 3.5 1.1 4.7 2.8C13.2 5.1 14.7 4 16.7 4c3.4 0 5.6 3.3 4.5 6.6C19.5 15.4 12 20 12 20z" fill="currentColor"/>',
@@ -1953,7 +1955,7 @@
     const swipe = el("div", "gh-msg-swipe");
     const hint = el("div", "gh-reply-hint");
     hint.appendChild(icon("reply", 18));
-    if (m.replyTo) swipe.appendChild(replyQuoteEl(m.replyTo));
+    if (m.replyTo) swipe.appendChild(replyQuoteEl(m.replyTo, ctx));
     if (m.retained && m.mediaUnavailable) {
       const missing = el("div", "gh-bubble"); missing.textContent = "Media wasn't captured before deletion"; swipe.appendChild(missing);
     } else swipe.appendChild(bubbleEl(ctx, m, isMe, isLast));
@@ -1983,11 +1985,18 @@
     }
     return meta;
   }
-  function replyQuoteEl(r) {
+  // tapping the quoted message jumps to it and flashes it (loads older history if it has to)
+  function replyQuoteEl(r, ctx) {
     const q = el("div", "gh-reply-quote");
     const b = el("b"); b.textContent = (r.from && r.from.name) || "Someone";
     const s = el("span"); s.textContent = r.text || "…";
     q.append(b, document.createTextNode(" "), s);
+    if (ctx && r.messageId) {
+      q.classList.add("gh-press");
+      q.setAttribute("role", "button");
+      q.setAttribute("aria-label", "Go to the message this replies to");
+      q.addEventListener("click", (e) => { e.stopPropagation(); haptic("light"); jumpToMessage(ctx, String(r.messageId)); });
+    }
     return q;
   }
   // ---- group colours: each person's name (and @mention of them) in their own colour ------------------------
@@ -2031,17 +2040,19 @@
     const group = !!(cd && cd.isGroup);
     const counts = new Map();
     for (const r of m.reactions) {
-      const key = r.emoji;
-      if (!counts.has(key)) counts.set(key, { count: 0, mine: false, who: [] });
+      const sr = snapReactionFor(r);
+      const key = sr ? "i" + sr.intent : r.emoji;
+      if (!counts.has(key)) counts.set(key, { count: 0, mine: false, who: [], r: sr ? { intent: sr.intent, emoji: sr.emoji } : { emoji: r.emoji } });
       const c = counts.get(key);
       c.count++;
       c.who.push(r.from || {});
       if (meId && r.from && r.from.id === meId) c.mine = true;
     }
-    for (const [emoji, c] of counts) {
+    for (const [, c] of counts) {
+      const emoji = c.r.emoji;
       const pill = el("div", "gh-reaction-pill gh-press");
       pill.dataset.mine = c.mine ? "1" : "0";
-      pill.appendChild(document.createTextNode(emoji + " "));
+      pill.appendChild(reactionIcon(c.r, 18));
       if (group && c.count <= 3) { // Telegram-style: the faces of who reacted, else the count
         const faces = el("span", "gh-reaction-faces");
         for (const u of c.who) faces.appendChild(makeAvatar(u, 18));
@@ -2073,7 +2084,7 @@
       const nm = el("span", "gh-set-label"); nm.textContent = mine ? "You" : (r.from && r.from.name) || "Someone";
       const col = !mine && personColor(ctx, r.from && r.from.id); if (col) nm.style.color = col;
       if (mine) { const sub = el("div", "gh-reactor-sub"); sub.textContent = "Tap to remove"; nm.appendChild(sub); }
-      const em = el("span", "gh-reactor-emoji"); em.textContent = r.emoji;
+      const em = el("span", "gh-reactor-emoji"); em.appendChild(reactionIcon(r, 26));
       row.append(nm, em);
       if (mine) row.addEventListener("click", () => { haptic("light"); closeSheetGeneric(s.backdrop, s.sheet); api.react(convId, m.id, null).catch(() => {}); });
       g.appendChild(row);
@@ -2866,9 +2877,29 @@
   }
 
   // ---- swipe-to-reply + long-press action sheet, per message -----------------------------------------
+  // double-tap a message = your chosen Snapchat reaction (Settings > Chats > Double-Tap Reaction; Love by default)
+  function heartReact(ctx, m, wrap) {
+    if (m.retained || m.pending || m.failed) return;
+    const meId = ctx.state.me && ctx.state.me.id;
+    const sr = SNAP_REACTION_BY_INTENT.get(Number(pref("doubleTapReaction"))) || SNAP_REACTION_BY_INTENT.get(1);
+    const hearted = (m.reactions || []).some((r) => r.from && r.from.id === meId && snapReactionFor(r) === sr);
+    haptic(hearted ? "light" : "medium");
+    api.react(ctx.state.currentConvId, m.id, hearted ? null : sr.emoji).catch(() => ctx.showToast("Couldn't react"));
+    if (hearted) return;
+    // Snapchat's animated heart pops over the message - on the app root, not inside the bubble, because the
+    // reaction arriving repaints (replaces) the bubble right away
+    const bubble = wrap.querySelector(".gh-bubble, .gh-media, .gh-msg-swipe") || wrap;
+    const rc = bubble.getBoundingClientRect();
+    const at = toLocal(ctx.root, rc.left + rc.width / 2, rc.top + rc.height / 2);
+    const pop = el("div", "gh-heart-pop");
+    pop.style.left = at.x + "px"; pop.style.top = at.y + "px";
+    pop.appendChild(reactionIcon({ intent: sr.intent }, 64, true));
+    ctx.root.appendChild(pop);
+    setTimeout(() => pop.remove(), 1100);
+  }
   function initMessageGestures(ctx, conv) {
     const LONG_PRESS_MS = 360, MOVE_CANCEL = 10, LOCK_MIN = 8, REPLY_TRIGGER = 64, REPLY_MAX = 84;
-    let g = null;
+    let g = null, lastTap = null;
     function findWrap(target) { return target.closest && target.closest(".gh-msg-wrap"); }
     function messageFor(wrap) {
       const id = wrap.dataset.messageId;
@@ -2881,7 +2912,9 @@
       const wrap = findWrap(target);
       if (!wrap) { g = null; return; }
       const t = e.touches[0];
-      g = { wrap, x0: t.clientX, y0: t.clientY, dx: 0, dy: 0, locked: null, longFired: false };
+      g = { wrap, x0: t.clientX, y0: t.clientY, dx: 0, dy: 0, locked: null, longFired: false, t0: Date.now(),
+        // a tap on media/snaps/voice notes already does something on the first tap: no double-tap heart there
+        tappable: !target.closest(".gh-media, .gh-snap-row, .gh-snap-media, .gh-audio-body, .gh-link, .gh-reply-quote") };
       g.timer = setTimeout(() => {
         g.longFired = true;
         haptic("medium");
@@ -2922,6 +2955,12 @@
         const m = messageFor(gs.wrap);
         if (m) { haptic(); setReplyTo(ctx, m); conv.textarea.focus(); }
       }
+      // double-tap a message = Snapchat's heart reaction (again on your own heart = take it off)
+      if (!gs.longFired && !gs.locked && gs.tappable && Math.abs(gs.dx) < MOVE_CANCEL && Math.abs(gs.dy) < MOVE_CANCEL && Date.now() - gs.t0 < 300) {
+        const id = gs.wrap.dataset.messageId, now = Date.now();
+        if (lastTap && lastTap.id === id && now - lastTap.t < 330) { lastTap = null; const m = messageFor(gs.wrap); if (m) heartReact(ctx, m, gs.wrap); }
+        else lastTap = { id, t: now };
+      }
       swipe.style.setProperty("--gh-swipe-x", "0px");
       gs.wrap.style.setProperty("--gh-reply-op", "0");
       gs.wrap.style.setProperty("--gh-reply-scale", "0.6");
@@ -2934,7 +2973,43 @@
   // =====================================================================================================
   // Action sheet (long-press a message)
   // =====================================================================================================
-  const REACTION_EMOJIS = ["\u2764\uFE0F", "\uD83D\uDE02", "\uD83D\uDD25", "\uD83D\uDC4D", "\uD83D\uDE2E", "\uD83D\uDE22", "\uD83D\uDC80"]; // Snapchat's own reaction set (sent as its reaction ids)
+  // Snapchat's own reactions (Snapchat Web main.js: enum LOVE 1 ... SALUTE 14, sent as {intentionType}) and the artwork
+  // Snapchat Web itself draws them with (static PNG + animated WebP on Snapchat's CDN). The emoji is only the fallback
+  // if an image can't load, and what bridge.react() maps back to the intent.
+  const SC = "https://cf-st.sc-cdn.net/d/";
+  const SNAP_REACTIONS = [
+    [1, "\u2764\uFE0F", "Love", "KjyNqbecfsrCqtEvnffCB?bo=EhMaABoAMgIEfUgCUAhaAwiZVWAB&uc=8", "zIo4rYPDHUTUzlJagiLos?bo=EhQaABoAMgIEfUgCUAhaBAiirAFgAQ%3D%3D&uc=8"],
+    [2, "\uD83D\uDE02", "Laugh", "CZIK7h5pGNC71wWNMY93s?bo=EhMaABoAMgIEfUgCUAhaAwiBa2AB&uc=8", "hPsjuqrILjrrdt6U3kt6h?bo=EhQaABoAMgIEfUgCUAhaBAigrQJgAQ%3D%3D&uc=8"],
+    [3, "\uD83D\uDD25", "Fire", "7LRItKc82BSggW6jDusdF?bo=EhMaABoAMgIEfUgCUAhaAwjTV2AB&uc=8", "lPdlkKti9OurpfsWYqnDq?bo=EhQaABoAMgIEfUgCUAhaBAjO0QJgAQ%3D%3D&uc=8"],
+    [4, "\uD83D\uDC4D", "Thumbs up", "F1LF8zqi4nWtUlCwuvdnf?bo=EhMaABoAMgIEfUgCUAhaAwiRWmAB&uc=8", "g1eEeq3Tau8maYLqViXt5?bo=EhQaABoAMgIEfUgCUAhaBAi2rAJgAQ%3D%3D&uc=8"],
+    [5, "\uD83D\uDC4E", "Thumbs down", "EzQ8JOlTloiPOAacQEjBU?bo=EhMaABoAMgIEfUgCUAhaAwjnVWAB&uc=8", "tfK3eLNpxqdRfwiUABOBQ?bo=EhQaABoAMgIEfUgCUAhaBAiqlQJgAQ%3D%3D&uc=8"],
+    [6, "\uD83D\uDE22", "Sad", "lhnwxPSzXlDdCK6GvVb3H?bo=EhMaABoAMgIEfUgCUAhaAwjxeGAB&uc=8", "muOvtDsQWy321fbIYIm1R?bo=EhMaABoAMgIEfUgCUAhaAwiUeWAB&uc=8"],
+    [7, "\uD83D\uDE2E", "Wow", "RTwrigAM5ZbdwYmwfdKAG?bo=EhQaABoAMgIEfUgCUAhaBAiTjgFgAQ%3D%3D&uc=8", "ZfiC0jJB3F4WBbEGlIFqW?bo=EhQaABoAMgIEfUgCUAhaBAiu6QJgAQ%3D%3D&uc=8"],
+    [8, "\u2753", "Question", "3606eFl1D77IPezD94TwU?bo=EhQaABoAMgIEfUgCUAhaBAi8oQFgAQ%3D%3D&uc=8", "5vpAIaiDyVKWaLwcW4QVZ?bo=EhQaABoAMgIEfUgCUAhaBAjQqwFgAQ%3D%3D&uc=8"],
+    [9, "\uD83D\uDE18", "Kiss", "69dbupaCBE7zqio0ZmdjM?bo=EhQaABoAMgIEfUgCUAhaBAjd4wFgAQ%3D%3D&uc=8", "D8tv5QK3aP3cRER92h1Wa?bo=EhQaABoAMgIEfUgCUAhaBAjM4AJgAQ%3D%3D&uc=8"],
+    [10, "\uD83D\uDE2D", "Sobbing", "rvS4Yivf1MPMjJEvISeZC?bo=EhQaABoAMgIEfUgCUAhaBAiygQNgAQ%3D%3D&uc=8", "25Qkyn7vlgGBcjWnhDkLg?bo=EhQaABoAMgIEfUgCUAhaBAjM8wNgAQ%3D%3D&uc=8"],
+    [11, "\uD83D\uDC80", "Skull", "Z956ZrPIZLRwOC15JxagT?bo=EhQaABoAMgIEfUgCUAhaBAiuxAFgAQ%3D%3D&uc=8", "v5j6VMCfJwIgkiDqItoIp?bo=EhQaABoAMgIEfUgCUAhaBAiIhQVgAQ%3D%3D&uc=8"],
+    [12, "\u2757", "Exclamation", "nBi1xgqaSXoLSza5yHWBG?bo=EhQaABoAMgIEfUgCUAhaBAiX-QFgAQ%3D%3D&uc=8", "zsF6HKwfM5LBMXuHJ4BMU?bo=EhQaABoAMgIEfUgCUAhaBAishgJgAQ%3D%3D&uc=8"],
+    [13, "\uD83D\uDE21", "Angry", "ruztsBon2vjyRZHRvYjM1?bo=EhQaABoAMgIEfUgCUAhaBAiWzQJgAQ%3D%3D&uc=8", "jtEUdxi6vtL4MMVi5m6uA?bo=EhQaABoAMgIEfUgCUAhaBAjmgwRgAQ%3D%3D&uc=8"],
+    [14, "\uD83E\uDEE1", "Salute", "RksVoOwmhCeABXdfYqBAm?bo=EhQaABoAMgIEfUgCUAhaBAjwzAJgAQ%3D%3D&uc=8", "0Yds32VNCWBFV3bPU8mKx?bo=EhQaABoAMgIEfUgCUAhaBAjCjAZgAQ%3D%3D&uc=8"],
+  ].map(([intent, emoji, name, still, anim]) => ({ intent, emoji, name, img: SC + still, anim: SC + anim }));
+  const SNAP_REACTION_BY_INTENT = new Map(SNAP_REACTIONS.map((r) => [r.intent, r]));
+  const SNAP_REACTION_BY_EMOJI = new Map(SNAP_REACTIONS.map((r) => [r.emoji, r]));
+  SNAP_REACTION_BY_EMOJI.set("\u2764", SNAP_REACTION_BY_INTENT.get(1));
+  // Snapchat's own reaction bar order (main.js: LOVE, LAUGH_CRY, FIRE, THUMBS_UP, THUMBS_DOWN, SAD_CRY, WOW, QUESTION_MARK)
+  const REACTION_EMOJIS = SNAP_REACTIONS.slice(0, 8).map((r) => r.emoji);
+  function snapReactionFor(r) { return (r && r.intent && SNAP_REACTION_BY_INTENT.get(r.intent)) || SNAP_REACTION_BY_EMOJI.get(r && r.emoji) || null; }
+  // the reaction's picture: Snapchat's artwork for its own reactions, the emoji itself for any other emoji
+  function reactionIcon(r, size, animated) {
+    const sr = snapReactionFor(r);
+    if (!sr) { const t = el("span", "gh-react-glyph"); t.textContent = (r && r.emoji) || ""; t.style.fontSize = Math.round(size * 0.82) + "px"; return t; }
+    const img = el("img", "gh-snap-react");
+    img.alt = sr.name; img.draggable = false; img.decoding = "async";
+    img.style.width = size + "px"; img.style.height = Math.round(size * 195 / 180) + "px";
+    img.addEventListener("error", () => { const t = el("span", "gh-react-glyph"); t.textContent = sr.emoji; t.style.fontSize = Math.round(size * 0.82) + "px"; img.replaceWith(t); }, { once: true });
+    img.src = animated ? sr.anim : sr.img;
+    return img;
+  }
   function buildActionSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-action-sheet"); sheet.style.display = "none";
@@ -2953,10 +3028,10 @@
     `;
     const reactRow = sheet.querySelector(".gh-react-row");
     for (const emoji of REACTION_EMOJIS) {
-      const b = el("button", "gh-react-emoji gh-press");
-      b.textContent = emoji;
+      const b = el("button", "gh-react-emoji gh-press gh-react-snap");
+      b.appendChild(reactionIcon({ emoji }, 34));
       b.dataset.emoji = emoji;
-      b.setAttribute("aria-label", "React " + emoji);
+      b.setAttribute("aria-label", "React " + (SNAP_REACTION_BY_EMOJI.get(emoji) || {}).name);
       reactRow.appendChild(b);
     }
     const more = el("button", "gh-react-more gh-press");
@@ -3018,7 +3093,8 @@
     const meId = ctx.state.me && ctx.state.me.id;
     for (const item of [s.reactRow, s.replyItem, s.saveItem]) item.style.display = message.retained ? "none" : "";
     for (const b of s.reactRow.querySelectorAll(".gh-react-emoji")) {
-      const mine = (message.reactions || []).some((r) => r.emoji === b.dataset.emoji && r.from && r.from.id === meId);
+      const want = SNAP_REACTION_BY_EMOJI.get(b.dataset.emoji);
+      const mine = (message.reactions || []).some((r) => r.from && r.from.id === meId && (snapReactionFor(r) === want || r.emoji === b.dataset.emoji));
       b.dataset.mine = mine ? "1" : "0";
       b.onclick = () => {
         haptic("light");
@@ -3601,7 +3677,7 @@
   const PREF_DEFAULTS = {
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true, chatRowStyle: "both",
-    doubleTapCamera: true, messageNotifications: true, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
+    doubleTapCamera: true, messageNotifications: true, doubleTapReaction: 1, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
     wallDim: 0.25, wallFit: "fill", chatWalls: {}, customAvatars: {}, pinnedChats: [], hiddenChats: [], streakKeeper: {}, nicknames: {},
     bookmarks: [], chatBubbles: {},
   };
@@ -3802,7 +3878,7 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
+  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
   const SETTINGS_PAGES = {
     // Every photo/video (and saved snap) and every link in the open chat, newest first. Older history loads on
     // demand. Only what Snapchat Web can still fetch shows up (media that has expired on Snapchat's side can't).
@@ -4165,6 +4241,8 @@
       g = setGroup(body, null, "A banner when a new chat or snap arrives while Ghost is in the background. iOS only lets Ghost run for a while after you leave it; Keep Ghost Awake (Storage & Data) makes that last longer. Tap one to open the chat.");
       setRow(g, { label: "Message Notifications", toggle: { get: () => pref("messageNotifications") !== false, set: (v) => setPref(ctx, "messageNotifications", v) } });
       g = setGroup(body);
+      const dtr = SNAP_REACTION_BY_INTENT.get(Number(pref("doubleTapReaction"))) || SNAP_REACTION_BY_INTENT.get(1);
+      setRow(g, { label: "Double-Tap Reaction", value: dtr.name, onClick: () => pushSettingsPage(ctx, "doubletap") });
       setRow(g, { label: "Double-Tap a Chat for Camera", toggle: { get: () => !!pref("doubleTapCamera"), set: (v) => setPref(ctx, "doubleTapCamera", v) } });
       setRow(g, { label: "Send with Return Key", toggle: { get: () => !!pref("sendOnReturn"), set: (v) => setPref(ctx, "sendOnReturn", v) } });
       setRow(g, { label: "Show Message Times", toggle: { get: () => !!pref("showTimes"), set: (v) => setPref(ctx, "showTimes", v) } });
@@ -4172,6 +4250,22 @@
       setRow(g, { label: "Hidden Chats", value: String((pref("hiddenChats") || []).length), onClick: () => pushSettingsPage(ctx, "hidden") });
       g = setGroup(body, "Voice Messages");
       setChoice(g, [["1", "Normal Speed"], ["1.5", "1.5×"], ["2", "2×"]], () => String(nativeSetting("voiceNoteSpeed", "1")), (v) => setNativeSetting("voiceNoteSpeed", v));
+    },
+    doubletap(ctx, body) {
+      const g = setGroup(body, null, "Double-tap any message to send this reaction. Double-tap again to take it off.");
+      const grid = el("div", "gh-snap-react-grid gh-dtr-grid");
+      const paint = () => { for (const b of grid.children) b.dataset.on = Number(b.dataset.intent) === Number(pref("doubleTapReaction")) ? "1" : "0"; };
+      for (const sr of SNAP_REACTIONS) {
+        const b = el("button", "gh-snap-react-cell gh-press");
+        b.dataset.intent = String(sr.intent);
+        b.appendChild(reactionIcon(sr, 40));
+        const cap = el("span", "gh-dtr-name"); cap.textContent = sr.name; b.appendChild(cap);
+        b.setAttribute("aria-label", sr.name);
+        b.addEventListener("click", () => { haptic("light"); setPref(ctx, "doubleTapReaction", sr.intent); paint(); });
+        grid.appendChild(b);
+      }
+      g.appendChild(grid);
+      paint();
     },
     hidden(ctx, body) {
       const ids = pref("hiddenChats") || [];
@@ -5288,7 +5382,17 @@
     const s = ctx.chatSheet;
     s.sheet.innerHTML = "";
     s.sheet.appendChild(el("div", "gh-sheet-grip"));
-    const t = el("div", "gh-set-group-title"); t.textContent = "React with any emoji"; s.sheet.appendChild(t);
+    const t0 = el("div", "gh-set-group-title"); t0.textContent = "Snapchat Reactions"; s.sheet.appendChild(t0);
+    const snapGrid = el("div", "gh-snap-react-grid");
+    for (const sr of SNAP_REACTIONS) {
+      const b = el("button", "gh-snap-react-cell gh-press");
+      b.appendChild(reactionIcon(sr, 40));
+      b.setAttribute("aria-label", sr.name);
+      b.addEventListener("click", () => { haptic("light"); closeSheetGeneric(s.backdrop, s.sheet); api.react(convId, message.id, sr.emoji).catch(() => ctx.showToast("Couldn't react")); });
+      snapGrid.appendChild(b);
+    }
+    s.sheet.appendChild(snapGrid);
+    const t = el("div", "gh-set-group-title"); t.textContent = "Any Emoji"; s.sheet.appendChild(t);
     const grid = el("div", "gh-emoji-grid");
     for (const e of EMOJI_GRID) {
       const b = el("button", "gh-emoji-cell gh-press"); b.textContent = e;
@@ -6406,9 +6510,13 @@
         </div>
         <div class="gh-editor-rail">
           <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="text"></button>
-          <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="draw"></button>
           <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="sticker"></button>
+          <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="scissors"></button>
+          <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="loop" style="display:none"></button>
+          <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="draw"></button>
         </div>
+        <button class="gh-editor-emojibrush gh-hit" aria-label="Emoji brush"></button>
+        <div class="gh-editor-brushpreview"></div>
         <div class="gh-editor-trash"><div class="gh-editor-trash-ic"></div></div>
         <div class="gh-cam-review-bottom-l"><button class="gh-cam-save gh-hit" data-act="save"></button></div>
         <div class="gh-cam-review-bottom"><button class="gh-cam-sendto" data-act="sendto"><span>Send To</span></button></div>
@@ -7084,6 +7192,7 @@
       await api.sendSnap(ids.filter((x) => x !== "__story__"), out.blob, {
         kind: cap.kind, width: out.width || cap.width, height: out.height || cap.height,
         hasAudio: cap.hasAudio, myStory: ids.includes("__story__"), overlay: out.overlay,
+        loop: cap.kind === "video" && !!(c.editor && c.editor.loop), // Snapchat: loops (infinity) vs plays once
       });
       haptic("success");
       closeCamera(ctx);
@@ -7138,7 +7247,17 @@
   const TEXT_BASE_PX = 30;
   // Font size per text style, matching Snapchat's own proportions (device feedback 2026-09-28: the caption was far
   // too big): classic caption bar 17px medium, big text 30px heavy, pill 21px. Kept in sync with ui.css.
-  const TEXT_STYLE_PX = { 0: 17, 1: 30, 2: 21, 3: 30 };
+  const TEXT_STYLE_PX = { 0: 17, 1: 30, 2: 21, 3: 30, 4: 24, 5: 24, 6: 22 };
+  // Snapchat's text looks (its caption protobuf's backgroundType: BLACK_BAR, DROP_SHADOW, BUBBLE_WRAP, OUTLINE,
+  // DARK_BACKGROUND, LIGHT_BACKGROUND, YELLOW_BUBBLE). 0 = the classic caption bar, measured from a real snap
+  // (user screenshot 2026-09-28): full width, 60% black, ~34pt tall, 17pt regular white text, centred.
+  const TEXT_STYLES = [
+    { id: 0, name: "Classic", weight: 400 }, { id: 1, name: "Big", weight: 800 }, { id: 3, name: "Outline", weight: 800 },
+    { id: 4, name: "Highlight", weight: 700 }, { id: 5, name: "Light", weight: 700 }, { id: 2, name: "Label", weight: 700 },
+    { id: 6, name: "Bubble", weight: 700 },
+  ];
+  const TEXT_WEIGHT = Object.fromEntries(TEXT_STYLES.map((x) => [x.id, x.weight]));
+  const SNAP_YELLOW = "#fffc00";
 
   function hexToRgb(hex) {
     const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "#ffffff");
@@ -7162,15 +7281,21 @@
     return { scale, ox: (vw - mw * scale) / 2, oy: (vh - mh * scale) / 2 };
   }
   function viewportToMedia(t, x, y) { return { x: (x - t.ox) / t.scale, y: (y - t.oy) / t.scale }; }
+  // the colour slider colours the text on text-only looks, and the background (with auto black/white text) on
+  // looks that have one - like Snapchat
   function textColorFor(item) {
     const col = item.color;
-    if (item.style === 0) return col ? (luminance(col) > 0.55 ? "#000000" : "#ffffff") : "#ffffff";
-    if (item.style === 2) return col ? (luminance(col) > 0.55 ? "#000000" : "#ffffff") : "#000000";
+    const contrast = (bg) => (luminance(bg) > 0.55 ? "#000000" : "#ffffff");
+    if (item.style === 0) return col || "#ffffff";
+    if (item.style === 2 || item.style === 5) return contrast(col || "#ffffff");
+    if (item.style === 6) return contrast(col || SNAP_YELLOW);
     return col || "#ffffff";
   }
   function bgColorFor(item) {
-    if (item.style === 0) return item.color ? hexToRgba(item.color, 0.6) : "rgba(0,0,0,0.6)";
-    if (item.style === 2) return item.color || "#ffffff";
+    if (item.style === 0) return "rgba(0,0,0,0.6)";
+    if (item.style === 2 || item.style === 5) return item.color || "#ffffff";
+    if (item.style === 6) return item.color || SNAP_YELLOW;
+    if (item.style === 4) return "rgba(0,0,0,0.72)";
     return "";
   }
   function roundRectPath(cx, x, y, w, h, r) {
@@ -7192,11 +7317,16 @@
       textWrap: root.querySelector(".gh-editor-textwrap"), textInput: root.querySelector(".gh-editor-textinput"),
       railText: root.querySelector('[data-tool="text"]'), railDraw: root.querySelector('[data-tool="draw"]'),
       railSticker: root.querySelector('[data-tool="sticker"]'), railUndo: root.querySelector('[data-tool="undo"]'),
+      railScissors: root.querySelector('[data-tool="scissors"]'), railLoop: root.querySelector('[data-tool="loop"]'),
+      emojiBrushBtn: root.querySelector(".gh-editor-emojibrush"), brushPreview: root.querySelector(".gh-editor-brushpreview"),
+      brushSize: 9, brushEmoji: null, loop: false,
       trash: root.querySelector(".gh-editor-trash"),
       hasEdits: () => ed.strokes.length > 0 || ed.items.length > 0,
     };
     c.editor = ed;
     ed.trash.querySelector(".gh-editor-trash-ic").appendChild(icon("trash", 24));
+    ed.railScissors.appendChild(icon("scissors", 22)); ed.railScissors.setAttribute("aria-label", "Scissors: cut out a sticker");
+    ed.railLoop.appendChild(icon("loop", 22)); ed.railLoop.setAttribute("aria-label", "Loop video");
     ed.colorbar.style.background = `linear-gradient(to bottom, ${EDITOR_COLOR_STOPS.join(",")})`;
     ed.textInput.dataset.placeholder = "Tap to type";
 
@@ -7228,6 +7358,9 @@
     onTap(ed.railDraw, () => { haptic("light"); toggleDrawTool(ctx, c); });
     onTap(ed.railSticker, () => { haptic("light"); openStickerPicker(ctx, c); });
     onTap(ed.railUndo, () => { haptic("light"); undoStroke(ctx, c); });
+    onTap(ed.railScissors, () => { haptic("light"); runScissors(ctx, c); });
+    onTap(ed.railLoop, () => { haptic("light"); ed.loop = !ed.loop; ed.railLoop.dataset.on = ed.loop ? "1" : "0"; ctx.showToast(ed.loop ? "Loops for your friend" : "Plays once"); });
+    onTap(ed.emojiBrushBtn, () => { haptic("light"); openEmojiBrushPicker(ctx, c); });
     // Tapping the photo: same focus race (its default mousedown/touchstart would blur the caption first, so the
     // handler would misread "just committed" as "idle tap" and start a stray item) - same tap helper.
     const mediaEl = root.querySelector(".gh-cam-review-media");
@@ -7242,19 +7375,24 @@
     initColorbar(ctx, c);
     initSizePicker(ctx, c);
     initTextInput(ctx, c);
+    buildTextStyleRow(ctx, c);
   }
 
   function resetEditor(ctx, c) {
     const ed = c.editor;
     if (!ed) return;
     ed.fit = c.fit || "cover";
+    ed.brushEmoji = null; ed.brushSize = 9; ed.loop = false;
+    if (ed.railLoop) { ed.railLoop.dataset.on = "0"; ed.railLoop.style.display = c.captured && c.captured.kind === "video" ? "" : "none"; }
+    if (ed.railScissors) ed.railScissors.style.display = c.captured && c.captured.kind === "video" ? "none" : "";
+    if (ed.emojiBrushBtn) { ed.emojiBrushBtn.innerHTML = ""; ed.emojiBrushBtn.appendChild(icon("emoji", 20)); ed.emojiBrushBtn.dataset.show = "0"; }
     for (const item of ed.items) if (item.el) item.el.remove();
     ed.items = []; ed.strokes = []; ed.curStroke = null; ed.itemSeq = 0;
     ed.tool = null; ed.editingText = null; ed.trashOver = false;
     ed.colorFrac = 0.5; ed.color = null; ed.sizeIdx = 1;
     setColorThumb(ed, colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), ed.colorFrac);
     paintSizeButtons(ed);
-    ed.textWrap.dataset.open = "0"; ed.textInput.textContent = ""; ed.colorbar.dataset.show = "0"; ed.sizesEl.dataset.show = "0";
+    ed.textWrap.dataset.open = "0"; if (ed.styleRow) ed.styleRow.dataset.show = "0"; c.review.dataset.typing = "0"; ed.textInput.textContent = ""; ed.colorbar.dataset.show = "0"; ed.sizesEl.dataset.show = "0";
     ed.railText.dataset.on = "0"; ed.railDraw.dataset.on = "0"; ed.railSticker.dataset.on = "0"; ed.railUndo.style.display = "none";
     if (ed.stickerSheetObj) closeSheetGeneric(ed.stickerSheetObj.backdrop, ed.stickerSheetObj.sheet);
     hideTrash(ctx, c);
@@ -7267,7 +7405,7 @@
     const ed = c.editor;
     if (!ed) return;
     ed.curStroke = null;
-    if (ed.editingText) { ed.editingText = null; ed.textWrap.dataset.open = "0"; try { ed.textInput.blur(); } catch (e) {} }
+    if (ed.editingText) { ed.editingText = null; ed.textWrap.dataset.open = "0"; if (ed.styleRow) ed.styleRow.dataset.show = "0"; try { ed.textInput.blur(); } catch (e) {} }
     for (const item of ed.items) if (item.el) item.el.remove();
     ed.items = []; ed.strokes = [];
     if (ed.drawCtx) ed.drawCtx.clearRect(0, 0, ed.drawCanvas.width, ed.drawCanvas.height);
@@ -7285,7 +7423,8 @@
     ed.railDraw.dataset.on = tool === "draw" ? "1" : "0";
     ed.railSticker.dataset.on = tool === "sticker" ? "1" : "0";
     ed.railUndo.style.display = tool === "draw" ? "" : "none";
-    ed.sizesEl.dataset.show = tool === "draw" ? "1" : "0";
+    ed.sizesEl.dataset.show = "0"; // Snapchat: pinch to size the brush (no size buttons)
+    ed.emojiBrushBtn.dataset.show = tool === "draw" ? "1" : "0";
     ed.colorbar.dataset.show = (tool === "draw" || ed.editingText) ? "1" : "0";
     ed.drawCanvas.style.pointerEvents = tool === "draw" ? "auto" : "none";
   }
@@ -7312,6 +7451,8 @@
     ed.editingText = item;
     ed.tool = "text";
     ed.textWrap.dataset.open = "1";
+    if (ed.styleRow) ed.styleRow.dataset.show = "1";
+    c.review.dataset.typing = "1"; // Snapchat hides the other tools while you type
     ed.textInput.textContent = item.text || "";
     paintTextInputStyle(ed, item);
     ed.colorFrac = item.colorFrac != null ? item.colorFrac : 0.5;
@@ -7323,14 +7464,19 @@
   }
   function paintTextInputStyle(ed, item) {
     ed.textInput.dataset.style = item.style; ed.textWrap.dataset.style = item.style;
+    ed.textInput.dataset.align = item.align || "center"; ed.textWrap.dataset.align = item.align || "center";
     ed.textInput.style.color = textColorFor(item);
-    ed.textInput.style.background = bgColorFor(item);
+    ed.textInput.style.background = item.style === 4 || item.style === 5 ? "" : bgColorFor(item);
+    ed.textInput.style.setProperty("--gh-hl", bgColorFor(item) || "transparent");
+    if (ed.styleRow) for (const b of ed.styleRow.querySelectorAll("[data-style]")) b.dataset.on = String(b.dataset.style) === String(item.style) ? "1" : "0";
+    if (ed.alignBtn) { ed.alignBtn.style.visibility = item.style === 0 ? "hidden" : "visible"; ed.alignBtn.dataset.align = item.align || "center"; }
   }
   function cycleTextStyle(ctx, c) {
     const ed = c.editor;
     const item = ed.editingText;
     if (!item) return;
-    item.style = (item.style + 1) % 4;
+    const order = TEXT_STYLES.map((x) => x.id);
+    item.style = order[(order.indexOf(item.style) + 1) % order.length];
     paintTextInputStyle(ed, item);
   }
   function commitTextEditing(ctx, c) {
@@ -7339,6 +7485,8 @@
     if (!item) return;
     const text = (ed.textInput.innerText || ed.textInput.textContent || "").replace(/ /g, " ").replace(/\n+$/, "").trim();
     ed.textWrap.dataset.open = "0";
+    if (ed.styleRow) ed.styleRow.dataset.show = "0";
+    c.review.dataset.typing = "0";
     ed.editingText = null;
     if (!text) {
       ed.items = ed.items.filter((x) => x !== item);
@@ -7349,6 +7497,37 @@
     item.text = text; item.color = ed.color; item.colorFrac = ed.colorFrac;
     renderTextItemEl(ctx, c, item);
     setTool(ctx, c, null);
+  }
+  // style row (above the keyboard, like Snapchat's) + alignment; built once per editor
+  function buildTextStyleRow(ctx, c) {
+    const ed = c.editor;
+    const row = el("div", "gh-editor-stylerow");
+    const align = el("button", "gh-editor-align gh-hit"); align.setAttribute("aria-label", "Alignment");
+    align.innerHTML = '<i></i><i></i><i></i>';
+    row.appendChild(align);
+    for (const st of TEXT_STYLES) {
+      const b = el("button", "gh-editor-stylechip");
+      b.dataset.style = String(st.id); b.textContent = st.name === "Classic" ? "Aa" : st.name;
+      b.setAttribute("aria-label", st.name + " text");
+      row.appendChild(b);
+    }
+    c.review.appendChild(row); // sits at the bottom of the review = right above the keyboard (the web view shrinks)
+    ed.styleRow = row; ed.alignBtn = align;
+    const hold = (e) => e.preventDefault(); // keep the caption focused (see keepFocus in buildSnapEditor)
+    row.addEventListener("mousedown", hold);
+    row.addEventListener("touchstart", (e) => { if (e.target.closest("button")) e.preventDefault(); }, { passive: false });
+    const act = (target) => {
+      const item = ed.editingText; if (!item) return;
+      const chip = target.closest(".gh-editor-stylechip");
+      if (chip) { haptic("light"); item.style = Number(chip.dataset.style); paintTextInputStyle(ed, item); return; }
+      if (target.closest(".gh-editor-align") && item.style !== 0) {
+        haptic("light");
+        item.align = { center: "left", left: "right", right: "center" }[item.align || "center"];
+        paintTextInputStyle(ed, item);
+      }
+    };
+    row.addEventListener("touchend", (e) => { if (e.target.closest("button")) { e.preventDefault(); act(e.target); } }, { passive: false });
+    row.addEventListener("click", (e) => act(e.target));
   }
   function renderTextItemEl(ctx, c, item) {
     const ed = c.editor;
@@ -7362,9 +7541,13 @@
     }
     item.el.style.visibility = "";
     item.el.dataset.style = item.style;
-    item.innerEl.textContent = item.text;
+    item.el.dataset.align = item.align || "center";
+    item.innerEl.innerHTML = "";
+    const span = el("span", "gh-editor-item-text-line"); span.textContent = item.text; // per-line highlight looks paint the span
+    item.innerEl.appendChild(span);
     item.innerEl.style.color = textColorFor(item);
-    item.innerEl.style.background = bgColorFor(item);
+    item.innerEl.style.setProperty("--gh-hl", bgColorFor(item) || "transparent");
+    item.innerEl.style.background = item.style === 4 || item.style === 5 ? "" : bgColorFor(item);
     positionItemEl(item);
   }
 
@@ -7385,6 +7568,26 @@
   }
   function strokePath(cx, stroke) {
     const pts = stroke.pts;
+    if (stroke.emoji) { // emoji brush: the emoji stamped along the line
+      const px = Math.max(8, stroke.size * 3);
+      cx.save(); cx.font = `${px}px -apple-system, sans-serif`; cx.textAlign = "center"; cx.textBaseline = "middle";
+      let last = null, carry = 0;
+      for (const p of pts) {
+        if (!last) { cx.fillText(stroke.emoji, p.x, p.y); last = p; continue; }
+        let d = Math.hypot(p.x - last.x, p.y - last.y);
+        const step = px * 0.85;
+        let ax = last.x, ay = last.y;
+        while (carry + d >= step) {
+          const k = (step - carry) / d;
+          ax += (p.x - ax) * k; ay += (p.y - ay) * k;
+          cx.fillText(stroke.emoji, ax, ay);
+          d = Math.hypot(p.x - ax, p.y - ay); carry = 0;
+        }
+        carry += d; last = p;
+      }
+      cx.restore();
+      return;
+    }
     cx.strokeStyle = stroke.color; cx.lineWidth = stroke.size; cx.lineCap = "round"; cx.lineJoin = "round";
     if (pts.length < 2) { cx.beginPath(); cx.fillStyle = stroke.color; cx.arc(pts[0].x, pts[0].y, stroke.size / 2, 0, Math.PI * 2); cx.fill(); return; }
     cx.beginPath();
@@ -7411,23 +7614,42 @@
     const ed = c.editor;
     const canvas = ed.drawCanvas;
     const localPt = (t) => toLocal(canvas, t.clientX, t.clientY);
+    let pinch = null;
+    const dist2 = (e) => { const a = localPt(e.touches[0]), b = localPt(e.touches[1]); return Math.hypot(b.x - a.x, b.y - a.y) || 1; };
+    const showPreview = () => {
+      const p = ed.brushPreview; const sz = ed.brushEmoji ? ed.brushSize * 3 : ed.brushSize;
+      p.style.width = p.style.height = sz + "px";
+      p.textContent = ed.brushEmoji || ""; p.style.fontSize = ed.brushEmoji ? sz * 0.9 + "px" : "";
+      p.style.background = ed.brushEmoji ? "transparent" : (ed.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac));
+      p.dataset.show = "1"; clearTimeout(p._t); p._t = setTimeout(() => { p.dataset.show = "0"; }, 700);
+    };
     canvas.addEventListener("touchstart", (e) => {
-      if (ed.tool !== "draw" || !e.touches || e.touches.length !== 1) return;
+      if (ed.tool !== "draw" || !e.touches) return;
+      if (e.touches.length === 2) { // pinch = brush size (Snapchat has no size buttons)
+        e.preventDefault(); ed.curStroke = null; redrawDrawCanvas(ed);
+        pinch = { d0: dist2(e), s0: ed.brushSize }; showPreview(); return;
+      }
+      if (e.touches.length !== 1) return;
       e.preventDefault();
-      ed.curStroke = { color: ed.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), size: BRUSH_SIZES[ed.sizeIdx], pts: [localPt(e.touches[0])] };
+      ed.curStroke = { color: ed.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), size: ed.brushSize, emoji: ed.brushEmoji || undefined, pts: [localPt(e.touches[0])] };
     }, { passive: false });
     canvas.addEventListener("touchmove", (e) => {
+      if (pinch && e.touches && e.touches.length >= 2) { e.preventDefault(); ed.brushSize = clamp(pinch.s0 * dist2(e) / pinch.d0, 3, 44); showPreview(); return; }
+      if (pinch) return;
       if (!ed.curStroke || !e.touches || e.touches.length !== 1) return;
       e.preventDefault();
       ed.curStroke.pts.push(localPt(e.touches[0]));
       redrawDrawCanvas(ed);
     }, { passive: false });
-    const endStroke = () => { if (ed.curStroke && ed.curStroke.pts.length) ed.strokes.push(ed.curStroke); ed.curStroke = null; };
+    const endStroke = (e) => {
+      if (pinch) { if (!e || !e.touches || !e.touches.length) pinch = null; return; }
+      if (ed.curStroke && ed.curStroke.pts.length) ed.strokes.push(ed.curStroke); ed.curStroke = null;
+    };
     canvas.addEventListener("touchend", endStroke, { passive: true });
     canvas.addEventListener("touchcancel", endStroke, { passive: true });
     // mouse fallback so this is drivable on a mouse-only dev rig too
     let mdown = false;
-    canvas.addEventListener("mousedown", (e) => { if (ed.tool !== "draw") return; mdown = true; ed.curStroke = { color: ed.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), size: BRUSH_SIZES[ed.sizeIdx], pts: [localPt(e)] }; });
+    canvas.addEventListener("mousedown", (e) => { if (ed.tool !== "draw") return; mdown = true; ed.curStroke = { color: ed.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), size: ed.brushSize, emoji: ed.brushEmoji || undefined, pts: [localPt(e)] }; });
     canvas.addEventListener("mousemove", (e) => { if (!mdown || !ed.curStroke) return; ed.curStroke.pts.push(localPt(e)); redrawDrawCanvas(ed); });
     window.addEventListener("mouseup", () => { if (mdown) { mdown = false; endStroke(); } });
   }
@@ -7474,18 +7696,33 @@
     const backdrop = el("div", "gh-backdrop gh-editor-sticker-backdrop");
     const sheet = el("div", "gh-sheet gh-gif-sheet gh-editor-sticker-sheet");
     sheet.style.display = "none";
+    // Snapchat's sticker drawer: swipe between sections (Bitmoji, emoji, your cut-outs, info stickers)
     sheet.innerHTML = `
       <div class="gh-sheet-grip"></div>
       <div class="gh-gif-tabs">
-        <button class="gh-gif-tab" data-tab="emoji">Emoji</button>
         <button class="gh-gif-tab" data-tab="bitmoji">Bitmoji</button>
+        <button class="gh-gif-tab" data-tab="emoji">Emoji</button>
+        <button class="gh-gif-tab" data-tab="cutouts">Cut-outs</button>
+        <button class="gh-gif-tab" data-tab="info">Info</button>
       </div>
       <div class="gh-gif-body gh-sticker-grid gh-scroll"></div>
     `;
     c.el.append(backdrop, sheet);
-    const s = { backdrop, sheet, body: sheet.querySelector(".gh-gif-body"), tabs: {}, tab: "emoji" };
+    const s = { backdrop, sheet, body: sheet.querySelector(".gh-gif-body"), tabs: {}, tab: "bitmoji" };
     backdrop.addEventListener("click", () => { closeSheetGeneric(backdrop, sheet); setTool(ctx, c, null); });
     for (const b of sheet.querySelectorAll(".gh-gif-tab")) { s.tabs[b.dataset.tab] = b; b.addEventListener("click", () => { haptic("light"); s.tab = b.dataset.tab; renderEditorStickers(ctx, c, s); }); }
+    // swipe left/right on the drawer body to change section
+    let sx = null;
+    s.body.addEventListener("touchstart", (e) => { const t = e.touches && e.touches[0]; sx = t ? { x: t.clientX, y: t.clientY } : null; }, { passive: true });
+    s.body.addEventListener("touchend", (e) => {
+      const t = e.changedTouches && e.changedTouches[0]; if (!sx || !t) return;
+      const dx = t.clientX - sx.x, dy = t.clientY - sx.y; sx = null;
+      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+      const order = ["bitmoji", "emoji", "cutouts", "info"];
+      const i = order.indexOf(s.tab) + (dx < 0 ? 1 : -1);
+      if (i < 0 || i >= order.length) return;
+      haptic("light"); s.tab = order[i]; renderEditorStickers(ctx, c, s);
+    }, { passive: true });
     ed.stickerSheetObj = s;
     return s;
   }
@@ -7494,23 +7731,203 @@
     commitPendingEdits(ctx, c);
     setTool(ctx, c, "sticker");
     const s = ensureStickerSheet(ctx, c);
-    s.tab = "emoji";
+    s.tab = stickerPeople(ctx).me ? "bitmoji" : "emoji";
     openSheetGeneric(s.backdrop, s.sheet);
     renderEditorStickers(ctx, c, s);
   }
   function renderEditorStickers(ctx, c, s) {
     for (const [name, b] of Object.entries(s.tabs)) b.dataset.on = s.tab === name ? "1" : "0";
     s.body.innerHTML = "";
+    s.body.dataset.tab = s.tab;
+    const done = () => { closeSheetGeneric(s.backdrop, s.sheet); setTool(ctx, c, null); };
     if (s.tab === "emoji") {
       for (const em of EMOJI_GRID) {
         const tile = el("button", "gh-sticker-tile gh-press");
         tile.textContent = em;
-        tile.addEventListener("click", () => { haptic("light"); placeEmojiSticker(ctx, c, em); closeSheetGeneric(s.backdrop, s.sheet); setTool(ctx, c, null); });
+        tile.addEventListener("click", () => { haptic("light"); placeEmojiSticker(ctx, c, em); done(); });
         s.body.appendChild(tile);
       }
+    } else if (s.tab === "cutouts") {
+      renderCutoutTab(ctx, c, s, done);
+    } else if (s.tab === "info") {
+      renderInfoTab(ctx, c, s, done);
     } else {
       renderEditorBitmoji(ctx, c, s);
     }
+  }
+  // ---- image stickers (cut-outs, info stickers) --------------------------------------------------------------
+  async function placeImageSticker(ctx, c, dataUrl, extra) {
+    const ed = c.editor;
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = dataUrl; });
+    const item = Object.assign({ id: "s" + (++ed.itemSeq), type: "sticker", kind: "image", x: ed.viewport.w / 2, y: ed.viewport.h / 2, rotation: 0, scale: 1, img }, extra || {});
+    ed.items.push(item);
+    renderStickerItemEl(ctx, c, item, dataUrl);
+    return item;
+  }
+  // your cut-outs live on this phone only (IndexedDB), newest first, up to 60
+  const CUTOUT_MAX = 60;
+  function cutoutDb() {
+    if (cutoutDb.p) return cutoutDb.p;
+    cutoutDb.p = new Promise((res, rej) => {
+      const r = indexedDB.open("ghost-cutouts", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("items", { keyPath: "id", autoIncrement: true });
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    return cutoutDb.p;
+  }
+  async function cutoutTx(mode, fn) {
+    const db = await cutoutDb();
+    return new Promise((res, rej) => { const tx = db.transaction("items", mode); const st = tx.objectStore("items"); const out = fn(st); tx.oncomplete = () => res(out && out.result !== undefined ? out.result : out); tx.onerror = () => rej(tx.error); });
+  }
+  const cutoutMem = []; // this session's cut-outs if IndexedDB isn't available (private mode / blocked storage)
+  async function listCutouts() { try { const all = await cutoutTx("readonly", (st) => st.getAll()); return (all || []).sort((a, b) => b.at - a.at); } catch (e) { return cutoutMem.slice(); } }
+  async function saveCutout(png) {
+    cutoutMem.unshift({ id: "m" + Date.now(), png, at: Date.now() }); cutoutMem.length = Math.min(cutoutMem.length, CUTOUT_MAX);
+    try {
+      await cutoutTx("readwrite", (st) => st.add({ png, at: Date.now() }));
+      const all = await listCutouts();
+      if (all.length > CUTOUT_MAX) await cutoutTx("readwrite", (st) => { for (const x of all.slice(CUTOUT_MAX)) st.delete(x.id); });
+    } catch (e) { gtrail("cutout save failed " + (e && e.message || e)); }
+  }
+  async function renderCutoutTab(ctx, c, s, done) {
+    const list = await listCutouts();
+    if (s.tab !== "cutouts") return;
+    s.body.innerHTML = "";
+    if (!list.length) { s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Tap the scissors on a photo to cut out a sticker. They'll show up here." })); return; }
+    for (const it of list) {
+      const tile = el("div", "gh-sticker-tile gh-cutout-tile gh-press");
+      const img = el("img"); img.src = it.png; img.alt = ""; tile.appendChild(img);
+      const del = el("button", "gh-cutout-del gh-hit"); del.appendChild(icon("close", 12)); del.setAttribute("aria-label", "Delete cut-out");
+      del.addEventListener("click", async (e) => { e.stopPropagation(); haptic("light"); const i = cutoutMem.findIndex((x) => x.id === it.id || x.png === it.png); if (i >= 0) cutoutMem.splice(i, 1); await cutoutTx("readwrite", (st) => st.delete(it.id)).catch(() => {}); tile.remove(); });
+      tile.appendChild(del);
+      tile.addEventListener("click", async () => { haptic("light"); done(); await placeImageSticker(ctx, c, it.png).catch(() => {}); });
+      s.body.appendChild(tile);
+    }
+  }
+  // the photo, upright, as JPEG base64 (EXIF orientation applied by drawing it), for the scissors
+  async function editorPhotoB64(ctx, c) {
+    let dataUrl;
+    const src = c.editSource;
+    if (src) {
+      const res = await dgPost(src.type === "vault" ? "vaultFull" : "photoFull", { id: src.id });
+      if (!res || !res.data) throw new Error("no photo");
+      dataUrl = "data:" + (res.mime || "image/jpeg") + ";base64," + res.data;
+    } else {
+      dataUrl = "data:image/jpeg;base64," + await blobToB64(c.captured.blob);
+    }
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = dataUrl; });
+    const k = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight));
+    const cv = document.createElement("canvas");
+    cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k);
+    cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+    const out = cv.toDataURL("image/jpeg", 0.9);
+    return out.slice(out.indexOf(",") + 1);
+  }
+  // Scissors: lift the subject out of the photo (iOS 17 Vision, native "cutout") -> a sticker, saved to Cut-outs
+  async function runScissors(ctx, c) {
+    const ed = c.editor;
+    if (!c.captured || c.captured.kind === "video" || ed.cutting) return;
+    commitPendingEdits(ctx, c);
+    ed.cutting = true; ed.railScissors.dataset.on = "1";
+    ctx.showToast("Cutting out…");
+    try {
+      const png = await dgPost("cutout", { image: await editorPhotoB64(ctx, c) });
+      if (!png) throw new Error("no subject found");
+      const url = "data:image/png;base64," + png;
+      await placeImageSticker(ctx, c, url);
+      saveCutout(url);
+      haptic("success");
+      ctx.showToast("Cut-out added · saved to your stickers");
+    } catch (e) {
+      const m = String(e && e.message || e);
+      ctx.showToast(/iOS 17/.test(m) ? "Cut-outs need iOS 17" : /subject/.test(m) ? "Couldn't find anything to cut out" : "Couldn't cut that out");
+    } finally { ed.cutting = false; ed.railScissors.dataset.on = "0"; }
+  }
+  // ---- info stickers: time, date, weather, location (tap a placed one to change its look) --------------------
+  const WEATHER_EMOJI = (code, day) => code === 0 ? (day ? "\u2600\uFE0F" : "\uD83C\uDF19") : code <= 2 ? (day ? "\u26C5" : "\u2601\uFE0F") : code === 3 ? "\u2601\uFE0F" : code <= 48 ? "\uD83C\uDF2B\uFE0F" : code <= 67 ? "\uD83C\uDF27\uFE0F" : code <= 77 ? "\u2744\uFE0F" : code <= 82 ? "\uD83C\uDF26\uFE0F" : code <= 86 ? "\uD83C\uDF28\uFE0F" : "\u26C8\uFE0F";
+  function useFahrenheit() { try { return /US|LR|MM|BS|BZ|KY|PW/.test((navigator.language || "en-US").split("-")[1] || "US"); } catch (e) { return true; } }
+  function infoText(info) {
+    const d = new Date(), k = info.kind, w = info.data || {};
+    if (k === "time") return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    if (k === "date") return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }).toUpperCase();
+    if (k === "weather") return WEATHER_EMOJI(w.code || 0, w.isDay !== false) + " " + Math.round(useFahrenheit() ? w.tempF : w.tempC) + "\u00B0";
+    if (k === "location") return "\uD83D\uDCCD " + (w.city || w.place || "Here");
+    return "";
+  }
+  // looks per kind: 0 bold white with shadow, 1 white pill, 2 dark pill (weather/location: yellow pill)
+  function renderInfoSticker(info) {
+    const text = infoText(info), style = info.style || 0;
+    const px = info.kind === "time" && style === 0 ? 64 : 44;
+    const cv = document.createElement("canvas"), g = cv.getContext("2d");
+    const font = `${style === 0 ? 800 : 700} ${px}px -apple-system, "SF Pro Display", sans-serif`;
+    g.font = font;
+    const w = Math.ceil(g.measureText(text).width), padX = style === 0 ? 10 : px * 0.55, padY = style === 0 ? 10 : px * 0.32;
+    cv.width = w + padX * 2; cv.height = Math.ceil(px * 1.25 + padY * 2);
+    g.font = font; g.textAlign = "center"; g.textBaseline = "middle";
+    const cx = cv.width / 2, cy = cv.height / 2;
+    if (style === 0) { g.shadowColor = "rgba(0,0,0,0.45)"; g.shadowBlur = 8; g.shadowOffsetY = 2; g.fillStyle = "#ffffff"; }
+    else {
+      g.fillStyle = style === 1 ? "#ffffff" : (info.kind === "weather" || info.kind === "location") ? SNAP_YELLOW : "rgba(0,0,0,0.78)";
+      roundRectPath(g, 0, 0, cv.width, cv.height, cv.height / 2); g.fill();
+      g.fillStyle = style === 1 || g.fillStyle === SNAP_YELLOW || (info.kind === "weather" || info.kind === "location") ? "#000000" : "#ffffff";
+    }
+    g.fillText(text, cx, cy + px * 0.04);
+    return cv.toDataURL("image/png");
+  }
+  async function placeInfoSticker(ctx, c, kind, data) {
+    const info = { kind, style: 0, data };
+    await placeImageSticker(ctx, c, renderInfoSticker(info), { info });
+  }
+  function cycleInfoSticker(ctx, c, item) {
+    haptic("light");
+    item.info.style = ((item.info.style || 0) + 1) % 3;
+    const url = renderInfoSticker(item.info);
+    const img = new Image(); img.onload = () => { item.img = img; }; img.src = url;
+    const shown = item.el && item.el.querySelector("img"); if (shown) shown.src = url;
+  }
+  function renderInfoTab(ctx, c, s, done) {
+    const grid = el("div", "gh-info-grid");
+    const add = (kind, label, needsPlace) => {
+      const card = el("button", "gh-info-card gh-press");
+      const prev = el("img", "gh-info-prev"); prev.alt = "";
+      const cap = el("div", "gh-info-cap"); cap.textContent = label;
+      card.append(prev, cap);
+      const info = { kind, style: 0, data: null };
+      if (!needsPlace) prev.src = renderInfoSticker(info);
+      else { prev.style.opacity = "0.4"; cap.textContent = label + " · tap to allow location"; }
+      card.addEventListener("click", async () => {
+        haptic("light");
+        let data = null;
+        if (needsPlace) {
+          cap.textContent = "Finding you…";
+          try { data = await dgPost("contextInfo"); } catch (e) { cap.textContent = String(e && e.message || "Location unavailable"); return; }
+          if (!data || (kind === "weather" && data.tempC == null)) { cap.textContent = kind === "weather" ? "Weather unavailable" : "Location unavailable"; return; }
+        }
+        done();
+        placeInfoSticker(ctx, c, kind, data).catch(() => {});
+      });
+      grid.appendChild(card);
+    };
+    add("time", "Time"); add("date", "Date"); add("weather", "Weather", true); add("location", "Location", true);
+    const foot = el("div", "gh-gif-empty gh-info-foot"); foot.textContent = "Tap a sticker on your snap to change its style.";
+    s.body.append(grid, foot);
+  }
+  function openEmojiBrushPicker(ctx, c) {
+    const ed = c.editor;
+    const s = ensureStickerSheet(ctx, c);
+    for (const b of Object.values(s.tabs)) b.dataset.on = "0";
+    s.body.innerHTML = "";
+    s.body.dataset.tab = "brush";
+    const pen = el("button", "gh-sticker-tile gh-press gh-brush-pen"); pen.appendChild(icon("edit", 26)); pen.setAttribute("aria-label", "Normal brush");
+    pen.addEventListener("click", () => { haptic("light"); ed.brushEmoji = null; ed.emojiBrushBtn.innerHTML = ""; ed.emojiBrushBtn.appendChild(icon("emoji", 20)); closeSheetGeneric(s.backdrop, s.sheet); });
+    s.body.appendChild(pen);
+    for (const em of EMOJI_GRID) {
+      const tile = el("button", "gh-sticker-tile gh-press"); tile.textContent = em;
+      tile.addEventListener("click", () => { haptic("light"); ed.brushEmoji = em; ed.emojiBrushBtn.textContent = em; closeSheetGeneric(s.backdrop, s.sheet); });
+      s.body.appendChild(tile);
+    }
+    openSheetGeneric(s.backdrop, s.sheet);
   }
   async function renderEditorBitmoji(ctx, c, s) {
     const p = stickerPeople(ctx);
@@ -7645,6 +8062,7 @@
         if (!isBar() && ed.trashOver) { deleteItem(ctx, c, item); hideTrash(ctx, c); mode = null; return; }
         hideTrash(ctx, c);
         if (!moved && nowMs() - downTime < 350 && item.type === "text") openTextInputFor(ctx, c, item);
+        else if (!moved && nowMs() - downTime < 350 && item.info) cycleInfoSticker(ctx, c, item);
         mode = null;
       } else if (!isBar() && touches.size === 1) {
         start = { x: item.x, y: item.y, touch: [...touches.values()][0] };
@@ -7680,42 +8098,70 @@
   }
   function paintTextItemFinal(octx, item, t, vw) {
     if (!item.text) return;
-    const big = item.style === 1 || item.style === 3;
     const fontPx = Math.max(6, (TEXT_STYLE_PX[item.style] || TEXT_BASE_PX) * item.scale * t.scale);
     const lines = item.text.split("\n");
     octx.save();
     octx.textBaseline = "middle";
-    octx.font = `${big ? 800 : item.style === 0 ? 500 : 700} ${fontPx}px -apple-system, "SF Pro Text", sans-serif`;
-    if (item.style === 0) {
+    octx.font = `${TEXT_WEIGHT[item.style] || 700} ${fontPx}px -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif`;
+    if (item.style === 0) { // the caption bar: full width, 60% black, ~2x the font tall, text centred
       const my = (item.y - t.oy) / t.scale;
       const mLeft = (0 - t.ox) / t.scale, mRight = (vw - t.ox) / t.scale;
-      const lineH = fontPx * 1.3, padY = fontPx * 0.45;
+      const lineH = fontPx * 1.3, padY = fontPx * 0.35;
       const totalH = lines.length * lineH + padY * 2;
-      octx.fillStyle = bgColorFor(item) || "rgba(0,0,0,0.55)";
+      octx.fillStyle = bgColorFor(item);
       octx.fillRect(mLeft, my - totalH / 2, mRight - mLeft, totalH);
       octx.fillStyle = textColorFor(item);
       octx.textAlign = "center";
       let ly = my - totalH / 2 + padY + lineH / 2;
       for (const line of lines) { octx.fillText(line, (mLeft + mRight) / 2, ly); ly += lineH; }
-    } else {
-      const p = viewportToMedia(t, item.x, item.y);
-      octx.translate(p.x, p.y);
-      octx.rotate(item.rotation);
-      const lineH = fontPx * 1.2;
-      const totalH = lines.length * lineH;
-      octx.textAlign = item.style === 3 ? "left" : "center";
-      let maxW = 0; for (const line of lines) maxW = Math.max(maxW, octx.measureText(line).width);
-      if (item.style === 2) {
-        const padX = fontPx * 0.55, padY = fontPx * 0.35;
-        octx.fillStyle = bgColorFor(item) || "#ffffff";
-        roundRectPath(octx, -(maxW + padX * 2) / 2, -(totalH + padY * 2) / 2, maxW + padX * 2, totalH + padY * 2, (totalH + padY * 2) / 2);
+      octx.restore();
+      return;
+    }
+    const p = viewportToMedia(t, item.x, item.y);
+    octx.translate(p.x, p.y);
+    octx.rotate(item.rotation);
+    const lineH = fontPx * 1.2;
+    const totalH = lines.length * lineH;
+    const widths = lines.map((line) => octx.measureText(line).width);
+    const maxW = Math.max(0, ...widths);
+    const align = item.align || "center";
+    // x of each line's left edge inside the block (block is centred on the item's point)
+    const lineLeft = (w) => align === "left" ? -maxW / 2 : align === "right" ? maxW / 2 - w : -w / 2;
+    octx.textAlign = "left";
+    const bg = bgColorFor(item);
+    if (item.style === 2 || item.style === 6) { // one rounded box behind the whole block (label pill / yellow bubble)
+      const padX = fontPx * 0.55, padY = fontPx * 0.35;
+      const bw = maxW + padX * 2, bh = totalH + padY * 2;
+      octx.fillStyle = bg;
+      roundRectPath(octx, -bw / 2, -bh / 2, bw, bh, item.style === 2 ? bh / 2 : fontPx * 0.7);
+      octx.fill();
+      if (item.style === 6) { // the bubble's tail, bottom-left
+        octx.beginPath();
+        octx.moveTo(-bw / 2 + fontPx * 0.7, bh / 2 - 1);
+        octx.lineTo(-bw / 2 + fontPx * 0.35, bh / 2 + fontPx * 0.5);
+        octx.lineTo(-bw / 2 + fontPx * 1.45, bh / 2 - 1);
+        octx.closePath(); octx.fill();
+      }
+    }
+    let ly = -totalH / 2 + lineH / 2;
+    lines.forEach((line, i) => {
+      const x = lineLeft(widths[i]);
+      if ((item.style === 4 || item.style === 5) && line) { // per-line highlight
+        const padX = fontPx * 0.28, padY = fontPx * 0.08;
+        octx.fillStyle = bg;
+        roundRectPath(octx, x - padX, ly - lineH / 2 + padY * 0.5, widths[i] + padX * 2, lineH - padY, fontPx * 0.22);
         octx.fill();
       }
+      if (item.style === 1) { octx.shadowColor = "rgba(0,0,0,0.35)"; octx.shadowBlur = fontPx * 0.12; octx.shadowOffsetY = fontPx * 0.04; }
+      if (item.style === 3) { // outline: a black stroke under the fill
+        octx.lineJoin = "round"; octx.lineWidth = fontPx * 0.16; octx.strokeStyle = "#000000";
+        octx.strokeText(line, x, ly);
+      }
       octx.fillStyle = textColorFor(item);
-      const lx = item.style === 3 ? -maxW / 2 : 0;
-      let ly = -totalH / 2 + lineH / 2;
-      for (const line of lines) { octx.fillText(line, lx, ly); ly += lineH; }
-    }
+      octx.fillText(line, x, ly);
+      octx.shadowColor = "transparent"; octx.shadowBlur = 0; octx.shadowOffsetY = 0;
+      ly += lineH;
+    });
     octx.restore();
   }
   function paintStickerItemFinal(octx, item, t) {
@@ -8395,7 +8841,7 @@
       const kind = item.mediaType === "video" ? "video" : "image";
       if (dest.mode === "snap") {
         try {
-          await api.sendSnap(dest.convIds, blob, { kind, width: item.width, height: item.height, hasAudio: kind === "video", myStory: !!dest.story });
+          await api.sendSnap(dest.convIds, blob, { kind, width: item.width, height: item.height, hasAudio: kind === "video", myStory: !!dest.story, loop: kind === "video" && !!item.loop });
           ok++;
         } catch (e) { failed++; gtrail("gallery snap send failed " + (e && e.message || e)); }
       } else {
@@ -9046,7 +9492,7 @@
     openSendPage(ctx, {
       count: 1,
       onSend: async (dest) => {
-        const item = Object.assign({}, src.item);
+        const item = Object.assign({}, src.item, { loop: !!(c.editor && c.editor.loop) });
         if (c.editor && c.editor.hasEdits()) {
           const overlay = await renderGalOverlayB64(c.editor, item.width, item.height);
           const res = await dgPost(galRenderOp(src), { source: { type: src.type, id: src.id }, overlay, mode: "send" });

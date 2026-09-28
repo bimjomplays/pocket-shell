@@ -851,7 +851,9 @@
     const reactions = safe("message-reactions", () => (md.reactions || []).map((r) => {
       const rc = r.reaction && r.reaction.reactionContent;
       const emoji = (rc && (rc.emoji || REACTION_EMOJI[toNum(rc.intentionType)])) || "\u2764\uFE0F";
-      return { emoji, from: personFor(idOf(r.userId)) || { id: "?", name: "?" } };
+      // intent: Snapchat's own reaction (LOVE 1 ... SALUTE 14), drawn with Snapchat's artwork in the UI
+      const intent = rc && !rc.emoji && REACTION_EMOJI[toNum(rc.intentionType)] ? toNum(rc.intentionType) : undefined;
+      return { emoji, intent, from: personFor(idOf(r.userId)) || { id: "?", name: "?" } };
     }), []);
     const others = (list) => (list || []).map(idOf).filter((x) => x && x !== senderId);
     return {
@@ -1886,7 +1888,7 @@
       // ui.js's renderEditorOutput instead, since a flat raster needs no extra send-path plumbing at all).
       const overlayMedia = video && opts && opts.overlay instanceof Blob ? opts.overlay : undefined;
       const capturedSnap = video
-        ? { media: blob, dimensions, mediaType: "Video", hasAudio: opts && opts.hasAudio === false ? false : true, loopPlayback: false, overlayMedia }
+        ? { media: blob, dimensions, mediaType: "Video", hasAudio: opts && opts.hasAudio === false ? false : true, loopPlayback: !!(opts && opts.loop), overlayMedia }
         : { media: blob, dimensions, mediaType: "Image", hasAudio: false, loopPlayback: false };
       const ids = (Array.isArray(conversationIds) ? conversationIds : [conversationIds]).filter((x) => x && x !== "__story__").map(convIdObj);
       const stories = [];

@@ -35,6 +35,7 @@ targets:
         NSMicrophoneUsageDescription: Ghost uses the microphone for videos and voice notes.
         NSPhotoLibraryUsageDescription: Lets you send photos from your library.
         NSPhotoLibraryAddUsageDescription: Lets you save photos and snaps.
+        NSLocationWhenInUseUsageDescription: Only when you add a weather or location sticker to a snap.
         NSFaceIDUsageDescription: Face ID unlocks My Eyes Only, your private photos in Ghost.
         ITSAppUsesNonExemptEncryption: false
         UIFileSharingEnabled: true

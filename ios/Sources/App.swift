@@ -93,6 +93,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var gallery: GhostGallery?
     private var vault: GhostVault?
     private var notifications: GhostNotifications?
+    private lazy var context = GhostContext()
     // The app switcher cover shows Ghost's own logo - the same picture as the Home Screen icon the user picked
     // (Settings > Appearance > App Icon), as a rounded app-icon tile - instead of the ghost emoji.
     private let shieldLogo = UIImageView()
@@ -808,6 +809,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case let galleryOp where galleryOp.hasPrefix("gallery"): // Ghost's Gallery tab (GalleryLibrary.swift)
             guard let gallery else { return replyHandler(nil, "unavailable") }
             gallery.handle(op: galleryOp, body: body, reply: replyHandler)
+        case "contextInfo": // snap editor weather/location stickers (GhostContext.swift)
+            context.info(reply: replyHandler)
         case "notifyMessage": // new-message notification while in the background (GhostNotifications.swift)
             guard let notifications, let id = body["id"] as? String else { return replyHandler(nil, "unavailable") }
             notifications.post(id: id, title: body["title"] as? String ?? "Ghost", body: body["body"] as? String ?? "New Chat", reply: replyHandler)
