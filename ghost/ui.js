@@ -5826,6 +5826,9 @@
     const v = ctx.viewer;
     clearTimeout(v.timer);
     v.startedAt = nowMs(); v.dur = durMs; v.paused = false;
+    // a chat photo/video opened on its own stays open until you close it (it used to time out like a snap and
+    // throw you back to the chat - device report 2026-09-28); only snaps/stories/sequences advance by themselves
+    if (v.single) return;
     if (!v.single) {
       const fill = v.bars.querySelectorAll(".gh-viewer-bar-fill")[v.idx];
       if (fill) { fill.style.transition = "none"; fill.style.width = "0%"; requestAnimationFrame(() => { fill.classList.add("gh-anim"); fill.style.transitionDuration = durMs + "ms"; fill.style.width = "100%"; }); }
@@ -5852,7 +5855,7 @@
       // A snap-queue video segment resumes on its own (the <video> itself, paused above, just keeps playing) and
       // its 'ended' event is what drives the swap to the next part - a second timer here racing that would double-
       // advance. Everything else (images, queue or not; stories; single/sequence video) keeps the timer-driven step.
-      if (!(v.snapQ && video)) v.timer = setTimeout(() => { if (v.snapQ) advanceSnapQueue(ctx, v.snapQ, v.idx); else viewerStep(ctx, 1); }, remaining);
+      if (!v.single && !(v.snapQ && video)) v.timer = setTimeout(() => { if (v.snapQ) advanceSnapQueue(ctx, v.snapQ, v.idx); else viewerStep(ctx, 1); }, remaining);
       if (!v.single) {
         const fill = v.bars.querySelectorAll(".gh-viewer-bar-fill")[v.idx];
         if (fill) requestAnimationFrame(() => { fill.style.transitionDuration = remaining + "ms"; fill.style.width = "100%"; });

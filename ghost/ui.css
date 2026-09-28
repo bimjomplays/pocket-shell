@@ -2145,3 +2145,7 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 
 /* the colour slider sits under the tool rail (it covered the pencil/sticker buttons), centred on it, like Snapchat */
 .gh-editor-colorbar { top: calc(var(--gh-safe-t) + 300px); bottom: calc(var(--gh-safe-b) + 120px); right: 27px; max-height: 300px; }
+
+/* "typing" under the chat name: the dots had no gap from the word and overlapped its last letter */
+.gh-conv-sub .gh-row-dots { margin-left: 6px; gap: 3px; vertical-align: 1px; }
+.gh-conv-sub .gh-row-dots span { width: 4px; height: 4px; }
