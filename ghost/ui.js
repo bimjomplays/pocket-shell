@@ -5710,7 +5710,7 @@
     if (!targetId) return;
     c.usingUltra = toUltra;
     haptic("light");
-    freezeCurrentFrame(ctx);
+    freezeCurrentFrame(ctx, "lens");
     startCameraStream(ctx, { deviceId: targetId, label: "ultra-switch" }).then(() => {
       c.zoom = 1;
       if (c.pinch) c.pinch = { d0: c.pinch.d0, zoom0: 1 };
@@ -5764,7 +5764,9 @@
     c.el.dataset.locked = "1";
     haptic("medium");
   }
-  function freezeCurrentFrame(ctx) {
+  // kind "flip" (front/back: blurred frame with the flip animation) or "lens" (1x <-> 0.5x: the last frame held
+  // sharp and cross-faded into the new lens - no flip animation, it isn't a different camera to the user)
+  function freezeCurrentFrame(ctx, kind) {
     const c = ctx.camera;
     const v = c.video;
     if (!v || !v.videoWidth) return;
@@ -5775,12 +5777,12 @@
     if (c.facing === "user") { g.translate(cv.width, 0); g.scale(-1, 1); }
     g.drawImage(v, 0, 0);
     g.restore();
-    c.el.dataset.freeze = "1";
+    c.el.dataset.freeze = kind === "lens" ? "lens" : "1";
     c.el.classList.add("gh-cam-flipping");
   }
   function thawFrame(ctx) {
     const c = ctx.camera;
-    if (c.el.dataset.freeze !== "1") return;
+    if (c.el.dataset.freeze !== "1" && c.el.dataset.freeze !== "lens") return;
     c.el.dataset.freeze = "0";
     setTimeout(() => c.el.classList.remove("gh-cam-flipping"), 260);
   }
@@ -6100,25 +6102,33 @@
     // commitTextEditing before the click handler below ever runs (so "tap T again to cycle styles" would
     // instead see editingText already cleared and start a stray new item every time). preventDefault on the
     // pointer-down phase keeps focus exactly where it was; the click still fires normally afterwards.
+    // On iPhone, preventDefault on touchstart also CANCELS the click that would follow (device report 2026-09-27:
+    // "clicking the pencil and the text thing ... does nothing") - so for touch the action runs on touchend itself
+    // (whose preventDefault just stops the synthetic mouse events), and click only serves a real mouse.
     const keepFocus = (e) => e.preventDefault();
-    for (const b of [ed.railText, ed.railDraw, ed.railSticker, ed.railUndo]) {
-      b.addEventListener("mousedown", keepFocus);
-      b.addEventListener("touchstart", keepFocus, { passive: false });
-    }
-    ed.railText.addEventListener("click", () => { haptic("light"); onTextToolTap(ctx, c); });
-    ed.railDraw.addEventListener("click", () => { haptic("light"); toggleDrawTool(ctx, c); });
-    ed.railSticker.addEventListener("click", () => { haptic("light"); openStickerPicker(ctx, c); });
-    ed.railUndo.addEventListener("click", () => { haptic("light"); undoStroke(ctx, c); });
-    // Same focus race as the rail buttons above: tapping the photo to dismiss the keyboard is a plain <div>,
-    // not a focusable element, so its default mousedown would ALSO blur the contenteditable first - meaning
-    // by the time this click handler ran, ed.editingText would already be null (cleared by that implicit
-    // blur's own commitTextEditing call), and the branch below would misread "just committed" as "idle tap"
-    // and start a brand-new stray item on the very same tap. Keeping focus here too means the click handler
-    // is the only thing that ever calls commitTextEditing, so its own state check is reliable.
+    let lastTouchTap = 0;
+    const onTap = (elx, fn) => {
+      let t0 = null;
+      elx.addEventListener("mousedown", keepFocus);
+      elx.addEventListener("touchstart", (e) => { e.preventDefault(); const t = e.touches[0]; t0 = t ? { x: t.clientX, y: t.clientY } : null; }, { passive: false });
+      elx.addEventListener("touchend", (e) => {
+        const t = e.changedTouches && e.changedTouches[0];
+        const start = t0; t0 = null;
+        if (!start || !t || Math.hypot(t.clientX - start.x, t.clientY - start.y) > 12) return;
+        e.preventDefault();
+        lastTouchTap = nowMs();
+        fn({ clientX: t.clientX, clientY: t.clientY });
+      }, { passive: false });
+      elx.addEventListener("click", (e) => { if (nowMs() - lastTouchTap > 600) fn(e); });
+    };
+    onTap(ed.railText, () => { haptic("light"); onTextToolTap(ctx, c); });
+    onTap(ed.railDraw, () => { haptic("light"); toggleDrawTool(ctx, c); });
+    onTap(ed.railSticker, () => { haptic("light"); openStickerPicker(ctx, c); });
+    onTap(ed.railUndo, () => { haptic("light"); undoStroke(ctx, c); });
+    // Tapping the photo: same focus race (its default mousedown/touchstart would blur the caption first, so the
+    // handler would misread "just committed" as "idle tap" and start a stray item) - same tap helper.
     const mediaEl = root.querySelector(".gh-cam-review-media");
-    mediaEl.addEventListener("mousedown", keepFocus);
-    mediaEl.addEventListener("touchstart", keepFocus, { passive: false });
-    mediaEl.addEventListener("click", (e) => {
+    onTap(mediaEl, (e) => {
       if (ed.editingText) { commitTextEditing(ctx, c); return; }
       if (ed.tool) return;
       const r = c.review.getBoundingClientRect();

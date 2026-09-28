@@ -1309,6 +1309,9 @@ input, textarea {
    stream (cached deviceId, so it's fast) warms up underneath */
 .gh-cam-freeze { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; opacity: 0; pointer-events: none; }
 .gh-camera[data-freeze="1"] .gh-cam-freeze { opacity: 1; filter: blur(8px); animation: gh-cam-flip-spin 0.5s ease; }
+/* switching lens (1x <-> 0.5x): hold the last frame sharp, then fade it out over the new lens - no flip */
+.gh-cam-freeze { transition: opacity 0.18s ease; }
+.gh-camera[data-freeze="lens"] .gh-cam-freeze { opacity: 1; filter: none; animation: none; transition: none; }
 @keyframes gh-cam-flip-spin { 0% { transform: scaleX(1); } 45% { transform: scaleX(0.05); } 55% { transform: scaleX(0.05); } 100% { transform: scaleX(1); } }
 
 /* recording timer pill, top center */
