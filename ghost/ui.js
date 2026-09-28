@@ -1241,7 +1241,7 @@
     }, { passive: true });
     list.addEventListener("touchmove", (e) => {
       if (!pulling) return;
-      dy = e.touches[0].clientY - startY;
+      dy = (e.touches[0].clientY - startY) * pagePxToLocal();
       if (dy <= 0) { home.ptr.style.height = "0px"; return; }
       home.ptr.style.height = Math.min(56, dy * 0.5) + "px";
     }, { passive: true });
@@ -3927,7 +3927,9 @@
     }
     conv.stickUntil = nowMs() + 450;
     const mr = conv.messages.getBoundingClientRect(), wr = w.getBoundingClientRect();
-    conv.messages.scrollTop += (wr.top - mr.top) - (mr.height / 2 - wr.height / 2);
+    // mr/wr are in zoomed page px (getBoundingClientRect); scrollTop is in the host's own local CSS px -
+    // scale the page-px delta back down before applying it, or this overshoots by 1/appScale on the phone.
+    conv.messages.scrollTop += ((wr.top - mr.top) - (mr.height / 2 - wr.height / 2)) * pagePxToLocal();
     w.classList.remove("gh-msg-flash"); void w.offsetWidth; w.classList.add("gh-msg-flash");
     if (conv.windowEnd < total) showJump(ctx, true);
     return true;
@@ -4365,11 +4367,15 @@
     }, { passive: false });
     pip.addEventListener("touchend", () => {
       if (!drag) return; drag = null;
-      const W = wrap.clientWidth, H = wrap.clientHeight, r = pip.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
-      const left = r.left - wr.left + r.width / 2 < W / 2, top = r.top - wr.top + r.height / 2 < H / 2;
+      // getBoundingClientRect() is zoomed page px; clientWidth/offsetWidth are the host's own local px - mix
+      // them and the pip snaps to the wrong corner (or the wrong spot) on a zoomed phone.
+      const W = wrap.clientWidth, H = wrap.clientHeight, pw = pip.offsetWidth, ph = pip.offsetHeight;
+      const r = pip.getBoundingClientRect(), wr = wrap.getBoundingClientRect(), k = pageScaleOf(wrap);
+      const pipLeft = (r.left - wr.left) / k, pipTop = (r.top - wr.top) / k;
+      const left = pipLeft + pw / 2 < W / 2, top = pipTop + ph / 2 < H / 2;
       pip.style.transition = "";
-      pip.style.left = left ? "14px" : (W - r.width - 14) + "px";
-      pip.style.top = top ? "calc(var(--gh-safe-t) + 64px)" : (H - r.height - 150) + "px";
+      pip.style.left = left ? "14px" : (W - pw - 14) + "px";
+      pip.style.top = top ? "calc(var(--gh-safe-t) + 64px)" : (H - ph - 150) + "px";
     }, { passive: true });
     pip.addEventListener("click", (e) => { e.stopPropagation(); api.flipCamera().catch(() => {}); }); // tap your picture to flip
     return c;
@@ -5163,7 +5169,7 @@
         wrap.style.transform = `translateY(${Math.max(0, dy) * pagePxToLocal()}px) scale(${clamp(1 - dy / 2000, 0.85, 1)})`;
         wrap.style.opacity = String(clamp(1 - dy / 500, 0.4, 1));
       } else if (mode === "up") {
-        v.media.style.transform = `translateY(${Math.max(-60, dy / 3)}px)`;
+        v.media.style.transform = `translateY(${Math.max(-60, dy * pagePxToLocal() / 3)}px)`;
       }
     }, { passive: true });
     const end = (e) => {
@@ -5743,7 +5749,7 @@
     // getCapabilities(); iOS camera tracks don't currently advertise either, so this stays best-effort and
     // the ring above (always shown) is the feedback that actually reaches the user on this hardware.
     if (caps && caps.pointsOfInterest && caps.focusMode && caps.focusMode.indexOf("single-shot") !== -1) {
-      const nx = clamp(x / rect.width, 0, 1), ny = clamp(y / rect.height, 0, 1);
+      const nx = clamp(x / Math.max(1, c.live.offsetWidth), 0, 1), ny = clamp(y / Math.max(1, c.live.offsetHeight), 0, 1);
       track.applyConstraints({ advanced: [{ focusMode: "single-shot", pointsOfInterest: [{ x: nx, y: ny }] }] }).catch(() => {});
     }
   }
