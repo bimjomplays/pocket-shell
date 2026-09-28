@@ -329,6 +329,13 @@ input, textarea {
   display: flex;
   align-items: center;
 }
+/* while you scroll, the collapsing title resizes the list every frame and iOS moves the sticky bar on its own
+   scrolling thread: for a frame it can sit a pixel or two below the list's top edge, and the chats showed
+   through that thin gap (device 2026-09-28). A strip above the bar covers it (clipped by the list at rest). */
+.gh-search-sticky::before {
+  content: ""; position: absolute; left: 0; right: 0; bottom: calc(100% - 1px); height: 24px;
+  background: var(--gh-bg-list); pointer-events: none;
+}
 .gh-search {
   flex: 1;
   min-width: 0;
@@ -1978,8 +1985,14 @@ input, textarea {
 .gh-link { color: #9cc8ff; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; word-break: break-all; }
 .gh-group[data-me="1"] .gh-link { color: #fff; }
 mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1px; }
-@keyframes gh-flash { 0%, 100% { background: transparent; } 20%, 60% { background: rgba(120, 160, 255, 0.28); background: color-mix(in srgb, var(--gh-accent) 28%, transparent); } }
-.gh-msg-flash { animation: gh-flash 1.4s ease; border-radius: 12px; }
+/* the jumped-to message: a tint across the whole row, over the bubble too (the wrap hugs its bubble, so a
+   background on the wrap itself sat entirely behind the bubble and never showed) */
+@keyframes gh-flash { 0% { opacity: 0; } 12%, 55% { opacity: 1; } 100% { opacity: 0; } }
+.gh-msg-flash::before {
+  content: ""; position: absolute; top: -3px; bottom: -3px; left: -100vw; right: -100vw; z-index: 3; pointer-events: none;
+  background: rgba(120, 160, 255, 0.3); background: color-mix(in srgb, var(--gh-accent) 32%, transparent);
+  opacity: 0; animation: gh-flash 1.6s ease both; animation-delay: var(--gh-flash-delay, 0s);
+}
 .gh-chat-search {
   position: absolute; left: 0; right: 0; top: 0; z-index: 12; background: var(--gh-bg-header);
   padding: calc(var(--gh-safe-t) + 6px) 10px 8px; border-bottom: 0.5px solid var(--gh-divider);
@@ -2437,3 +2450,5 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-dtr-grid .gh-snap-react-cell { height: 78px; flex-direction: column; gap: 4px; }
 .gh-dtr-grid .gh-snap-react-cell[data-on="1"] { background: var(--gh-bg-panel-2); box-shadow: inset 0 0 0 2px var(--gh-accent); }
 .gh-dtr-name { font-size: 11.5px; color: var(--gh-text-secondary); }
+/* editor sticker drawer: a label row spanning the grid (Cut-outs tab: "Favorite Stickers") */
+.gh-sticker-section { grid-column: 1 / -1; padding: 10px 4px 4px; font-size: 13px; font-weight: 600; color: var(--gh-text-secondary); }

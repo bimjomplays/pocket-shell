@@ -1525,7 +1525,22 @@
 
   function meUser() {
     const id = meId();
-    if (id) return personFor(id);
+    if (id) {
+      // publicUsers has friends, not you: your own Bitmoji and name are on auth.me (main.js: 'e.auth.me?.bitmojiAvatarId',
+      // selectors 'e=>e.auth.me'). Without this the sticker sheets said "Your Bitmoji hasn't loaded yet" forever.
+      const u = personFor(id);
+      const am = safe("auth-me", () => { const s = state(); return s && s.auth && s.auth.me; }, null);
+      if (u && am && typeof am === "object") {
+        const avatarId = firstString(am.bitmojiAvatarId, am.bitmoji_avatar_id);
+        if (!u.avatarId && avatarId) {
+          u.avatarId = avatarId;
+          u.bitmojiUrl = u.bitmojiUrl || bitmojiUrl(avatarId, firstString(am.bitmojiSelfieId, am.bitmoji_selfie_id), firstString(am.bitmojiSceneId, am.bitmoji_scene_id));
+        }
+        if (!u.name || u.name === "Unknown") u.name = firstString(am.displayName, am.display_name, am.mutableUsername, am.username) || u.name;
+        if (!u.username) u.username = firstString(am.mutableUsername, am.username);
+      }
+      return u;
+    }
     // Best-effort / low confidence: no single "current user profile" slice was pinned down while reading
     // the bundle (see BRIDGE_NOTES.md). Heuristic: scan top-level state slices for the first flat object
     // that looks like a User by itself (not a map of them) - typically a "profile"/"identity"/"user"-ish

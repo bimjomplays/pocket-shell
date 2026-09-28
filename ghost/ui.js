@@ -1488,7 +1488,11 @@
     });
     screen.querySelector(".gh-reply-bar-close").addEventListener("click", () => { haptic("light"); setReplyTo(ctx, null); });
     conv.jump.addEventListener("click", () => scrollConvToBottom(ctx, true));
-    conv.messages.addEventListener("scroll", () => onConvScroll(ctx), { passive: true });
+    conv.messages.addEventListener("scroll", () => {
+      // any scroll we didn't cause (a finger, or iOS momentum after it lifted) ends paintWindow's anchor hold
+      if (nowMs() >= (conv.stickUntil || 0)) conv._anchor = null;
+      onConvScroll(ctx);
+    }, { passive: true });
     // @mentions: typing "@" + letters offers My AI and (in groups) the people in the chat; picking one inserts
     // "@username " - Snapchat itself turns @username / @myai in the text into real mentions when it sends.
     conv.mentionBox = screen.querySelector(".gh-mention-box");
@@ -1511,9 +1515,9 @@
     screen.querySelector(".gh-conv-header-avatar").addEventListener("click", () => openChatSheet(ctx));
     const touched = () => { conv.userTouched = true; conv.lastUserScrollAt = nowMs(); };
     conv.messages.addEventListener("touchstart", touched, { passive: true });
-    conv.messages.addEventListener("touchmove", touched, { passive: true });
+    conv.messages.addEventListener("touchmove", () => { touched(); conv._anchor = null; }, { passive: true }); // your own scrolling ends paintWindow's anchor hold
     conv.messages.addEventListener("touchend", touched, { passive: true }); // momentum keeps scrolling after the finger lifts
-    conv.messages.addEventListener("wheel", touched, { passive: true });
+    conv.messages.addEventListener("wheel", () => { touched(); conv._anchor = null; }, { passive: true });
     // the list box itself changing size (keyboard, composer growing/shrinking): stay on the newest message
     if (typeof ResizeObserver === "function") new ResizeObserver(() => {
       if (conv.atBottom && ctx.state.currentConvId) conv.messages.scrollTop = conv.messages.scrollHeight;
@@ -1647,6 +1651,7 @@
     conv.unreadBoundaryIndex = null;
     conv.unreadBoundaryComputed = false;
     conv.pinUntil = nowMs() + 4000; conv.userTouched = false; conv.atBottom = true;
+    conv._olderFails = 0; conv._lastLoadOlderAt = 0; conv._anchor = null; clearTimeout(conv._winCheck); // per-chat, not carried over
     conv.pendingUnreadForDivider = (convData && convData.unreadCount) || 0;
     let entry = ctx.state.messagesByConv.get(conversationId);
     if (!entry) {
@@ -1840,16 +1845,29 @@
     if (end === total && total) { const seen = seenRowEl(ctx, all); if (seen) frag.appendChild(seen); }
     // keep what's on screen where it is: swapping every bubble (a new message, a read receipt...) briefly changes
     // the list's height, and the view used to jump up (device 2026-09-27: "sending a message makes me jump up")
+    // Away from the bottom, the first message on screen is the anchor: it stays at the same spot. Keeping only the
+    // distance from the bottom moved everything above a bubble that got taller - reacting to a message made the
+    // chat jump up (device 2026-09-28).
     const mEl = conv.messages, fromBottom = mEl.scrollHeight - mEl.scrollTop, wasBottom = conv.atBottom;
+    const anchor = wasBottom ? null : chatAnchor(mEl);
     conv.stickUntil = nowMs() + 150; // the scroll events our own repaint causes aren't the user scrolling up
     conv.messages.replaceChildren(conv.topSpacer, frag, conv.bottomSpacer);
-    const restore = () => { conv.stickUntil = nowMs() + 150; if (wasBottom) mEl.scrollTop = mEl.scrollHeight; else mEl.scrollTop = Math.max(0, mEl.scrollHeight - fromBottom); };
+    conv._anchor = anchor ? Object.assign(anchor, { until: nowMs() + 1500, top: mEl.scrollTop }) : null;
+    const restore = () => {
+      conv.stickUntil = nowMs() + 150;
+      if (wasBottom) { mEl.scrollTop = mEl.scrollHeight; return; }
+      if (anchor && applyChatAnchor(mEl, anchor)) return;
+      mEl.scrollTop = Math.max(0, mEl.scrollHeight - fromBottom);
+    };
     restore();
-    // photos/stickers/voice notes finish loading after this and grow the list: stay at the bottom if you were
+    // photos/stickers/voice notes finish loading after this and grow the list: stay at the bottom if you were,
+    // otherwise keep the anchor message still (for a moment after the repaint, until you scroll yourself)
     if (typeof ResizeObserver === "function") {
       if (!conv.ro) conv.ro = new ResizeObserver(() => {
         if (!ctx.state.currentConvId) return;
-        if (conv.atBottom || pinnedToBottom(conv)) { conv.messages.scrollTop = conv.messages.scrollHeight; conv.atBottom = true; }
+        if (conv.atBottom || pinnedToBottom(conv)) { conv.messages.scrollTop = conv.messages.scrollHeight; conv.atBottom = true; return; }
+        const an = conv._anchor;
+        if (an && nowMs() < an.until) { conv.stickUntil = nowMs() + 150; applyChatAnchor(conv.messages, an); }
       });
       conv.ro.disconnect();
       for (const child of conv.messages.children) conv.ro.observe(child);
@@ -1865,6 +1883,26 @@
       conv.bottomSpacer.style.height = Math.round(conv.avgHeight * (total - end)) + "px";
       restore();
     });
+  }
+
+  // where a message sits inside the scrolling list, in the list's own CSS px (not zoomed page px)
+  function chatAnchor(mEl) {
+    const k = pageScaleOf(mEl), top = mEl.getBoundingClientRect().top;
+    for (const w of mEl.querySelectorAll(".gh-msg-wrap")) {
+      const r = w.getBoundingClientRect();
+      if (r.bottom > top + 1) return { id: w.dataset.messageId, off: (r.top - top) / k };
+    }
+    return null;
+  }
+  function applyChatAnchor(mEl, an) {
+    if (!an || !an.id) return false;
+    let w = null;
+    for (const x of mEl.querySelectorAll(".gh-msg-wrap")) if (x.dataset.messageId === an.id) { w = x; break; }
+    if (!w) return false;
+    const k = pageScaleOf(mEl), now = (w.getBoundingClientRect().top - mEl.getBoundingClientRect().top) / k;
+    const d = now - an.off;
+    if (Math.abs(d) >= 1) mEl.scrollTop = Math.max(0, mEl.scrollTop + d);
+    return true;
   }
 
   // Read receipts under the newest message. 1:1: "Delivered" / "Opened" under your last message (like Snapchat).
@@ -1951,6 +1989,8 @@
   function messageWrapEl(ctx, m, isMe, isLast) {
     const wrap = el("div", "gh-msg-wrap");
     wrap.dataset.messageId = m.id;
+    const fl = ctx.conv && ctx.conv._flash;
+    if (fl && fl.id === m.id && nowMs() - fl.at < 1500) { wrap.classList.add("gh-msg-flash"); wrap.style.setProperty("--gh-flash-delay", -Math.round(nowMs() - fl.at) + "ms"); }
     if (m.retained) wrap.dataset.retained = "1";
     const swipe = el("div", "gh-msg-swipe");
     const hint = el("div", "gh-reply-hint");
@@ -2723,7 +2763,10 @@
     // to the top for a moment; that used to count as "you scrolled up", which revealed + fetched older
     // messages and kept you up there (device 2026-09-27: "jumps me way far up"). Until you touch the list
     // yourself, the chat stays pinned to the newest message instead.
-    if (pinnedToBottom(conv) || nowMs() < (conv.stickUntil || 0)) return; // (a repaint, not the user scrolling)
+    if (pinnedToBottom(conv)) return;
+    // (a repaint, not the user scrolling) - look again once it's over: a flick that ends at the very top fires no
+    // more scroll events, and older messages then never loaded until you scrolled again (device 2026-09-28)
+    if (nowMs() < (conv.stickUntil || 0)) { scheduleWindowCheck(ctx, conv.stickUntil - nowMs() + 30); return; }
     if (m.scrollTop < 240) {
       // Sliding the LOCAL window back (more already-fetched messages to reveal) and fetching MORE history
       // from the bridge (loadOlder) are two different things that both happen "near the top" - a freshly
@@ -2741,6 +2784,11 @@
       paintWindow(ctx, conv);
     }
   }
+  function scheduleWindowCheck(ctx, ms) {
+    const conv = ctx.conv, id = ctx.state.currentConvId;
+    clearTimeout(conv._winCheck);
+    conv._winCheck = setTimeout(() => { if (id && ctx.state.currentConvId === id) handleWindowScroll(ctx); }, Math.max(0, ms));
+  }
   async function loadOlderMessages(ctx) {
     const conv = ctx.conv;
     const convId = ctx.state.currentConvId;
@@ -2749,12 +2797,13 @@
     // this repeatedly within the same second (each near-top scroll event asking for another fetch+repaint the
     // instant the previous one resolves), which costs far more than any single call - measured on the
     // scripted-scroll perf rig (2026-09-27, after fixing the bug that used to keep this from firing at all).
-    if (conv._lastLoadOlderAt && Date.now() - conv._lastLoadOlderAt < 600) return;
+    if (conv._lastLoadOlderAt && Date.now() - conv._lastLoadOlderAt < 600) { scheduleWindowCheck(ctx, 620 - (Date.now() - conv._lastLoadOlderAt)); return; }
     conv._lastLoadOlderAt = Date.now();
     conv._loadingOlder = true;
     const beforeHeight = conv.messages.scrollHeight;
     try {
-      const res = await api.loadOlder(convId);
+      // a fetch that never answers used to leave _loadingOlder set, and nothing older loaded again in any chat
+      const res = await Promise.race([api.loadOlder(convId), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 15000))]);
       const prevEntry = ctx.state.messagesByConv.get(convId) || { messages: [], hasMore: true };
       const prevTotal = prevEntry.messages.length;
       let msgs = res.messages || prevEntry.messages;
@@ -2792,14 +2841,20 @@
         if (conv.windowEnd - conv.windowStart > CHUNK * 4) conv.windowEnd = conv.windowStart + CHUNK * 4; // backstop
       }
       renderMessageList(ctx, conv, entry, {}); // (paintWindow keeps the view where it was as the older messages appear above)
-    } catch (e) { /* leave as-is; a manual pull will retry */ }
+      conv._olderFails = 0;
+      conv._loadingOlder = false;
+      if (added > 0) scheduleWindowCheck(ctx, 650); // still near the top (a short page): keep going
+      return;
+    } catch (e) { conv._olderFails = (conv._olderFails || 0) + 1; }
     conv._loadingOlder = false;
+    if (ctx.state.currentConvId === convId && conv._olderFails < 3) scheduleWindowCheck(ctx, 1500);
   }
 
   function scrollConvToBottom(ctx, animate) {
     const m = ctx.conv.messages;
     if (animate) m.scrollTo({ top: m.scrollHeight, behavior: "smooth" });
     else m.scrollTop = m.scrollHeight;
+    ctx.conv._anchor = null;
     showJump(ctx, false);
   }
   function showJump(ctx, show) { ctx.conv.jump.dataset.show = show ? "1" : "0"; }
@@ -3181,6 +3236,62 @@
     return kind === "thumb" ? ("ghostphoto://thumb/" + encodeURIComponent(id) + "?s=" + size) : ("ghostphoto://full/" + encodeURIComponent(id));
   }
 
+  // On the phone WebKit blocks every ghostphoto:// / ghostvault:// load from the https page as mixed content
+  // (<img> and <video> too, not only fetch() - the Gallery showed grey tiles), so the bytes come over the "dg"
+  // channel instead (App.swift "asset" -> NativeAsset.swift runs the same scheme handlers) and become
+  // same-origin blob: URLs. Anything else (the rigs' data: URL overrides) is used as-is.
+  const NATIVE_ASSET_RE = /^ghost(photo|vault):/;
+  const NATIVE_CHUNK = 8 * 1024 * 1024;
+  function hasNativeDg() {
+    try { return !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.dg); } catch (e) { return false; }
+  }
+  async function nativeAssetBlob(url, chunked) {
+    if (!chunked) {
+      const r = await dgPost("asset", { url });
+      if (!r || typeof r.body !== "string") throw new Error("no data");
+      return b64ToBlob(r.body, r.type || "image/jpeg");
+    }
+    // videos: explicit Ranges, 8 MB per round trip, stitched into one Blob
+    const parts = [];
+    let pos = 0, total = Infinity, type = "";
+    while (pos < total) {
+      const r = await dgPost("asset", { url, range: "bytes=" + pos + "-" + (pos + NATIVE_CHUNK - 1) });
+      if (!r || typeof r.body !== "string") throw new Error("no data");
+      type = type || r.type || "";
+      const part = b64ToBlob(r.body, "");
+      if (!part.size) break;
+      parts.push(part);
+      const m = /\/(\d+)\s*$/.exec(r.range || "");
+      pos += part.size;
+      total = m ? +m[1] : pos; // no Content-Range: the whole file came in one answer
+    }
+    return new Blob(parts, { type: type || "video/mp4" });
+  }
+  // Sets an <img>/<video> to a native asset. Images revoke their blob: URL once decoded; videos keep it until
+  // clearNativeSrc (called wherever the element is torn down). A newer set/clear cancels a pending load.
+  function setNativeSrc(media, url) {
+    clearNativeSrc(media);
+    if (!NATIVE_ASSET_RE.test(url) || !hasNativeDg()) { media.src = url; return; }
+    const tok = media._nsTok;
+    const isVideo = media.tagName === "VIDEO";
+    nativeAssetBlob(url, isVideo).then((blob) => {
+      if (media._nsTok !== tok) return;
+      const u = URL.createObjectURL(blob);
+      media._nsUrl = u;
+      if (!isVideo) {
+        const rv = () => { if (media._nsUrl === u) { URL.revokeObjectURL(u); media._nsUrl = null; } };
+        media.addEventListener("load", rv, { once: true });
+        media.addEventListener("error", rv, { once: true });
+      }
+      media.src = u;
+    }, () => { if (media._nsTok === tok) media.dispatchEvent(new Event("error")); });
+  }
+  function clearNativeSrc(media) {
+    if (!media) return;
+    media._nsTok = (media._nsTok || 0) + 1;
+    if (media._nsUrl) { URL.revokeObjectURL(media._nsUrl); media._nsUrl = null; }
+  }
+
   function buildPhotoSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
     const sheet = el("div", "gh-sheet gh-photo-sheet"); sheet.style.display = "none";
@@ -3293,14 +3404,15 @@
     const item = p.items[index];
     if (!item) return;
     p.expandedIndex = index;
+    p.preview.body.querySelectorAll("img,video").forEach(clearNativeSrc);
     p.preview.body.innerHTML = "";
     const src = pickerAssetUrl("full", item.id);
     let mediaEl;
     if (item.mediaType === "video") {
       mediaEl = el("video", "gh-photo-preview-media");
-      mediaEl.src = src; mediaEl.controls = true; mediaEl.playsInline = true; mediaEl.autoplay = true;
+      setNativeSrc(mediaEl, src); mediaEl.controls = true; mediaEl.playsInline = true; mediaEl.autoplay = true;
     } else {
-      mediaEl = el("img", "gh-photo-preview-media"); mediaEl.alt = ""; mediaEl.src = src;
+      mediaEl = el("img", "gh-photo-preview-media"); mediaEl.alt = ""; setNativeSrc(mediaEl, src);
     }
     p.preview.body.appendChild(mediaEl);
     paintPreviewSelectBadge(ctx);
@@ -3521,7 +3633,7 @@
     // (device/rig finding, 2026-09-28). tile._settleLoad is idempotent, so if the event fires anyway later
     // it's a harmless no-op instead of double-freeing the slot.
     if (tile._settleLoad) tile._settleLoad();
-    if (tile._img) { tile._img.removeAttribute("src"); tile._img.remove(); tile._img = null; }
+    if (tile._img) { clearNativeSrc(tile._img); tile._img.removeAttribute("src"); tile._img.remove(); tile._img = null; }
   }
   function queuePickerThumb(ctx, tile, item) {
     const p = ctx.picker;
@@ -3539,7 +3651,7 @@
         img.addEventListener("error", done, { once: true });
         tile._img = img;
         tile.insertBefore(img, tile.firstChild);
-        img.src = pickerAssetUrl("thumb", item.id, 300);
+        setNativeSrc(img, pickerAssetUrl("thumb", item.id, 300));
       },
     });
     pumpPickerLoads(ctx);
@@ -4692,6 +4804,11 @@
     // mr/wr are in zoomed page px (getBoundingClientRect); scrollTop is in the host's own local CSS px -
     // scale the page-px delta back down before applying it, or this overshoots by 1/appScale on the phone.
     conv.messages.scrollTop += ((wr.top - mr.top) - (mr.height / 2 - wr.height / 2)) * pagePxToLocal();
+    // photos loading around it keep the jumped-to message where it landed (paintWindow's anchor was the old view)
+    { const k = pageScaleOf(conv.messages); conv._anchor = { id, off: (w.getBoundingClientRect().top - conv.messages.getBoundingClientRect().top) / k, until: nowMs() + 1500 }; }
+    // a repaint right after this (the scroll itself, a receipt...) replaces the bubble: messageWrapEl puts the
+    // flash back on the new one, carried on where it was (conv._flash)
+    conv._flash = { id, at: nowMs() };
     w.classList.remove("gh-msg-flash"); void w.offsetWidth; w.classList.add("gh-msg-flash");
     if (conv.windowEnd < total) showJump(ctx, true);
     return true;
@@ -5494,15 +5611,19 @@
     const friend = !conv.isGroup && conv.participants && conv.participants[0];
     return { me: me.avatarId, friend: friend && friend.avatarId, friendName: friend && (friend.name || "").split(" ")[0] };
   }
+  // "me" arrives with the login event, often before Snapchat has loaded profiles - ask again when it's missing
+  async function ensureMyBitmoji(ctx) {
+    let p = stickerPeople(ctx);
+    if (!p.me) {
+      try { const st = await api.status(); if (st && st.me) ctx.state.me = Object.assign({}, ctx.state.me || {}, st.me); } catch (e) {}
+      p = stickerPeople(ctx);
+    }
+    return p;
+  }
   async function openStickerSheet(ctx) {
     haptic();
     const s = ctx.stickerSheet;
-    let p = stickerPeople(ctx);
-    if (!p.me) {
-      // "me" arrives with the login event, often before Snapchat has loaded profiles - ask again now
-      try { const st = await api.status(); if (st && st.me) ctx.state.me = st.me; } catch (e) {}
-      p = stickerPeople(ctx);
-    }
+    const p = await ensureMyBitmoji(ctx);
     if (!p.me) { ctx.showToast("Your Bitmoji hasn't loaded yet"); return; }
     s.query = ""; s.input.value = "";
     const recents = (await storage.get("ghostStickerRecents", [])).length + (await storage.get("ghostGifRecents", [])).length;
@@ -5608,6 +5729,7 @@
       items = [...stamp(await storage.get("ghostStickerRecents", [])).map((x) => ({ kind: "bitmoji", x })),
                ...stamp(await storage.get("ghostGifRecents", [])).map((x) => ({ kind: "gif", x }))];
     } else {
+      await migrateCutoutFavs().catch(() => {});
       items = [...stamp(await storage.get("ghostStickerFavs", [])).map((x) => ({ kind: "raw", x })),
                ...stamp(await storage.get("ghostBitmojiFavs", [])).map((x) => ({ kind: "bitmoji", x })),
                ...stamp(await storage.get("ghostGifFavs", [])).map((x) => ({ kind: "gif", x }))];
@@ -5643,7 +5765,13 @@
         send = async () => {
           const convId = ctx.state.currentConvId; if (!convId) return;
           haptic(); closeSheetGeneric(s.backdrop, s.sheet);
-          try { await api.sendStickerRaw(convId, x.content, x.contentType); } catch (e) { gtrail("saved sticker send failed " + (e && e.message)); ctx.showToast("Couldn't send that sticker"); }
+          try {
+            if (x.cutout) { // your own cut-out: Snapchat Web can't make new stickers, so it goes as a transparent picture
+              const b = await wallDB.get("favsticker:" + x.id);
+              if (!b) throw new Error("cut-out missing");
+              await api.sendMedia(convId, new File([b], "sticker.png", { type: b.type || "image/png" }), { kind: "image" });
+            } else await api.sendStickerRaw(convId, x.content, x.contentType);
+          } catch (e) { gtrail("saved sticker send failed " + (e && e.message)); ctx.showToast("Couldn't send that sticker"); }
         };
         hold = async () => {
           const cur = await storage.get("ghostStickerFavs", []);
@@ -6211,8 +6339,8 @@
       // A snap-queue video segment resumes on its own (the <video> itself, paused above, just keeps playing) and
       // its 'ended' event is what drives the swap to the next part - a second timer here racing that would double-
       // advance. Everything else (images, queue or not; stories; single/sequence video) keeps the timer-driven step.
-      if (!v.single && !(v.snapQ && video)) v.timer = setTimeout(() => { if (v.snapQ) advanceSnapQueue(ctx, v.snapQ, v.idx); else viewerStep(ctx, 1); }, remaining);
-      if (!v.single) {
+      if (!v.single && !(v.snapQ && video) && !(v.snapQ && v.snapQ.mode === "saved")) v.timer = setTimeout(() => { if (v.snapQ) advanceSnapQueue(ctx, v.snapQ, v.idx); else viewerStep(ctx, 1); }, remaining);
+      if (!v.single && !(v.snapQ && v.snapQ.mode === "saved" && !video)) {
         const fill = v.bars.querySelectorAll(".gh-viewer-bar-fill")[v.idx];
         if (fill) requestAnimationFrame(() => { fill.style.transitionDuration = remaining + "ms"; fill.style.width = "100%"; });
       }
@@ -6385,6 +6513,9 @@
     v.media.appendChild(img);
     if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); }
     v.currentRef = ref;
+    // a saved snap stays up until you tap or close it, like Snapchat (it used to close itself after 5 s -
+    // device 2026-09-28); new/replayed snaps still move on by themselves
+    if (q.mode === "saved") { startSnapSegmentTimer(ctx, idx, 0, null); clearTimeout(v.timer); return; }
     startSnapSegmentTimer(ctx, idx, 5000, () => advanceSnapQueue(ctx, q, idx));
   }
   function showSnapVideo(ctx, q, idx, ref, video) {
@@ -6400,6 +6531,10 @@
       const nextIdx = idx + 1;
       const pre = q.preloaded.get(nextIdx);
       if (pre && pre.video) { q.preloaded.delete(nextIdx); v.idx = nextIdx; showSnapVideo(ctx, q, nextIdx, pre.ref, pre.video); }
+      else if (q.mode === "saved" && nextIdx >= q.msgs.length) { // saved: loop instead of closing
+        if (q.msgs.length === 1) showSnapVideo(ctx, q, idx, ref, video);
+        else paintSnapQueueItem(ctx, 0);
+      }
       else advanceSnapQueue(ctx, q, idx);
     }, { once: true });
     // 'ended' is the real advance signal; the timer here only drives the visual bar fill (no onExpire - see the
@@ -6609,6 +6744,39 @@
       tapTimer = setTimeout(() => { if (!c.pinch) tapToFocus(ctx, x, y); }, 300);
     });
     c.live.addEventListener("touchstart", (e) => { if (e.touches.length === 2) { clearTimeout(tapTimer); beginPinch(ctx, e); } }, { passive: true });
+    // swipe down on the preview = close the camera, back to where you opened it (the chat), following the finger
+    let pull = null;
+    const endPull = (close) => {
+      if (!pull) return;
+      const p = pull; pull = null;
+      if (!p.active) return;
+      c.el.style.transition = "";
+      c.el.style.transform = ""; // the stylesheet animates it home, or off the bottom once closeCamera runs
+      if (close) { haptic("light"); closeCamera(ctx); }
+    };
+    c.live.addEventListener("touchstart", (e) => {
+      if (e.touches.length !== 1 || c.recording || c.selfTimerRunning || c.el.dataset.shown !== "1") { endPull(false); return; }
+      const t = e.touches[0];
+      pull = { x0: t.clientX, y0: t.clientY, k: pageScaleOf(c.el) || 1, active: false, dy: 0, lastY: t.clientY, lastT: nowMs(), v: 0 };
+    }, { passive: true });
+    c.live.addEventListener("touchmove", (e) => {
+      if (!pull || e.touches.length !== 1 || c.pinch) { endPull(false); return; }
+      const t = e.touches[0], dx = t.clientX - pull.x0, dy = t.clientY - pull.y0, now = nowMs();
+      if (!pull.active) {
+        if (dy > 12 && dy > Math.abs(dx) * 1.3) { pull.active = true; clearTimeout(tapTimer); c.el.style.transition = "none"; }
+        else if (Math.abs(dx) > 16 || dy < -16) { pull = null; return; }
+        else return;
+      }
+      e.preventDefault();
+      pull.dy = Math.max(0, dy / pull.k);
+      if (now - pull.lastT >= 8) { // (samples closer together than that are too noisy for a speed)
+        pull.v = 0.8 * ((t.clientY - pull.lastY) / pull.k / (now - pull.lastT)) + 0.2 * pull.v;
+        pull.lastY = t.clientY; pull.lastT = now;
+      }
+      c.el.style.transform = "translateY(" + pull.dy.toFixed(1) + "px)";
+    }, { passive: false });
+    c.live.addEventListener("touchend", () => { if (pull) endPull(pull.active && (pull.dy > 110 || (pull.v > 0.6 && pull.dy > 50 && nowMs() - pull.lastT < 100))); }, { passive: true });
+    c.live.addEventListener("touchcancel", () => endPull(false), { passive: true });
     c.live.addEventListener("touchmove", (e) => { if (c.pinch && e.touches.length === 2) { e.preventDefault(); movePinch(ctx, e); } }, { passive: false });
     c.live.addEventListener("touchend", (e) => { if (c.pinch && e.touches.length < 2) endPinch(ctx); }, { passive: true });
     c.live.addEventListener("touchcancel", () => endPinch(ctx), { passive: true });
@@ -6770,7 +6938,8 @@
     // digital-zoom path below.
     if (caps && caps.zoom && typeof caps.zoom.max === "number") {
       c.zoomHardware = true;
-      c.zoomMin = caps.zoom.min || 1; c.zoomMax = caps.zoom.max;
+      c.zoomMin = caps.zoom.min || 1; c.zoomMax = caps.zoom.max; c.zoomStep = caps.zoom.step || 0; c.hwApplied = 1;
+      gtrail("camera hardware zoom " + c.zoomMin + "-" + c.zoomMax + " step " + c.zoomStep);
       c.zoom = clamp(c.zoom || 1, c.zoomMin, c.zoomMax);
       throttledApplyHardwareZoom(ctx);
     } else {
@@ -6913,35 +7082,53 @@
     const display = c.usingUltra ? c.zoom * 0.5 : c.zoom;
     c.zoomPill.textContent = display.toFixed(1) + "x";
     if (!c.video) return;
-    if (c.zoomHardware) { c.video.style.transform = ""; return; }
     // Digital zoom: scale (and later crop, in captureFrame) the preview. For video we deliberately only
     // zoom the live preview, not the recorded output - re-rendering every frame through a canvas into
     // MediaRecorder to bake the crop in would cost a per-frame draw for the whole clip's length, which is
     // exactly the "hurts recording" case the brief says to avoid; a still photo pays that cost exactly once.
-    // eased toward the target every frame instead of jumping with each touch event (device feedback: "needs to
-    // be smoother between different zooms")
+    // The shown zoom glides toward the target every frame (time-based, so 60 and 120 Hz feel the same), and
+    // is drawn at full precision - no 0.1x steps (device feedback 2026-09-28: "more in-between zooms").
+    // With hardware zoom (if WebKit ever offers it) the camera gets the nearest step at or below the shown
+    // zoom and a CSS scale fills in the rest, so the picture still moves continuously between its steps.
     if (!c.zoomAnim) {
-      const step = () => {
+      let last = 0;
+      const step = (t) => {
         const v = c.video;
         if (!v) { c.zoomAnim = 0; return; }
-        const cur = c.zoomShown || 1, target = c.zoomHardware ? 1 : c.zoom;
-        const next = Math.abs(target - cur) < 0.004 ? target : cur + (target - cur) * 0.3;
+        const dt = last ? Math.min(50, t - last) : 16.7; last = t;
+        const cur = c.zoomShown || 1, target = c.zoom;
+        const k = 1 - Math.pow(1 - 0.28, dt / 16.7);
+        const next = Math.abs(target - cur) < 0.0015 ? target : cur + (target - cur) * k;
         c.zoomShown = next;
-        v.style.transform = next === 1 && target === 1 ? "" : (c.facing === "user" ? "scaleX(-1) " : "") + "scale(" + next.toFixed(4) + ")";
+        let scale = next;
+        if (c.zoomHardware) { driveHardwareZoom(ctx, next); scale = Math.max(1, next / (c.hwApplied || 1)); }
+        v.style.transform = Math.abs(scale - 1) < 0.0005 ? "" : (c.facing === "user" ? "scaleX(-1) " : "") + "scale(" + scale.toFixed(4) + ")";
         c.zoomAnim = next === target ? 0 : requestAnimationFrame(step);
       };
       c.zoomAnim = requestAnimationFrame(step);
     }
   }
-  function throttledApplyHardwareZoom(ctx) {
+  // hardware zoom: at most one applyConstraints in flight, always the newest wanted value; the CSS fill only
+  // switches to the new base once a frame at that zoom has actually been drawn
+  function driveHardwareZoom(ctx, shown) {
     const c = ctx.camera;
-    if (c._zoomTimer) return;
-    c._zoomTimer = setTimeout(() => {
-      c._zoomTimer = null;
-      const track = c.stream && c.stream.getVideoTracks()[0];
-      if (track) track.applyConstraints({ advanced: [{ zoom: c.zoom }] }).catch((e) => gtrail("zoom constraint failed " + (e && e.message)));
-    }, 60);
+    const stepSize = c.zoomStep > 0 ? c.zoomStep : 0.01;
+    const want = clamp(Math.floor(shown / stepSize + 1e-6) * stepSize, c.zoomMin, c.zoomMax);
+    if (c._hwBusy || Math.abs(want - (c.hwApplied || 1)) < 1e-6) return;
+    const track = c.stream && c.stream.getVideoTracks()[0];
+    if (!track) return;
+    c._hwBusy = true;
+    const done = () => {
+      c._hwBusy = false;
+      if (!c.zoomAnim && c.video) applyZoomVisual(ctx); // settle onto the final step
+    };
+    track.applyConstraints({ advanced: [{ zoom: want }] }).then(() => {
+      const v = c.video;
+      const set = () => { c.hwApplied = want; done(); };
+      if (v && typeof v.requestVideoFrameCallback === "function") v.requestVideoFrameCallback(() => set()); else set();
+    }, (e) => { gtrail("zoom constraint failed " + (e && e.message)); done(); });
   }
+  function throttledApplyHardwareZoom(ctx) { applyZoomVisual(ctx); }
   function showZoomPill(ctx) {
     const c = ctx.camera;
     clearTimeout(c._zoomPillTimer);
@@ -7012,7 +7199,8 @@
     const W = v.videoWidth, H = v.videoHeight, target = c.live.clientWidth / Math.max(1, c.live.clientHeight);
     let sw = W, sh = H;
     if (W / H > target) sw = Math.round(H * target); else sh = Math.round(W / target);
-    if (!c.zoomHardware && c.zoom > 1) { sw = Math.round(sw / c.zoom); sh = Math.round(sh / c.zoom); }
+    const crop = c.zoomHardware ? (c.zoomShown || 1) / (c.hwApplied || 1) : c.zoom;
+    if (crop > 1) { sw = Math.round(sw / crop); sh = Math.round(sh / crop); }
     const canvas = document.createElement("canvas");
     canvas.width = sw; canvas.height = sh;
     const g = canvas.getContext("2d");
@@ -7522,7 +7710,27 @@
     ed.styleRow = row; ed.alignBtn = align;
     const hold = (e) => e.preventDefault(); // keep the caption focused (see keepFocus in buildSnapEditor)
     row.addEventListener("mousedown", hold);
-    row.addEventListener("touchstart", (e) => { if (e.target.closest("button")) e.preventDefault(); }, { passive: false });
+    // touchstart has to be cancelled (a real touch would take focus from the caption and drop the keyboard), and
+    // that also cancels the row's own sideways scrolling - so a drag scrolls it here, with a little momentum
+    // (device 2026-09-28: the looks after "Light" were cut off and unreachable). A tap still picks a look.
+    let drag = null, glide = 0;
+    row.addEventListener("touchstart", (e) => {
+      if (!e.touches || !e.touches[0]) return;
+      e.preventDefault();
+      cancelAnimationFrame(glide);
+      const t = e.touches[0];
+      drag = { x0: t.clientX, left0: row.scrollLeft, k: pageScaleOf(row) || 1, moved: false, lastX: t.clientX, lastT: nowMs(), v: 0 };
+    }, { passive: false });
+    row.addEventListener("touchmove", (e) => {
+      if (!drag || !e.touches || !e.touches[0]) return;
+      e.preventDefault();
+      const t = e.touches[0], now = nowMs();
+      if (Math.abs(t.clientX - drag.x0) > 6) drag.moved = true;
+      row.scrollLeft = drag.left0 - (t.clientX - drag.x0) / drag.k;
+      const dt = Math.max(1, now - drag.lastT);
+      drag.v = 0.8 * ((drag.lastX - t.clientX) / drag.k / dt) + 0.2 * drag.v;
+      drag.lastX = t.clientX; drag.lastT = now;
+    }, { passive: false });
     const act = (target) => {
       const item = ed.editingText; if (!item) return;
       const chip = target.closest(".gh-editor-stylechip");
@@ -7533,7 +7741,20 @@
         paintTextInputStyle(ed, item);
       }
     };
-    row.addEventListener("touchend", (e) => { if (e.target.closest("button")) { e.preventDefault(); act(e.target); } }, { passive: false });
+    row.addEventListener("touchend", (e) => {
+      const d = drag; drag = null;
+      if (!d) return;
+      e.preventDefault();
+      if (!d.moved) { act(e.target); return; }
+      let v = nowMs() - d.lastT > 80 ? 0 : d.v, last = nowMs(); // px per ms
+      const step = () => {
+        const now = nowMs(), dt = Math.min(40, now - last); last = now;
+        row.scrollLeft += v * dt; v *= Math.pow(0.95, dt / 16.7);
+        if (Math.abs(v) > 0.02) glide = requestAnimationFrame(step);
+      };
+      if (Math.abs(v) > 0.05) glide = requestAnimationFrame(step);
+    }, { passive: false });
+    row.addEventListener("touchcancel", () => { drag = null; });
     row.addEventListener("click", (e) => act(e.target));
   }
   function renderTextItemEl(ctx, c, item) {
@@ -7790,25 +8011,85 @@
   const cutoutMem = []; // this session's cut-outs if IndexedDB isn't available (private mode / blocked storage)
   async function listCutouts() { try { const all = await cutoutTx("readonly", (st) => st.getAll()); return (all || []).sort((a, b) => b.at - a.at); } catch (e) { return cutoutMem.slice(); } }
   async function saveCutout(png) {
-    cutoutMem.unshift({ id: "m" + Date.now(), png, at: Date.now() }); cutoutMem.length = Math.min(cutoutMem.length, CUTOUT_MAX);
+    const at = Date.now();
+    cutoutMem.unshift({ id: "m" + at, png, at }); cutoutMem.length = Math.min(cutoutMem.length, CUTOUT_MAX);
+    addCutoutToFavs(png, at).catch((e) => gtrail("cutout fav failed " + (e && e.message || e)));
     try {
-      await cutoutTx("readwrite", (st) => st.add({ png, at: Date.now() }));
+      await cutoutTx("readwrite", (st) => st.add({ png, at }));
       const all = await listCutouts();
       if (all.length > CUTOUT_MAX) await cutoutTx("readwrite", (st) => { for (const x of all.slice(CUTOUT_MAX)) st.delete(x.id); });
     } catch (e) { gtrail("cutout save failed " + (e && e.message || e)); }
+  }
+  // Every cut-out is also one of your Favorite Stickers (the chat sticker sheet's Favorites, sent there as a
+  // transparent picture). Its favorite id comes from its time, so deleting the cut-out removes that favorite too.
+  const cutoutFavId = (at) => "f" + Number(at).toString(36);
+  async function addCutoutToFavs(dataUrl, at, favsIn) {
+    const id = cutoutFavId(at);
+    const favs = favsIn || await storage.get("ghostStickerFavs", []);
+    if (favs.some((x) => x.id === id)) return favs;
+    const blob = await (await fetch(dataUrl)).blob();
+    await wallDB.put("favsticker:" + id, blob);
+    const next = [{ id, cutout: true, t: at }, ...favs].slice(0, 120);
+    if (!favsIn) await storage.set("ghostStickerFavs", next);
+    return next;
+  }
+  // cut-outs made before this existed: into Favorites once
+  async function migrateCutoutFavs() {
+    if (await storage.get("ghostCutoutFavsMigrated", false)) return;
+    let favs = await storage.get("ghostStickerFavs", []);
+    for (const it of (await listCutouts()).slice().reverse()) { try { favs = await addCutoutToFavs(it.png, it.at, favs); } catch (e) {} }
+    favs.sort((a, b) => (b.t || 0) - (a.t || 0));
+    await storage.set("ghostStickerFavs", favs);
+    await storage.set("ghostCutoutFavsMigrated", true);
+  }
+  function blobToDataUrl(blob) {
+    return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result || "")); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
   }
   async function renderCutoutTab(ctx, c, s, done) {
     const list = await listCutouts();
     if (s.tab !== "cutouts") return;
     s.body.innerHTML = "";
-    if (!list.length) { s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Tap the scissors on a photo to cut out a sticker. They'll show up here." })); return; }
+    const favs = (await storage.get("ghostStickerFavs", [])).filter((x) => !x.cutout);
+    const bmFavs = await storage.get("ghostBitmojiFavs", []);
+    if (s.tab !== "cutouts") return;
+    if (!list.length && !favs.length && !bmFavs.length) { s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Tap the scissors on a photo to cut out a sticker. Your cut-outs and Favorite Stickers show up here." })); return; }
+    if (!list.length) s.body.appendChild(Object.assign(el("div", "gh-sticker-section"), { textContent: "Tap the scissors on a photo to make a cut-out" }));
     for (const it of list) {
       const tile = el("div", "gh-sticker-tile gh-cutout-tile gh-press");
       const img = el("img"); img.src = it.png; img.alt = ""; tile.appendChild(img);
       const del = el("button", "gh-cutout-del gh-hit"); del.appendChild(icon("close", 12)); del.setAttribute("aria-label", "Delete cut-out");
-      del.addEventListener("click", async (e) => { e.stopPropagation(); haptic("light"); const i = cutoutMem.findIndex((x) => x.id === it.id || x.png === it.png); if (i >= 0) cutoutMem.splice(i, 1); await cutoutTx("readwrite", (st) => st.delete(it.id)).catch(() => {}); tile.remove(); });
+      del.addEventListener("click", async (e) => {
+        e.stopPropagation(); haptic("light");
+        const i = cutoutMem.findIndex((x) => x.id === it.id || x.png === it.png); if (i >= 0) cutoutMem.splice(i, 1);
+        await cutoutTx("readwrite", (st) => st.delete(it.id)).catch(() => {});
+        if (it.at) { const fid = cutoutFavId(it.at); const cur = await storage.get("ghostStickerFavs", []); if (cur.some((y) => y.id === fid)) { await storage.set("ghostStickerFavs", cur.filter((y) => y.id !== fid)); wallDB.del("favsticker:" + fid); } }
+        tile.remove();
+      });
       tile.appendChild(del);
       tile.addEventListener("click", async () => { haptic("light"); done(); await placeImageSticker(ctx, c, it.png).catch(() => {}); });
+      s.body.appendChild(tile);
+    }
+    // your Favorite Stickers (friends' stickers you saved, favourite Bitmoji), to put on the picture too
+    const p = await ensureMyBitmoji(ctx);
+    if (s.tab !== "cutouts") return;
+    const usable = bmFavs.filter((x) => p.me && (!x.duo || p.friend));
+    if (!favs.length && !usable.length) return;
+    s.body.appendChild(Object.assign(el("div", "gh-sticker-section"), { textContent: "Favorite Stickers" }));
+    for (const x of favs) {
+      const tile = el("button", "gh-sticker-tile gh-press");
+      const img = el("img"); img.alt = ""; tile.appendChild(img);
+      let dataUrl = null;
+      wallDB.get("favsticker:" + x.id).then(async (b) => { if (!b) { tile.remove(); return; } dataUrl = await blobToDataUrl(b); img.src = dataUrl; }).catch(() => tile.remove());
+      tile.addEventListener("click", async () => { if (!dataUrl) return; haptic("light"); done(); await placeImageSticker(ctx, c, dataUrl).catch(() => {}); });
+      s.body.appendChild(tile);
+    }
+    for (const x of usable) {
+      const tile = el("button", "gh-sticker-tile gh-press");
+      const img = el("img"); img.alt = ""; img.loading = "lazy";
+      img.src = stickerUrl(x.c, p.me, x.duo ? p.friend : null);
+      img.addEventListener("error", () => tile.remove(), { once: true });
+      tile.appendChild(img);
+      tile.addEventListener("click", () => { haptic("light"); done(); placeBitmojiSticker(ctx, c, x.c, p.me, x.duo ? p.friend : null); });
       s.body.appendChild(tile);
     }
   }
@@ -7845,7 +8126,7 @@
       await placeImageSticker(ctx, c, url);
       saveCutout(url);
       haptic("success");
-      ctx.showToast("Cut-out added · saved to your stickers");
+      ctx.showToast("Cut-out added · saved to Cut-outs and Favorite Stickers");
     } catch (e) {
       const m = String(e && e.message || e);
       ctx.showToast(/iOS 17/.test(m) ? "Cut-outs need iOS 17" : /subject/.test(m) ? "Couldn't find anything to cut out" : "Couldn't cut that out");
@@ -7937,7 +8218,8 @@
     openSheetGeneric(s.backdrop, s.sheet);
   }
   async function renderEditorBitmoji(ctx, c, s) {
-    const p = stickerPeople(ctx);
+    const p = await ensureMyBitmoji(ctx);
+    if (s.tab !== "bitmoji") return;
     if (!p.me) { s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Your Bitmoji hasn't loaded yet" })); return; }
     s.body.appendChild(el("div", "gh-spinner"));
     let cat;
@@ -7961,9 +8243,9 @@
     ed.items.push(item);
     renderStickerItemEl(ctx, c, item);
   }
-  async function placeBitmojiSticker(ctx, c, comic, meAvatarId) {
+  async function placeBitmojiSticker(ctx, c, comic, meAvatarId, friendAvatarId) {
     const ed = c.editor;
-    const url = stickerUrl(comic, meAvatarId, null);
+    const url = stickerUrl(comic, meAvatarId, friendAvatarId || null);
     const item = { id: "s" + (++ed.itemSeq), type: "sticker", kind: "bitmoji", x: ed.viewport.w / 2, y: ed.viewport.h / 2, rotation: 0, scale: 1, img: null };
     ed.items.push(item);
     renderStickerItemEl(ctx, c, item, url);
@@ -8311,7 +8593,7 @@
           img.addEventListener("error", fin, { once: true });
           tile._img = img;
           tile.insertBefore(img, tile.firstChild);
-          img.src = url;
+          setNativeSrc(img, url);
         },
       });
       pump();
@@ -8319,7 +8601,7 @@
     q.release = (tile) => {
       tile._released = true;
       if (tile._settleLoad) tile._settleLoad();
-      if (tile._img) { tile._img.removeAttribute("src"); tile._img.remove(); tile._img = null; }
+      if (tile._img) { clearNativeSrc(tile._img); tile._img.removeAttribute("src"); tile._img.remove(); tile._img = null; }
     };
     q.reset = () => { q.gen++; q.jobs.length = 0; };
     return q;
@@ -8883,7 +9165,7 @@
       const cover = (yr.items || [])[Math.floor(((yr.items || []).length - 1) / 2)] || (yr.items || [])[0];
       if (cover) {
         const img = el("img", "gh-gal-otd-img"); img.alt = ""; img.decoding = "async";
-        img.src = galAssetUrl("thumb", cover.id, 420);
+        setNativeSrc(img, galAssetUrl("thumb", cover.id, 420));
         card.appendChild(img);
       }
       const label = el("div", "gh-gal-otd-label");
@@ -8928,7 +9210,7 @@
       const row = el("button", "gh-gal-album-row gh-press");
       row.dataset.on = a.id === g.album ? "1" : "0";
       const cov = el("div", "gh-gal-album-cover");
-      if (a.cover) { const img = el("img"); img.alt = ""; img.src = galAssetUrl("thumb", a.cover, 160); cov.appendChild(img); }
+      if (a.cover) { const img = el("img"); img.alt = ""; setNativeSrc(img, galAssetUrl("thumb", a.cover, 160)); cov.appendChild(img); }
       else cov.appendChild(icon(a.kind === "smart-fav" ? "heart" : "gallery", 22));
       const txt = el("div", "gh-gal-album-text");
       const t = el("div", "gh-gal-album-name"); t.textContent = a.title;
@@ -9058,7 +9340,7 @@
   }
   function clearGalSlide(slide) {
     const vid = slide.querySelector("video");
-    if (vid) { try { vid.pause(); } catch (e) {} vid.removeAttribute("src"); try { vid.load(); } catch (e) {} }
+    if (vid) { try { vid.pause(); } catch (e) {} clearNativeSrc(vid); vid.removeAttribute("src"); try { vid.load(); } catch (e) {} }
     slide.innerHTML = ""; slide._id = null; slide._item = null;
   }
   function positionGalSlides(v, dx, animate) {
@@ -9092,10 +9374,10 @@
     slide._id = item.id; slide._item = item;
     const zoom = el("div", "gh-gv-zoom");
     const low = el("img", "gh-gv-img gh-gv-low"); low.alt = ""; low.decoding = "async";
-    low.src = item.vault ? vaultAssetUrl("thumb", item.id) : galAssetUrl("thumb", item.id, 256);
+    setNativeSrc(low, item.vault ? vaultAssetUrl("thumb", item.id) : galAssetUrl("thumb", item.id, 256));
     const hi = el("img", "gh-gv-img"); hi.alt = ""; hi.decoding = "async";
     hi.addEventListener("load", () => { hi.dataset.loaded = "1"; }, { once: true });
-    hi.src = item.vault ? vaultAssetUrl("view", item.id) : galAssetUrl("view", item.id, 2400);
+    setNativeSrc(hi, item.vault ? vaultAssetUrl("view", item.id) : galAssetUrl("view", item.id, 2400));
     zoom.append(low, hi);
     slide.appendChild(zoom);
     if (item.mediaType === "video") {
@@ -9109,7 +9391,7 @@
     if (!item) return;
     if (!active) {
       const vid = slide.querySelector("video");
-      if (vid) { try { vid.pause(); } catch (e) {} vid.removeAttribute("src"); try { vid.load(); } catch (e) {} vid.remove(); slide.dataset.playing = "0"; }
+      if (vid) { try { vid.pause(); } catch (e) {} clearNativeSrc(vid); vid.removeAttribute("src"); try { vid.load(); } catch (e) {} vid.remove(); slide.dataset.playing = "0"; }
       return;
     }
     if (item.mediaType === "video" && !slide.querySelector("video")) startGalVideo(ctx, slide);
@@ -9122,7 +9404,7 @@
     vid.setAttribute("playsinline", "");
     vid.addEventListener("playing", () => { slide.dataset.playing = "1"; }, { once: true });
     vid.addEventListener("error", () => { if (slide.contains(vid)) { slide.dataset.playing = "0"; ctx.showToast("Couldn't play that video"); } }, { once: true });
-    vid.src = item.vault ? vaultAssetUrl("video", item.id) : galAssetUrl("video", item.id);
+    setNativeSrc(vid, item.vault ? vaultAssetUrl("video", item.id) : galAssetUrl("video", item.id));
     slide.appendChild(vid);
     const p = vid.play && vid.play();
     if (p && p.catch) p.catch(() => {});
@@ -9436,7 +9718,17 @@
     requestAnimationFrame(() => { c.el.dataset.shown = "1"; });
     const isVideo = item.mediaType === "video";
     const url = item.vault ? vaultAssetUrl(isVideo ? "video" : "view", item.id) : galAssetUrl(isVideo ? "video" : "view", item.id, 2400);
-    openReview(ctx, null, isVideo ? "video" : "image", false, { width: item.width, height: item.height, hasAudio: true }, { url, fit: "contain" });
+    const dims = { width: item.width, height: item.height, hasAudio: true };
+    if (!NATIVE_ASSET_RE.test(url) || !hasNativeDg()) {
+      openReview(ctx, null, isVideo ? "video" : "image", false, dims, { url, fit: "contain" });
+      return;
+    }
+    // the page can't load ghostphoto:/ghostvault: itself (see setNativeSrc): fetch the bytes, then open
+    const src = c.editSource;
+    nativeAssetBlob(url, isVideo).then((blob) => {
+      if (c.editSource !== src || c.el.dataset.open !== "1") return;
+      openReview(ctx, blob, isVideo ? "video" : "image", false, dims, { fit: "contain" });
+    }, () => { if (c.editSource === src) ctx.showToast("Couldn't open that " + (isVideo ? "video" : "photo")); });
   }
   async function renderGalOverlayB64(ed, mw, mh) {
     mw = Math.max(1, mw || 1080); mh = Math.max(1, mh || 1920);
