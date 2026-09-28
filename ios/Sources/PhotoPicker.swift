@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import Photos
+import PhotosUI // presentLimitedLibraryPicker(from:) lives in PhotosUI
 import AVFoundation
 
 /// Ghost's built-in photo/video picker (composer's gallery button): PhotoKit behind a WKURLSchemeHandler for
@@ -58,7 +59,7 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
         switch host {
         case "thumb":
             let sizeParam = components.queryItems?.first(where: { $0.name == "s" })?.value
-            let pixelSize = sizeParam.flatMap(Double.init).map(CGFloat.init) ?? 300
+            let pixelSize: CGFloat = sizeParam.flatMap { Double($0) }.map { CGFloat($0) } ?? 300
             serveThumb(id: id, pixelSize: pixelSize, task: urlSchemeTask)
         case "full":
             serveFull(id: id, task: urlSchemeTask)
