@@ -72,10 +72,10 @@
     newMsg: '<path d="M21 11.5a8.4 8.4 0 01-8.9 8.4 8.5 8.5 0 01-3.8-.9L3 20l1.1-5.3a8.4 8.4 0 116.9-12.1 8.4 8.4 0 0110 8.9z"/><path d="M12 8v5M9.5 10.5h5" stroke-width="1.6"/>',
     send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>',
     photo: '<rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="8.5" cy="10" r="1.5"/><path d="M21 15l-5-5-9 9"/>',
-    camera: '<path d="M4 8a2 2 0 012-2h1.2a2 2 0 001.6-.8l.6-.8a2 2 0 011.6-.8h2a2 2 0 011.6.8l.6.8a2 2 0 001.6.8H18a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2z"/><circle cx="12" cy="13" r="3.5"/>',
+    camera: '<path d="M3 8.6A2.6 2.6 0 015.6 6h1.9l1.3-1.8A1.6 1.6 0 0110.1 3.5h3.8a1.6 1.6 0 011.3.7L16.5 6h1.9A2.6 2.6 0 0121 8.6v9.3a2.6 2.6 0 01-2.6 2.6H5.6A2.6 2.6 0 013 17.9z"/><circle cx="12" cy="12.9" r="3.9"/>',
     gifBadge: '<rect x="2" y="6" width="20" height="12" rx="3"/><text x="12" y="15" font-size="8" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">GIF</text>',
     emoji: '<circle cx="12" cy="12" r="9"/><path d="M8.5 10.5h.01M15.5 10.5h.01"/><path d="M8.5 14.5s1.2 2 3.5 2 3.5-2 3.5-2"/>',
-    mic: '<path d="M12 15a3 3 0 003-3V6a3 3 0 00-6 0v6a3 3 0 003 3z"/><path d="M19 11a7 7 0 01-14 0M12 18v3"/>',
+    mic: '<rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21M9 21h6"/>',
     play: '<path d="M7 5l12 7-12 7z"/>',
     pause: '<path d="M7 5h3v14H7zM14 5h3v14h-3z"/>',
     ghost: '<path d="M12 3a7 7 0 00-7 7v8.5c0 .6.7 1 1.2.6l1.6-1.2 1.7 1.3a1 1 0 001.2 0l1.3-1 1.3 1a1 1 0 001.2 0l1.7-1.3 1.6 1.2c.5.4 1.2 0 1.2-.6V10a7 7 0 00-7-7z"/><path d="M9.3 11h.01M14.7 11h.01" stroke-width="1.8"/>',
@@ -2621,12 +2621,13 @@
         if (Math.abs(g.dx) < LOCK_MIN && Math.abs(g.dy) < LOCK_MIN) return;
         g.locked = Math.abs(g.dx) > Math.abs(g.dy) * 1.2 ? "x" : "y";
       }
-      // swipe LEFT on a message to reply (like Telegram) - swiping right anywhere leaves the chat
-      if (g.locked !== "x" || g.dx >= 0) return;
+      // swipe RIGHT on a message to reply (the user's preference, 2026-09-27: it used to be left, like Telegram);
+      // any other horizontal swipe in the chat leaves it (initNavGesture)
+      if (g.locked !== "x" || g.dx <= 0) return;
       e.preventDefault();
-      const dx = Math.min(-g.dx, REPLY_MAX);
+      const dx = Math.min(g.dx, REPLY_MAX);
       const swipe = g.wrap.querySelector(".gh-msg-swipe");
-      swipe.style.setProperty("--gh-swipe-x", -dx * 0.72 + "px");
+      swipe.style.setProperty("--gh-swipe-x", dx * 0.72 + "px");
       const progress = clamp(dx / REPLY_TRIGGER, 0, 1);
       g.wrap.style.setProperty("--gh-reply-op", String(progress));
       g.wrap.style.setProperty("--gh-reply-scale", String(0.5 + 0.5 * progress));
@@ -2639,7 +2640,7 @@
       if (gs.timer) clearTimeout(gs.timer);
       const swipe = gs.wrap.querySelector(".gh-msg-swipe");
       swipe.classList.add("gh-anim");
-      if (!gs.longFired && gs.locked === "x" && -gs.dx > REPLY_TRIGGER) {
+      if (!gs.longFired && gs.locked === "x" && gs.dx > REPLY_TRIGGER) {
         const m = messageFor(gs.wrap);
         if (m) { haptic(); setReplyTo(ctx, m); conv.textarea.focus(); }
       }
@@ -5599,12 +5600,15 @@
     let g = null;
 
     function widthPx() { return stack.getBoundingClientRect().width || 393; }
+    // dir: which way the chat leaves (+1 = off to the right, the usual back swipe; -1 = off to the left). The home
+    // screen's parallax comes from the opposite side, so a leftward exit feels like pushing the chat away.
+    let dir = 1;
     function setProgress(p, animate) {
       p = clamp(p, 0, 1);
       if (animate) { conv.classList.add("gh-anim"); home.classList.add("gh-anim"); shade.classList.add("gh-anim"); }
       else { conv.classList.remove("gh-anim"); home.classList.remove("gh-anim"); shade.classList.remove("gh-anim"); }
-      conv.style.transform = `translate3d(${(1 - p) * 100}%,0,0)`;
-      home.style.transform = `translate3d(${-30 * p}%,0,0)`;
+      conv.style.transform = `translate3d(${dir * (1 - p) * 100}%,0,0)`;
+      home.style.transform = `translate3d(${-dir * 30 * p}%,0,0)`;
       shade.style.opacity = String(0.15 * p);
       ctx.state.navProgress = p;
     }
@@ -5631,6 +5635,10 @@
         if (Math.abs(g.dx) < 8 && Math.abs(g.dy) < 8) return;
         g.locked = Math.abs(g.dx) > Math.abs(g.dy) * 1.2 ? "x" : "y";
         if (g.locked !== "x") { g = null; return; }
+        if (g.kind === "close") {
+          if (g.onMessage && g.dx > 0) { g = null; return; } // a rightward swipe on a message is reply (initMessageGestures)
+          dir = g.dx < 0 ? -1 : 1; // leaving: follow whichever way the finger goes
+        } else dir = 1;
         // swiping a row open: show THAT person's chat under your finger (it still showed the last chat you had open)
         if (g.kind === "open" && g.rowId) peekConversation(ctx, g.rowId);
       }
@@ -5640,7 +5648,7 @@
       // Opening (progress 0 -> 1): dragging LEFT (delta negative) pulls the conversation in, like a row
       // sliding in from the right. Closing (progress 1 -> 0): dragging RIGHT (delta positive) reveals home
       // underneath, like the standard iOS edge-swipe-back — progress must DECREASE as delta increases.
-      const p = g.kind === "open" ? clamp(g.p0 + Math.max(0, -delta) * 1.6, 0, 1) : clamp(g.p0 - delta, 0, 1);
+      const p = g.kind === "open" ? clamp(g.p0 + Math.max(0, -delta) * 1.6, 0, 1) : clamp(g.p0 - delta * dir, 0, 1);
       setProgress(p, false);
     }
     function end() {
@@ -5660,10 +5668,13 @@
           setProgress(0, true); // spring back to home, closed
         }
       } else {
-        const commit = ctx.state.navProgress < (1 - TRIGGER) || v > FLICK_V; // dragged far enough closed, or a fast rightward flick
+        const commit = ctx.state.navProgress < (1 - TRIGGER) || v * dir > FLICK_V; // dragged far enough, or a fast flick that way
         if (commit) {
           haptic("light");
           setProgress(0, true);
+          // after a leftward exit the chat sits off to the LEFT; put it back on the right (off screen, no animation)
+          // so the next chat slides in from the right as usual
+          if (dir < 0) setTimeout(() => { if (ctx.state.navProgress === 0) { dir = 1; setProgress(0, false); } }, 380);
           const id = ctx.state.currentConvId;
           if (id) api.closeConversation(id).catch(() => {});
           ctx.state.currentConvId = null;
@@ -5688,7 +5699,10 @@
         // swipe right from anywhere in the chat to leave it (the edge, the header, the messages - not inside inputs,
         // voice-note waveforms or open sheets); a leftward swipe on a message is reply instead
         const free = !target.closest("input, textarea, button, .gh-audio-wave, .gh-sheet, .gh-call, .gh-camera, .gh-settings, .gh-viewer");
-        if ((x <= EDGE_ZONE && !target.closest("input, textarea, button")) || free) begin("close", e, null);
+        if ((x <= EDGE_ZONE && !target.closest("input, textarea, button")) || free) {
+          begin("close", e, null);
+          g.onMessage = !!(target.closest && target.closest(".gh-msg-wrap"));
+        }
         else g = null;
       }
     }, { passive: true });

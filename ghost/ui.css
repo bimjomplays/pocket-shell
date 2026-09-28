@@ -681,7 +681,7 @@ input, textarea {
   color: var(--gh-accent);
 }
 .gh-group[data-me="1"] .gh-reply-hint { left: auto; right: -34px; }
-.gh-reply-hint, .gh-group[data-me="1"] .gh-reply-hint { left: auto; right: 6px; } /* revealed as the bubble slides left */
+.gh-reply-hint, .gh-group[data-me="1"] .gh-reply-hint { right: auto; left: 6px; } /* revealed as the bubble slides right (swipe right = reply) */
 
 /* new-message pop-in (only ever applied once, to a genuinely new incoming/outgoing bubble — never during
    virtualized-scroll repaint, so it never touches the perf budget) */
@@ -1030,6 +1030,7 @@ input, textarea {
 .gh-composer-send[data-show="1"] { transform: scale(1) rotate(0deg); opacity: 1; }
 .gh-composer-mic[data-hide="1"] { transform: scale(0.4) rotate(45deg); opacity: 0; pointer-events: none; }
 .gh-composer-mic svg, .gh-composer-send svg { width: 19px; height: 19px; }
+.gh-composer-mic svg { width: 24px; height: 24px; } /* bigger and optically centred (device feedback 2026-09-27) */
 
 .gh-reply-bar {
   flex: none;

@@ -76,7 +76,10 @@
       const account = this.account, gen = this.generation;
       if (!account || !this.enabled) return Promise.resolve([]);
       // Snapshot immediately, before a store mutation can erase the original content.
-      const snapshots = messages.filter((m) => m && m.id && (m.deleted || KINDS.has(m.kind))).map((m) => ({ ...m, media: undefined, reactions: undefined }));
+      // Only friends' messages are kept: your own showed up as dashed "deleted" duplicates next to the real message
+      // although you never deleted them (device report 2026-09-27), and there is nothing to recover from yourself.
+      const mine = (m) => !!(m && m.from && m.from.id && m.from.id === account);
+      const snapshots = messages.filter((m) => m && m.id && !mine(m) && (m.deleted || KINDS.has(m.kind))).map((m) => ({ ...m, media: undefined, reactions: undefined }));
       return this.serial(async () => {
         if (gen !== this.generation || !this.enabled) return [];
         const candidates = [];
@@ -142,8 +145,14 @@
         const rows = await this.rows(account, cid);
         if (gen !== this.generation) return live;
         const out = new Map(live.map((m) => [m.id, m]));
+        // the same content still visible under another id (e.g. a sent message's local copy and its server copy)
+        // is not a deletion: never show a retained twin next to it
+        const sameContent = (a, b) => a && b && !b.deleted && a.kind === b.kind && (a.from && a.from.id) === (b.from && b.from.id)
+          && (a.text || "") === (b.text || "") && Math.abs((Number(a.ts) || 0) - (Number(b.ts) || 0)) < 10 * 60 * 1000;
         for (const r of rows) {
           if (!r.deleted || r.expiresAt <= this.now()) continue;
+          if (r.message.from && r.message.from.id === account) continue; // rows saved before own messages were excluded
+          if (live.some((m) => m.id !== r.message.id && sameContent(r.message, m))) continue;
           const current = out.get(r.message.id);
           // An explicit tombstone was recorded; it may later disappear from Snapchat's window.
           if (current && !current.deleted) continue;
