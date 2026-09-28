@@ -958,7 +958,7 @@ input, textarea {
 .gh-typing-bubble span:nth-child(2) { animation-delay: 0.15s; }
 .gh-typing-bubble span:nth-child(3) { animation-delay: 0.3s; }
 
-/* ---- Composer: paperclip · rounded field (emoji inside) · mic/send morph ------------------------------- */
+/* ---- Composer: camera + gallery · rounded field (emoji inside) · mic/send morph ------------------------- */
 .gh-composer {
   flex: none;
   display: flex;
@@ -968,6 +968,17 @@ input, textarea {
   background: var(--gh-bg-header);
   border-top: 0.5px solid var(--gh-divider);
 }
+/* Like iMessage collapsing its app-drawer button once you start typing: this pair steps out of the way
+   instead of squeezing the text field, and comes back the moment the field is empty. */
+.gh-composer-media-btns {
+  display: flex;
+  flex: none;
+  overflow: hidden;
+  max-width: 84px;
+  opacity: 1;
+  transition: max-width 0.22s var(--gh-spring), opacity 0.18s ease, margin 0.22s var(--gh-spring);
+}
+.gh-composer-media-btns[data-hide="1"] { max-width: 0; opacity: 0; margin-right: -4px; pointer-events: none; }
 .gh-composer-btn {
   width: 40px; height: 40px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -1033,6 +1044,14 @@ input, textarea {
 .gh-composer-mic[data-hide="1"] { transform: scale(0.4) rotate(45deg); opacity: 0; pointer-events: none; }
 .gh-composer-mic svg, .gh-composer-send svg { width: 19px; height: 19px; }
 .gh-composer-mic svg { width: 24px; height: 24px; } /* bigger and optically centred (device feedback 2026-09-27) */
+/* The paper-plane glyph's drawn bounding box IS centred in its 24x24 viewBox, but the stroked "ink" itself
+   isn't evenly spread inside that box - most of it (the long top edge + both wing creases) sits in the
+   upper-right, so a purely bbox-centred glyph visually reads as sitting high and to the right in the round
+   button. Measured by rendering the glyph to a canvas and taking the brightness-weighted pixel centroid: it
+   sits ~1.8 viewBox units right and ~1.9 units up from centre - nudged the opposite way (left/down) here to
+   land the plane's visual weight, not its box, in the middle; sized up slightly to fill the circle better
+   too (screenshot-compared 2026-09-28, see scratch-centroid.js). */
+.gh-composer-send svg { width: 22px; height: 22px; transform: translate(-1.7px, 1.8px); }
 
 .gh-reply-bar {
   flex: none;
@@ -1124,17 +1143,79 @@ input, textarea {
 .gh-action-item[data-danger="1"] { color: var(--gh-danger); }
 .gh-action-item[data-danger="1"] svg { color: var(--gh-danger); }
 
-/* ---- attach sheet (Gallery / Camera / GIF) ------------------------------------------------------------- */
-.gh-attach-sheet .gh-action-item svg { color: #fff; }
-.gh-attach-icon {
-  width: 34px; height: 34px; border-radius: 9px;
-  display: flex; align-items: center; justify-content: center;
-  flex: none;
+/* ---- photo picker sheet (the composer's gallery button): half height by default, drag the grip to full;
+   a virtualized 3-column square grid over the device's own photo library ---------------------------------- */
+.gh-photo-sheet {
+  max-height: 94%;
+  height: 55vh; /* JS sets the real px height immediately on open (pickerHalfHeight); this is only the flash-of-unstyled fallback */
+  touch-action: none; /* the grip itself is dragged; the scroll list below re-enables its own scrolling */
 }
-.gh-attach-icon svg { width: 19px; height: 19px; }
-.gh-attach-icon[data-tint="blue"] { background: var(--gh-accent); }
-.gh-attach-icon[data-tint="pink"] { background: #e767b1; }
-.gh-attach-icon[data-tint="green"] { background: #47c16e; }
+.gh-photo-sheet.gh-anim { transition: transform 0.34s var(--gh-spring), height 0.28s var(--gh-spring); }
+.gh-photo-grip { position: relative; }
+.gh-photo-grip::before { content: ""; position: absolute; left: -40%; right: -40%; top: -18px; bottom: -18px; } /* the visible pill is 4px tall; this pads its drag target to a real tap/drag size */
+.gh-photo-header { display: flex; align-items: center; justify-content: space-between; padding: 2px 16px 8px; flex: none; }
+.gh-photo-title { font-size: 17px; font-weight: 700; }
+.gh-photo-browse { color: var(--gh-accent); font-size: 15px; font-weight: 500; padding: 6px 2px; }
+.gh-photo-limited {
+  flex: none; margin: 0 12px 8px; padding: 9px 12px; border-radius: 10px;
+  background: rgba(62,136,247,0.14); color: var(--gh-accent); font-size: 13px; font-weight: 600; text-align: center;
+}
+.gh-photo-scroll { flex: 1; min-height: 0; position: relative; touch-action: pan-y; padding: 0 1px; }
+.gh-photo-grid { position: relative; width: 100%; }
+.gh-photo-tile {
+  position: absolute; top: 0; left: 0;
+  background: var(--gh-bg-panel-2);
+  overflow: hidden;
+}
+.gh-photo-thumb { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+.gh-photo-tile[data-selected="1"] { box-shadow: inset 0 0 0 3px var(--gh-accent); }
+.gh-photo-tile[data-selected="1"] .gh-photo-thumb { transform: scale(0.94); transition: transform 0.15s var(--gh-spring); }
+.gh-photo-dur {
+  position: absolute; left: 6px; bottom: 5px; padding: 1px 6px; border-radius: 6px;
+  background: rgba(0,0,0,0.55); color: #fff; font-size: 11px; font-weight: 600; pointer-events: none;
+}
+.gh-photo-badge {
+  position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 50%;
+  border: 1.5px solid rgba(255,255,255,0.85); background: rgba(0,0,0,0.28);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: #fff; pointer-events: none;
+}
+.gh-photo-tile[data-selected="1"] .gh-photo-badge { background: var(--gh-accent); border-color: var(--gh-accent); }
+.gh-photo-expand {
+  position: absolute; left: 4px; top: 4px; width: 26px; height: 26px; min-width: 0; min-height: 0;
+  border-radius: 7px; background: rgba(0,0,0,0.35); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+}
+.gh-photo-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--gh-text-secondary); font-size: 14px; padding: 24px; text-align: center; }
+.gh-photo-denied { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center; color: var(--gh-text-secondary); font-size: 14.5px; }
+.gh-photo-settings-btn { padding: 10px 20px; border-radius: 20px; background: var(--gh-accent); color: #fff; font-weight: 600; font-size: 14.5px; }
+.gh-photo-sendbar {
+  flex: none; overflow: hidden; max-height: 0; padding: 0 14px; background: var(--gh-bg-header);
+  transition: max-height 0.2s var(--gh-spring);
+}
+.gh-photo-sendbar[data-show="1"] { max-height: 72px; padding: 10px 14px calc(10px + var(--gh-safe-b)); }
+.gh-photo-send { display: block; width: 100%; height: 46px; border-radius: 23px; background: var(--gh-accent); color: #fff; font-weight: 700; font-size: 15.5px; }
+
+/* ---- full-screen preview (long-press or the expand button on a picker tile) -------------------------------- */
+.gh-photo-preview {
+  position: absolute; inset: 0; z-index: 20; background: #000;
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
+}
+.gh-photo-preview[data-open="1"] { opacity: 1; pointer-events: auto; }
+.gh-photo-preview-body { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+.gh-photo-preview-media { max-width: 100%; max-height: 100%; object-fit: contain; }
+.gh-photo-preview-close {
+  position: absolute; left: 10px; top: calc(10px + var(--gh-safe-t)); z-index: 1; color: #fff;
+  background: rgba(0,0,0,0.4); border-radius: 50%;
+}
+.gh-photo-preview-select {
+  position: absolute; right: 14px; top: calc(10px + var(--gh-safe-t)); z-index: 1;
+  width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,0.85);
+  background: rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center;
+}
+.gh-photo-preview-select .gh-photo-badge { position: static; border: none; background: none; width: auto; height: auto; }
+.gh-photo-preview-select[data-selected="1"] { background: var(--gh-accent); border-color: var(--gh-accent); }
 
 /* ---- new chat sheet ------------------------------------------------------------------------------------ */
 .gh-newchat-header { display: flex; align-items: center; gap: 10px; padding: 4px 16px 10px; }

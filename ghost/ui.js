@@ -104,6 +104,7 @@
     undo: '<path d="M4 11h9a5.5 5.5 0 010 11h-3.5"/><path d="M8 6.5L3.5 11 8 15.5"/>',
     flash: '<path d="M13 2L4 14h6l-1 8 9-12h-6z" fill="currentColor" stroke="none"/>',
     timerIcon: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/>',
+    expand: '<path d="M9 3H3v6"/><path d="M15 3h6v6"/><path d="M21 15v6h-6"/><path d="M3 15v6h6"/>',
   };
   function icon(name, size, extraClass) {
     const wrap = document.createElement("span");
@@ -471,10 +472,11 @@
     ctx.chatSheet = buildChatSheet(ctx, overlays);
     ctx.stickerSheet = buildStickerSheet(ctx, overlays);
     ctx.newChatSheet = buildNewChatSheet(ctx, overlays);
-    ctx.attachSheet = buildAttachSheet(ctx, overlays);
+    ctx.photoSheet = buildPhotoSheet(ctx, overlays);
     // Every sheet starts fully out of the render tree (see closeSheetGeneric's note) — openSheetGeneric
     // clears this the moment a sheet is actually opened.
-    for (const s of [ctx.actionSheet, ctx.gifSheet, ctx.newChatSheet, ctx.attachSheet]) s.sheet.style.display = "none";
+    for (const s of [ctx.actionSheet, ctx.gifSheet, ctx.newChatSheet]) s.sheet.style.display = "none";
+    ctx.photoSheet.sheet.style.display = "none";
 
     ctx.viewer = buildViewer(ctx);
     root.appendChild(ctx.viewer.el);
@@ -1299,7 +1301,10 @@
       </div>
       <div class="gh-mention-box" role="listbox"></div>
       <div class="gh-composer">
-        <button class="gh-composer-btn gh-hit" data-act="attach"></button>
+        <div class="gh-composer-media-btns">
+          <button class="gh-composer-btn gh-hit" data-act="composer-camera"></button>
+          <button class="gh-composer-btn gh-hit" data-act="composer-gallery"></button>
+        </div>
         <div class="gh-composer-field">
           <textarea class="gh-composer-textarea" rows="1" placeholder="Message" aria-label="Message"></textarea>
           <button class="gh-composer-emoji-btn gh-hit" data-act="emoji"></button>
@@ -1313,8 +1318,10 @@
     `;
     screen.querySelector('[data-act="back"]').append(icon("back"));
     screen.querySelector('[data-act="back"]').setAttribute("aria-label", "Back");
-    screen.querySelector('[data-act="attach"]').appendChild(icon("attach"));
-    screen.querySelector('[data-act="attach"]').setAttribute("aria-label", "Attach media");
+    screen.querySelector('[data-act="composer-camera"]').appendChild(icon("camera", 21));
+    screen.querySelector('[data-act="composer-camera"]').setAttribute("aria-label", "Open camera");
+    screen.querySelector('[data-act="composer-gallery"]').appendChild(icon("gallery", 21));
+    screen.querySelector('[data-act="composer-gallery"]').setAttribute("aria-label", "Photo library");
     screen.querySelector('[data-act="emoji"]').appendChild(icon("emoji"));
     screen.querySelector('[data-act="emoji"]').setAttribute("aria-label", "Stickers");
     screen.querySelector('[data-act="emoji"]').addEventListener("click", () => openStickerSheet(ctx));
@@ -1337,6 +1344,7 @@
       textarea: screen.querySelector(".gh-composer-textarea"),
       sendBtn: screen.querySelector('[data-act="send"]'),
       micBtn: screen.querySelector('[data-act="mic"]'),
+      mediaBtns: screen.querySelector(".gh-composer-media-btns"),
       fileInput: screen.querySelector(".gh-file-input"),
       nameEl: screen.querySelector(".gh-conv-name"),
       subEl: screen.querySelector(".gh-conv-sub"),
@@ -1360,6 +1368,9 @@
       const hasText = !!conv.textarea.value.trim();
       conv.sendBtn.dataset.show = hasText ? "1" : "0";
       conv.micBtn.dataset.hide = hasText ? "1" : "0";
+      // Like iMessage collapsing its app drawer button once you start typing: the camera/gallery pair steps
+      // out of the way instead of squeezing the text field, then comes back the moment the field is empty.
+      conv.mediaBtns.dataset.hide = hasText ? "1" : "0";
     });
     // Send without closing the keyboard: a tap on a <button> moves focus to it (blurring the textarea = keyboard
     // down). Handling the tap on touchend with preventDefault stops iOS from making the mouse events/focus change;
@@ -1372,7 +1383,8 @@
       if (e.key === "Enter" && !e.shiftKey && pref("sendOnReturn") && !e.isComposing) { e.preventDefault(); sendCurrentText(ctx); }
     });
     initVoiceRecorder(ctx, screen, conv); // (ctx.conv isn't set yet while the screen is being built)
-    screen.querySelector('[data-act="attach"]').addEventListener("click", () => openAttachSheet(ctx));
+    screen.querySelector('[data-act="composer-camera"]').addEventListener("click", () => openCamera(ctx, { to: ctx.state.currentConvId }));
+    screen.querySelector('[data-act="composer-gallery"]').addEventListener("click", () => openPhotoSheet(ctx));
     conv.fileInput.addEventListener("change", () => {
       const f = conv.fileInput.files && conv.fileInput.files[0];
       conv.fileInput.value = "";
@@ -2939,46 +2951,485 @@
   }
 
   // =====================================================================================================
-  // Attach sheet (paperclip in the composer) — Telegram-style bottom sheet: Gallery, Camera, GIF
+  // Photo picker sheet (the composer's gallery button) — Telegram/iMessage-style: opens at half height,
+  // drags up to full; the device's own photo library in a virtualized 3-column square grid. The camera
+  // button next to it just reopens Ghost's own camera (openCamera, already built for the old attach sheet).
+  //
+  // Data path (see ghost/BRIDGE_NOTES.md "Photo picker native bridge" for the evidence): thumbnails and the
+  // full-screen preview load straight off a native WKURLSchemeHandler ("ghostphoto://thumb|full/<id>") as
+  // plain <img>/<video> src loads — that's confirmed to work with no CORS involved, same as any cross-scheme
+  // resource load. Actually SENDING a selected item needs its bytes in a JS Blob, and fetch() from this
+  // https page to a custom-scheme response is blocked (WebKit treats it as mixed content, independent of any
+  // Access-Control-Allow-Origin header) — so sending instead asks native for that one item's bytes over the
+  // ordinary "dg" message-handler round trip (base64 in the reply), exactly like saveToPhotos/cutout already do.
   // =====================================================================================================
-  function buildAttachSheet(ctx, overlaysRoot) {
+  const PICKER_MAX_SELECT = 10;
+  const PICKER_PAGE = 60;
+  const PICKER_GAP = 2;
+  const PICKER_BUFFER_ROWS = 4; // extra rows kept mounted past the viewport so a fast flick never shows blank tiles
+  const PICKER_LOAD_MAX_CONCURRENT = 6; // caps simultaneous native thumbnail fetches while scrolling fast
+
+  function dgPost(op, args) {
+    try { return Promise.resolve(window.webkit.messageHandlers.dg.postMessage(Object.assign({ op }, args || {}))); }
+    catch (e) { return Promise.reject(e); }
+  }
+  // The real ghostphoto:// scheme only exists inside the native app's own WKWebView (App.swift registers it on
+  // the configuration before creating the web view) - a plain browser (incl. the Playwright test rig, which has
+  // no native side at all) has no such scheme and a bare <img src="ghostphoto://..."> just fails to load there.
+  // window.__ghostPickerUrlOverride lets a test stand in a same-origin data: URL instead; production code never
+  // sets it, so this is a no-op on the phone.
+  function pickerAssetUrl(kind, id, size) {
+    if (typeof window.__ghostPickerUrlOverride === "function") return window.__ghostPickerUrlOverride(kind, id, size);
+    return kind === "thumb" ? ("ghostphoto://thumb/" + encodeURIComponent(id) + "?s=" + size) : ("ghostphoto://full/" + encodeURIComponent(id));
+  }
+
+  function buildPhotoSheet(ctx, overlaysRoot) {
     const backdrop = el("div", "gh-backdrop");
-    const sheet = el("div", "gh-sheet gh-attach-sheet"); sheet.style.display = "none";
+    const sheet = el("div", "gh-sheet gh-photo-sheet"); sheet.style.display = "none";
     sheet.innerHTML = `
-      <div class="gh-sheet-grip"></div>
-      <div class="gh-action-list">
-        <div class="gh-action-item" data-act="photo"></div>
-        <div class="gh-action-item" data-act="camera"></div>
+      <div class="gh-sheet-grip gh-photo-grip"></div>
+      <div class="gh-photo-header">
+        <div class="gh-photo-title">All Photos</div>
+        <button class="gh-photo-browse gh-press gh-hit">Browse…</button>
+      </div>
+      <button class="gh-photo-limited gh-press" style="display:none;">Limited access — Manage</button>
+      <div class="gh-photo-scroll gh-scroll">
+        <div class="gh-photo-grid"></div>
+        <div class="gh-photo-empty" style="display:none;">No photos or videos yet.</div>
+      </div>
+      <div class="gh-photo-denied" style="display:none;">
+        <div class="gh-photo-denied-text"></div>
+        <button class="gh-photo-settings-btn gh-press gh-hit">Open Settings</button>
+      </div>
+      <div class="gh-photo-sendbar" data-show="0">
+        <button class="gh-photo-send gh-press"><span class="gh-photo-send-label">Send</span></button>
       </div>
     `;
-    const row = (act, tint, iconName, label) => {
-      const item = sheet.querySelector(`[data-act="${act}"]`);
-      const tag = el("div", "gh-attach-icon");
-      tag.dataset.tint = tint;
-      tag.appendChild(icon(iconName, 19));
-      item.append(tag, Object.assign(document.createElement("span"), { textContent: label }));
-    };
-    row("photo", "blue", "gallery", "Gallery");
-    row("camera", "pink", "camera", "Camera");
     overlaysRoot.append(backdrop, sheet);
-    // Closing WITHOUT the slide-down transition here on purpose: the destination (gif sheet / camera /
-    // file picker) covers the same screen area a moment later, so animating this sheet's own close at the
-    // same time as another sheet's open animation just fights it for that space and never reads as
-    // intentional. An instant close reads as "handed off", which is what it visually is.
-    function closeInstant(next) {
-      backdrop.classList.remove("gh-anim"); sheet.classList.remove("gh-anim");
-      backdrop.dataset.open = "0"; sheet.dataset.open = "0";
-      sheet.style.display = "none"; // see closeSheetGeneric's note — dropped from the render tree immediately
-      next();
-    }
-    backdrop.addEventListener("click", () => closeSheetGeneric(backdrop, sheet));
-    sheet.querySelector('[data-act="photo"]').addEventListener("click", () => closeInstant(() => ctx.conv.fileInput.click()));
-    sheet.querySelector('[data-act="camera"]').addEventListener("click", () => closeInstant(() => openCamera(ctx, { to: ctx.state.currentConvId })));
-    return { backdrop, sheet };
+
+    const p = {
+      backdrop, sheet,
+      grip: sheet.querySelector(".gh-photo-grip"),
+      browseBtn: sheet.querySelector(".gh-photo-browse"),
+      limitedRow: sheet.querySelector(".gh-photo-limited"),
+      scroll: sheet.querySelector(".gh-photo-scroll"),
+      grid: sheet.querySelector(".gh-photo-grid"),
+      emptyEl: sheet.querySelector(".gh-photo-empty"),
+      deniedEl: sheet.querySelector(".gh-photo-denied"),
+      deniedText: sheet.querySelector(".gh-photo-denied-text"),
+      settingsBtn: sheet.querySelector(".gh-photo-settings-btn"),
+      sendBar: sheet.querySelector(".gh-photo-sendbar"),
+      sendBtn: sheet.querySelector(".gh-photo-send"),
+      sendLabel: sheet.querySelector(".gh-photo-send-label"),
+      items: [],           // metadata loaded so far: {id, mediaType, duration, width, height, date}
+      hasMore: true,
+      loadingPage: false,
+      authStatus: null,
+      selected: [],         // ordered array of item ids, oldest pick first (matches send order)
+      mounted: new Map(),   // index -> tile element currently in the DOM
+      loadQueue: [],
+      loadActive: 0,
+      tileSize: 0,
+      cols: 3,
+      reqSeq: 0,             // bumped on every open/close/reload so stale async work (permission prompt,
+                             // paged fetch, a queued thumbnail) from a previous session is a safe no-op
+      heightMode: "half",
+      sending: false,
+      expandedIndex: null,
+    };
+    ctx.picker = p;
+    p.preview = buildPickerPreview(ctx, overlaysRoot);
+
+    backdrop.addEventListener("click", () => closePhotoSheet(ctx));
+    p.browseBtn.addEventListener("click", () => { closePhotoSheet(ctx); ctx.conv.fileInput.click(); });
+    p.limitedRow.addEventListener("click", () => { haptic("light"); dgPost("photoManage").catch(() => {}); });
+    p.settingsBtn.addEventListener("click", () => { haptic("light"); dgPost("photoOpenSettings").catch(() => {}); });
+    p.sendBtn.addEventListener("click", () => sendPickerSelection(ctx));
+    p.scroll.addEventListener("scroll", () => schedulePickerLayout(ctx), { passive: true });
+    initPhotoSheetDrag(ctx);
+    // NOT force=true: the sheet's own height changes continuously during its open/drag/send-bar CSS
+    // transitions, firing this on nearly every animation frame - forcing a full clear+rebuild each time
+    // yanked every in-flight thumbnail out from under itself before it could ever finish loading, which
+    // (before releasePickerTile's pendingDone bookkeeping below existed) permanently starved the whole
+    // concurrency cap after the first transition (device/rig finding, 2026-09-28). layoutPickerGrid's own
+    // force||size!==tileSize check already only clears+rebuilds when the grid's WIDTH actually changed - a
+    // pure height wobble recomputes the visible range and mounts/unmounts individual tiles, nothing more.
+    if (typeof ResizeObserver === "function") new ResizeObserver(() => { if (p.sheet.dataset.open === "1") layoutPickerGrid(ctx); }).observe(p.scroll);
+    // Native tells us the library changed (add/delete, or the limited selection changed) while the sheet
+    // might be open - simplest correct response is reloading from the top rather than diffing a paged list.
+    window.__ghostPhotoChanged = () => { if (p.sheet.dataset.open === "1") reloadPickerFromTop(ctx); };
+    return p;
   }
-  function openAttachSheet(ctx) {
+
+  function buildPickerPreview(ctx, overlaysRoot) {
+    const wrap = el("div", "gh-photo-preview");
+    wrap.innerHTML = `
+      <button class="gh-photo-preview-close gh-hit"></button>
+      <div class="gh-photo-preview-body"></div>
+      <button class="gh-photo-preview-select gh-press"><span class="gh-photo-badge"></span></button>
+    `;
+    wrap.querySelector(".gh-photo-preview-close").appendChild(icon("close", 22));
+    wrap.querySelector(".gh-photo-preview-close").setAttribute("aria-label", "Close preview");
+    wrap.querySelector(".gh-photo-preview-close").addEventListener("click", () => { wrap.dataset.open = "0"; });
+    const body = wrap.querySelector(".gh-photo-preview-body");
+    const selectBtn = wrap.querySelector(".gh-photo-preview-select");
+    selectBtn.addEventListener("click", () => {
+      const p = ctx.picker;
+      const item = p.items[p.expandedIndex];
+      if (!item) return;
+      togglePickerSelect(ctx, item);
+      paintPreviewSelectBadge(ctx);
+    });
+    overlaysRoot.appendChild(wrap);
+    return { el: wrap, body, selectBtn };
+  }
+  function paintPreviewSelectBadge(ctx) {
+    const p = ctx.picker;
+    const item = p.items[p.expandedIndex];
+    const idx = item ? p.selected.indexOf(item.id) : -1;
+    p.preview.selectBtn.dataset.selected = idx !== -1 ? "1" : "0";
+    p.preview.selectBtn.querySelector(".gh-photo-badge").textContent = idx !== -1 ? String(idx + 1) : "";
+  }
+  function openPickerPreview(ctx, index) {
+    const p = ctx.picker;
+    const item = p.items[index];
+    if (!item) return;
+    p.expandedIndex = index;
+    p.preview.body.innerHTML = "";
+    const src = pickerAssetUrl("full", item.id);
+    let mediaEl;
+    if (item.mediaType === "video") {
+      mediaEl = el("video", "gh-photo-preview-media");
+      mediaEl.src = src; mediaEl.controls = true; mediaEl.playsInline = true; mediaEl.autoplay = true;
+    } else {
+      mediaEl = el("img", "gh-photo-preview-media"); mediaEl.alt = ""; mediaEl.src = src;
+    }
+    p.preview.body.appendChild(mediaEl);
+    paintPreviewSelectBadge(ctx);
+    p.preview.el.dataset.open = "1";
+  }
+
+  async function openPhotoSheet(ctx) {
     haptic();
-    openSheetGeneric(ctx.attachSheet.backdrop, ctx.attachSheet.sheet);
+    const p = ctx.picker;
+    resetPicker(ctx);
+    openSheetGeneric(p.backdrop, p.sheet);
+    setPickerHeight(ctx, "half", false);
+    const mySeq = p.reqSeq;
+    let auth = null;
+    try { auth = await dgPost("photoAuth"); } catch (e) {}
+    if (mySeq !== p.reqSeq) return; // sheet closed/reopened while the permission prompt was up
+    const status = (auth && auth.status) || "denied";
+    p.authStatus = status;
+    const ok = status === "authorized" || status === "limited";
+    p.limitedRow.style.display = status === "limited" ? "" : "none";
+    p.scroll.style.display = ok ? "" : "none";
+    p.deniedEl.style.display = ok ? "none" : "";
+    if (!ok) {
+      p.deniedText.textContent = status === "restricted"
+        ? "Photos access is restricted on this iPhone."
+        : "Allow Photos access for Ghost in Settings to send photos and videos.";
+      return;
+    }
+    // loadPickerPage's own finally already calls layoutPickerGrid once the metadata is in - forcing a SECOND
+    // full clear+rebuild right after would just discard and immediately requeue every thumbnail it had already
+    // started loading, for nothing.
+    await loadPickerPage(ctx);
+    if (mySeq === p.reqSeq) paintPickerEmpty(ctx);
+  }
+  function closePhotoSheet(ctx) {
+    const p = ctx.picker;
+    if (p.sheet.dataset.open !== "1") return;
+    closeSheetGeneric(p.backdrop, p.sheet);
+    p.reqSeq++; // drop any in-flight photoAuth/photoList/thumb work - see the reqSeq comment above
+    for (const tile of p.mounted.values()) releasePickerTile(tile);
+  }
+  function resetPicker(ctx) {
+    const p = ctx.picker;
+    p.reqSeq++;
+    for (const tile of p.mounted.values()) releasePickerTile(tile);
+    p.mounted.clear();
+    p.loadQueue.length = 0;
+    p.loadActive = 0;
+    p.grid.innerHTML = "";
+    p.grid.style.height = "0px";
+    p.items = [];
+    p.hasMore = true;
+    p.loadingPage = false;
+    p.selected = [];
+    p.tileSize = 0;
+    p.sending = false;
+    p.expandedIndex = null;
+    p.scroll.scrollTop = 0;
+    p.limitedRow.style.display = "none";
+    p.emptyEl.style.display = "none";
+    p.deniedEl.style.display = "none";
+    p.scroll.style.display = "";
+    repaintPickerSelection(ctx);
+  }
+  function reloadPickerFromTop(ctx) {
+    const p = ctx.picker;
+    if (p.authStatus !== "authorized" && p.authStatus !== "limited") return;
+    p.reqSeq++;
+    for (const tile of p.mounted.values()) { releasePickerTile(tile); tile.remove(); }
+    p.mounted.clear();
+    p.loadQueue.length = 0;
+    p.items = [];
+    p.hasMore = true;
+    p.loadingPage = false;
+    p.grid.innerHTML = "";
+    loadPickerPage(ctx).then(() => layoutPickerGrid(ctx, true));
+  }
+
+  // ---- sheet height: half by default, drag the grip up to full (see the Lessons note: convert every touch
+  // delta with pagePxToLocal(), the host is CSS-zoomed on the phone) ------------------------------------
+  function pickerMaxHeight(ctx) { return Math.max(320, ctx.root.clientHeight * 0.94); }
+  function pickerHalfHeight(ctx) { return Math.max(280, ctx.root.clientHeight * 0.55); }
+  function setPickerHeight(ctx, mode, animate) {
+    const p = ctx.picker;
+    p.heightMode = mode;
+    // Only ever ADD "gh-anim" here, never remove it: on the very first open this runs a tick before
+    // openSheetGeneric's own rAF flips data-open (which is what actually plays the slide-up), so removing
+    // the class here would race it and silently kill that transition. A drag-release passes animate=true to
+    // get a smooth snap between half/full; a plain open passes false and just sets the height outright.
+    if (animate) p.sheet.classList.add("gh-anim");
+    p.sheet.style.height = (mode === "full" ? pickerMaxHeight(ctx) : pickerHalfHeight(ctx)) + "px";
+    requestAnimationFrame(() => layoutPickerGrid(ctx, true));
+  }
+  function initPhotoSheetDrag(ctx) {
+    const p = ctx.picker;
+    let g = null;
+    p.grip.addEventListener("touchstart", (e) => {
+      if (!e.touches || e.touches.length !== 1) { g = null; return; }
+      const t = e.touches[0];
+      g = { y0: t.clientY, h0: p.sheet.getBoundingClientRect().height / pageScaleOf(p.sheet) };
+      p.sheet.classList.remove("gh-anim");
+    }, { passive: true });
+    p.grip.addEventListener("touchmove", (e) => {
+      if (!g || !e.touches || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const dyLocal = (g.y0 - t.clientY) * pagePxToLocal(); // dragging up (finger moves to smaller y) grows the sheet
+      p.sheet.style.height = clamp(g.h0 + dyLocal, 120, pickerMaxHeight(ctx)) + "px";
+    }, { passive: true });
+    function finish() {
+      if (!g) return;
+      g = null;
+      p.sheet.classList.add("gh-anim");
+      const cur = p.sheet.getBoundingClientRect().height / pageScaleOf(p.sheet);
+      const half = pickerHalfHeight(ctx);
+      if (cur < half * 0.55) { closePhotoSheet(ctx); return; }
+      setPickerHeight(ctx, cur > (half + pickerMaxHeight(ctx)) / 2 ? "full" : "half", true);
+    }
+    p.grip.addEventListener("touchend", finish, { passive: true });
+    p.grip.addEventListener("touchcancel", finish, { passive: true });
+  }
+
+  // ---- grid virtualization: only the rows within (viewport + a buffer) ever have a mounted tile/image ----
+  function pickerTileSize(ctx) {
+    const p = ctx.picker;
+    const w = p.grid.clientWidth || p.scroll.clientWidth || 300;
+    return Math.floor((w - PICKER_GAP * (p.cols - 1)) / p.cols);
+  }
+  function layoutPickerGrid(ctx, force) {
+    const p = ctx.picker;
+    const size = pickerTileSize(ctx);
+    if (!size) return;
+    if (force || size !== p.tileSize) {
+      p.tileSize = size;
+      for (const tile of p.mounted.values()) releasePickerTile(tile);
+      p.mounted.clear();
+      p.grid.innerHTML = "";
+    }
+    const rows = Math.ceil(p.items.length / p.cols);
+    p.grid.style.height = Math.max(0, rows * (p.tileSize + PICKER_GAP) - PICKER_GAP) + "px";
+    updatePickerVisible(ctx);
+  }
+  function schedulePickerLayout(ctx) {
+    const p = ctx.picker;
+    if (p._rafPending) return;
+    p._rafPending = true;
+    requestAnimationFrame(() => { p._rafPending = false; updatePickerVisible(ctx); });
+  }
+  function updatePickerVisible(ctx) {
+    const p = ctx.picker;
+    if (!p.tileSize) return;
+    const rowH = p.tileSize + PICKER_GAP;
+    const viewTop = p.scroll.scrollTop, viewH = p.scroll.clientHeight;
+    const firstRow = Math.max(0, Math.floor(viewTop / rowH) - PICKER_BUFFER_ROWS);
+    const lastRow = Math.ceil((viewTop + viewH) / rowH) + PICKER_BUFFER_ROWS;
+    const firstIndex = firstRow * p.cols;
+    const lastIndex = Math.min(p.items.length - 1, (lastRow + 1) * p.cols - 1);
+    for (const [index, tile] of Array.from(p.mounted)) {
+      if (index < firstIndex || index > lastIndex) { releasePickerTile(tile); p.mounted.delete(index); tile.remove(); }
+    }
+    for (let i = firstIndex; i <= lastIndex; i++) {
+      if (p.mounted.has(i)) continue;
+      const tile = buildPickerTile(ctx, i);
+      if (!tile) continue;
+      p.mounted.set(i, tile);
+      // Keep DOM order matching index (= visual) order rather than mount order: a plain appendChild would
+      // otherwise scramble it after a few scroll-driven remounts (absolute positioning still LOOKS right, but
+      // screen-reader swipe order and "the first tile in the DOM" would silently stop matching what's on screen).
+      let before = null;
+      for (const [idx2, el2] of p.mounted) { if (idx2 > i && (before == null || idx2 < before[0])) before = [idx2, el2]; }
+      if (before) p.grid.insertBefore(tile, before[1]); else p.grid.appendChild(tile);
+    }
+    if (p.hasMore && !p.loadingPage && lastIndex > p.items.length - p.cols * (PICKER_BUFFER_ROWS + 1)) loadPickerPage(ctx);
+  }
+  function buildPickerTile(ctx, index) {
+    const p = ctx.picker;
+    const item = p.items[index];
+    if (!item) return null;
+    const row = Math.floor(index / p.cols), col = index % p.cols;
+    const tile = el("div", "gh-photo-tile gh-press");
+    tile.setAttribute("role", "button");
+    tile.style.width = tile.style.height = p.tileSize + "px";
+    tile.style.transform = `translate(${col * (p.tileSize + PICKER_GAP)}px, ${row * (p.tileSize + PICKER_GAP)}px)`;
+    tile.dataset.index = String(index);
+    tile.dataset.id = item.id;
+    if (item.mediaType === "video") {
+      tile.dataset.video = "1";
+      const dur = el("span", "gh-photo-dur"); dur.textContent = fmtDuration(item.duration || 0);
+      tile.appendChild(dur);
+    }
+    const badge = el("span", "gh-photo-badge");
+    const expandBtn = el("button", "gh-photo-expand gh-hit");
+    expandBtn.appendChild(icon("expand", 13));
+    expandBtn.setAttribute("aria-label", "Preview");
+    tile.append(badge, expandBtn);
+    const selIdx = p.selected.indexOf(item.id);
+    tile.dataset.selected = selIdx !== -1 ? "1" : "0";
+    badge.textContent = selIdx !== -1 ? String(selIdx + 1) : "";
+    queuePickerThumb(ctx, tile, item);
+
+    tile.addEventListener("click", (e) => { if (expandBtn.contains(e.target)) return; haptic("light"); togglePickerSelect(ctx, item); });
+    let pressTimer = null;
+    const clearPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+    tile.addEventListener("touchstart", () => { clearPress(); pressTimer = setTimeout(() => { pressTimer = null; haptic("medium"); openPickerPreview(ctx, index); }, 420); }, { passive: true });
+    tile.addEventListener("touchmove", clearPress, { passive: true });
+    tile.addEventListener("touchend", clearPress, { passive: true });
+    tile.addEventListener("touchcancel", clearPress, { passive: true });
+    expandBtn.addEventListener("click", (e) => { e.stopPropagation(); openPickerPreview(ctx, index); });
+    return tile;
+  }
+  function releasePickerTile(tile) {
+    tile._released = true;
+    // If this tile's thumbnail load was still in flight, free its concurrency slot RIGHT NOW rather than
+    // waiting on the <img>'s load/error event: removing an image from the DOM mid-decode doesn't reliably
+    // fire either event in every engine, and waiting on it left the cap permanently short by one slot per
+    // interrupted load - which a fast scroll (or, worse, the picker's own ResizeObserver mid-transition)
+    // racks up far faster than 6, silently killing every future thumbnail for the rest of the session
+    // (device/rig finding, 2026-09-28). tile._settleLoad is idempotent, so if the event fires anyway later
+    // it's a harmless no-op instead of double-freeing the slot.
+    if (tile._settleLoad) tile._settleLoad();
+    if (tile._img) { tile._img.removeAttribute("src"); tile._img.remove(); tile._img = null; }
+  }
+  function queuePickerThumb(ctx, tile, item) {
+    const p = ctx.picker;
+    const gen = p.reqSeq;
+    p.loadQueue.push({
+      gen,
+      run: () => {
+        if (tile._released) { pickerLoadDone(ctx); return; }
+        const img = el("img", "gh-photo-thumb");
+        img.alt = ""; img.decoding = "async";
+        let settled = false;
+        const done = () => { if (settled) return; settled = true; tile._settleLoad = null; pickerLoadDone(ctx); };
+        tile._settleLoad = done;
+        img.addEventListener("load", done, { once: true });
+        img.addEventListener("error", done, { once: true });
+        tile._img = img;
+        tile.insertBefore(img, tile.firstChild);
+        img.src = pickerAssetUrl("thumb", item.id, 300);
+      },
+    });
+    pumpPickerLoads(ctx);
+  }
+  function pumpPickerLoads(ctx) {
+    const p = ctx.picker;
+    while (p.loadActive < PICKER_LOAD_MAX_CONCURRENT && p.loadQueue.length) {
+      const job = p.loadQueue.shift();
+      if (job.gen !== p.reqSeq) continue; // sheet was reset/reopened before this ever started - drop it
+      p.loadActive++;
+      job.run();
+    }
+  }
+  function pickerLoadDone(ctx) {
+    ctx.picker.loadActive = Math.max(0, ctx.picker.loadActive - 1);
+    pumpPickerLoads(ctx);
+  }
+  async function loadPickerPage(ctx) {
+    const p = ctx.picker;
+    if (p.loadingPage || !p.hasMore) return;
+    p.loadingPage = true;
+    const mySeq = p.reqSeq;
+    try {
+      const res = await dgPost("photoList", { offset: p.items.length, limit: PICKER_PAGE });
+      if (mySeq !== p.reqSeq) return;
+      const list = (res && res.items) || [];
+      p.items = p.items.concat(list);
+      p.hasMore = !!(res && res.hasMore) && list.length > 0;
+    } catch (e) {
+      if (mySeq === p.reqSeq) p.hasMore = false;
+    } finally {
+      if (mySeq === p.reqSeq) { p.loadingPage = false; layoutPickerGrid(ctx); paintPickerEmpty(ctx); }
+    }
+  }
+  function paintPickerEmpty(ctx) {
+    const p = ctx.picker;
+    p.emptyEl.style.display = (!p.loadingPage && p.items.length === 0 && (p.authStatus === "authorized" || p.authStatus === "limited")) ? "" : "none";
+  }
+
+  // ---- selection + send --------------------------------------------------------------------------------
+  function togglePickerSelect(ctx, item) {
+    const p = ctx.picker;
+    const idx = p.selected.indexOf(item.id);
+    if (idx !== -1) p.selected.splice(idx, 1);
+    else {
+      if (p.selected.length >= PICKER_MAX_SELECT) { ctx.showToast("Up to " + PICKER_MAX_SELECT + " at a time"); return; }
+      p.selected.push(item.id);
+    }
+    repaintPickerSelection(ctx);
+    if (p.preview.el.dataset.open === "1") paintPreviewSelectBadge(ctx);
+  }
+  function repaintPickerSelection(ctx) {
+    const p = ctx.picker;
+    for (const tile of p.mounted.values()) {
+      const i = p.selected.indexOf(tile.dataset.id);
+      tile.dataset.selected = i !== -1 ? "1" : "0";
+      tile.querySelector(".gh-photo-badge").textContent = i !== -1 ? String(i + 1) : "";
+    }
+    p.sendBar.dataset.show = p.selected.length ? "1" : "0";
+    if (!p.sending) p.sendLabel.textContent = "Send" + (p.selected.length ? " (" + p.selected.length + ")" : "");
+  }
+  async function sendPickerSelection(ctx) {
+    const p = ctx.picker;
+    if (!p.selected.length || p.sending) return;
+    const convId = ctx.state.currentConvId;
+    if (!convId) return;
+    p.sending = true;
+    p.sendBtn.disabled = true;
+    const ids = p.selected.slice();
+    let sentOk = 0;
+    for (let i = 0; i < ids.length; i++) {
+      p.sendLabel.textContent = "Sending " + (i + 1) + " of " + ids.length + "…";
+      const item = p.items.find((it) => it.id === ids[i]) || { id: ids[i] };
+      try {
+        const res = await dgPost("photoFull", { id: item.id });
+        if (!res || !res.data) throw new Error("no data");
+        const bin = atob(res.data);
+        const buf = new Uint8Array(bin.length);
+        for (let k = 0; k < bin.length; k++) buf[k] = bin.charCodeAt(k);
+        const mime = res.mime || (item.mediaType === "video" ? "video/mp4" : "image/jpeg");
+        const blob = new Blob([buf], { type: mime });
+        await api.sendMedia(convId, blob, { kind: item.mediaType === "video" ? "video" : "image" });
+        sentOk++;
+      } catch (e) { ctx.showToast("Couldn't send one of the items"); }
+    }
+    p.sending = false;
+    p.sendBtn.disabled = false;
+    if (sentOk) haptic("light");
+    closePhotoSheet(ctx);
   }
 
   // =====================================================================================================

@@ -87,6 +87,9 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var lastGhostSafe = ""
     private var speakerOn = false
     private var keepAwake: GhostKeepAwake?
+    // Ghost's built-in photo/gallery picker (composer's gallery button): PhotoKit behind a WKURLSchemeHandler,
+    // registered on the config below before the web view exists. nil outside Ghost mode.
+    private var photoPicker: GhostPhotoPicker?
     // The app switcher cover shows Ghost's own logo - the same picture as the Home Screen icon the user picked
     // (Settings > Appearance > App Icon), as a rounded app-icon tile - instead of the ghost emoji.
     private let shieldLogo = UIImageView()
@@ -226,9 +229,18 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                                            injectionTime: .atDocumentStart, forMainFrameOnly: true, in: world))
         scripts.addScriptMessageHandler(self, contentWorld: world, name: "dg")
 
+        // Must be registered on the configuration before the WKWebView below is created (WKURLSchemeHandler
+        // docs: setURLSchemeHandler(_:forURLScheme:) has no effect on a web view that already exists).
+        if Self.ghostMode {
+            let picker = GhostPhotoPicker(presenter: self)
+            config.setURLSchemeHandler(picker, forURLScheme: GhostPhotoPicker.scheme)
+            photoPicker = picker
+        }
+
         Self.preferHighRefresh(config.preferences)
         webView = WKWebView(frame: .zero, configuration: config)
         webView.customUserAgent = Self.userAgent
+        photoPicker?.attach(to: webView)
         // lets Safari's Web Inspector protocol (ios-webkit-debug-proxy on the PC, phone on USB) attach to the page
         if #available(iOS 16.4, *) { webView.isInspectable = true }
         webView.navigationDelegate = self
@@ -760,6 +772,26 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             saveToPhotos(data, video: (body["video"] as? Bool) ?? false) { error in
                 if let error { replyHandler(nil, error) } else { replyHandler(true, nil) }
             }
+
+        // MARK: Ghost's built-in photo picker (composer's gallery button; GhostPhotoPicker.swift does the work)
+        case "photoAuth":
+            guard let photoPicker else { return replyHandler(["status": "denied"], nil) }
+            photoPicker.handleAuth(reply: replyHandler)
+        case "photoManage":
+            guard let photoPicker else { return replyHandler(nil, "unavailable") }
+            photoPicker.handleManage()
+            replyHandler(true, nil)
+        case "photoOpenSettings":
+            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+            replyHandler(true, nil)
+        case "photoList":
+            guard let photoPicker else { return replyHandler(["items": [], "hasMore": false], nil) }
+            let offset = (body["offset"] as? NSNumber)?.intValue ?? 0
+            let limit = (body["limit"] as? NSNumber)?.intValue ?? 60
+            photoPicker.handleList(offset: offset, limit: limit, reply: replyHandler)
+        case "photoFull":
+            guard let photoPicker, let id = body["id"] as? String else { return replyHandler(nil, "bad id") }
+            photoPicker.handleFull(id: id, reply: replyHandler)
         case "cutout": // Ghost's sticker maker: lift the subject out of a photo (iOS 17 Vision), transparent PNG back
             guard let b64 = body["image"] as? String, let data = Data(base64Encoded: b64),
                   let image = UIImage(data: data), let cg = image.cgImage else { return replyHandler(nil, "bad image") }
