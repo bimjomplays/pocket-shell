@@ -87,16 +87,29 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var lastGhostSafe = ""
     private var speakerOn = false
     private var keepAwake: GhostKeepAwake?
+    // The app switcher cover shows Ghost's own logo - the same picture as the Home Screen icon the user picked
+    // (Settings > Appearance > App Icon), as a rounded app-icon tile - instead of the ghost emoji.
+    private let shieldLogo = UIImageView()
     private lazy var shield: UIView = {
         let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
-        let icon = UILabel()
-        icon.text = "👻"; icon.font = .systemFont(ofSize: 64); icon.textAlignment = .center
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        blur.contentView.addSubview(icon)
-        NSLayoutConstraint.activate([icon.centerXAnchor.constraint(equalTo: blur.contentView.centerXAnchor),
-                                     icon.centerYAnchor.constraint(equalTo: blur.contentView.centerYAnchor)])
+        self.shieldLogo.contentMode = .scaleAspectFill
+        self.shieldLogo.clipsToBounds = true
+        self.shieldLogo.layer.cornerRadius = 22
+        self.shieldLogo.layer.cornerCurve = .continuous
+        self.shieldLogo.translatesAutoresizingMaskIntoConstraints = false
+        blur.contentView.addSubview(self.shieldLogo)
+        NSLayoutConstraint.activate([self.shieldLogo.centerXAnchor.constraint(equalTo: blur.contentView.centerXAnchor),
+                                     self.shieldLogo.centerYAnchor.constraint(equalTo: blur.contentView.centerYAnchor),
+                                     self.shieldLogo.widthAnchor.constraint(equalToConstant: 96),
+                                     self.shieldLogo.heightAnchor.constraint(equalToConstant: 96)])
         return blur
     }()
+    /// "GhostLogo" + the variant of the current app icon ("AppIconBerry" -> "GhostLogoBerry"); the default icon -> "GhostLogo".
+    private func currentShieldLogo() -> UIImage? {
+        let alt = UIApplication.shared.alternateIconName ?? ""
+        let variant = alt.hasPrefix("AppIcon") ? String(alt.dropFirst("AppIcon".count)) : ""
+        return UIImage(named: "GhostLogo" + variant) ?? UIImage(named: "GhostLogo")
+    }
     /// Ghost's privacy shield (Settings > Chats): covers the app while it's in the app switcher or the screen is
     /// being recorded / mirrored. (iOS gives apps no way to block a plain screenshot.)
     // willResignActive fires while applicationState is still .active (so reading the state there never showed
@@ -112,6 +125,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         if show {
             // on the window (above the tab bar, launch picture and any sheet), not just this view
             let host: UIView = view.window ?? view
+            shieldLogo.image = currentShieldLogo()
             if shield.superview !== host { shield.removeFromSuperview(); shield.frame = host.bounds; shield.autoresizingMask = [.flexibleWidth, .flexibleHeight]; host.addSubview(shield) }
             host.bringSubviewToFront(shield)
         } else {
