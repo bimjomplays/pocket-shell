@@ -1769,8 +1769,17 @@
       //  - destinations from the send-to page: {conversations: [idObj], stories: [], phoneNumbers: [], massSnaps: []}
       const video = (opts && opts.kind === "video") || (blob.type && blob.type.startsWith("video"));
       const dimensions = { width: Math.round((opts && opts.width) || 1080), height: Math.round((opts && opts.height) || 1920) };
+      // overlayMedia (Ghost's snap editor: text/drawing/stickers on a VIDEO snap, kept apart from the
+      // video's own pixels) - a transparent PNG Blob at the same {width,height} as `dimensions`. Evidence
+      // this is the right shape, not a guess: resolveMediaInfos (search "a zipped snap comes back as
+      // [media, overlay]") shows the RECEIVE side already handles exactly this - a real snap's own zip can
+      // carry a second, transparent-PNG layer that gets attached to the preceding media item as `.overlay`
+      // and is rendered as a plain <img> on top of the media in the snap/story viewer (ghost/ui.js, search
+      // "ref.overlay"). We only wire this for VIDEO here (photos bake their edits straight into the JPEG in
+      // ui.js's renderEditorOutput instead, since a flat raster needs no extra send-path plumbing at all).
+      const overlayMedia = video && opts && opts.overlay instanceof Blob ? opts.overlay : undefined;
       const capturedSnap = video
-        ? { media: blob, dimensions, mediaType: "Video", hasAudio: opts && opts.hasAudio === false ? false : true, loopPlayback: false, overlayMedia: undefined }
+        ? { media: blob, dimensions, mediaType: "Video", hasAudio: opts && opts.hasAudio === false ? false : true, loopPlayback: false, overlayMedia }
         : { media: blob, dimensions, mediaType: "Image", hasAudio: false, loopPlayback: false };
       const ids = (Array.isArray(conversationIds) ? conversationIds : [conversationIds]).filter((x) => x && x !== "__story__").map(convIdObj);
       const stories = [];

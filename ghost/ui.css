@@ -1264,7 +1264,7 @@ input, textarea {
 }
 .gh-camera[data-open="1"] { display: block; }
 .gh-camera[data-shown="1"] { transform: none; }
-.gh-cam-live { position: absolute; inset: 0; overflow: hidden; background: #000; }
+.gh-cam-live { position: absolute; inset: 0; overflow: hidden; background: #000; touch-action: none; }
 .gh-cam-live video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .gh-cam-live video[data-mirror="1"] { transform: scaleX(-1); }
 .gh-camera.gh-cam-flash .gh-cam-live::after { content: ""; position: absolute; inset: 0; background: #fff; opacity: 0.7; }
@@ -1281,6 +1281,65 @@ input, textarea {
   display: flex; align-items: center; justify-content: space-around; z-index: 2; padding: 0 24px;
 }
 .gh-cam-spacer { width: 44px; }
+
+/* right-side vertical tool rail: flip / flash / self-timer, Snapchat-style */
+.gh-cam-rail { position: absolute; top: calc(var(--gh-safe-t) + 64px); right: 12px; z-index: 2; display: flex; flex-direction: column; gap: 14px; align-items: center; }
+.gh-cam-rail .gh-cam-btn[data-state="on"] { color: #ffd43b; background: rgba(0,0,0,0.5); }
+.gh-cam-rail .gh-cam-btn[data-state="unsupported"] { opacity: 0.4; }
+.gh-cam-timer-btn { flex-direction: column; gap: 0; font-size: 9px; font-weight: 700; }
+.gh-cam-timer-label { display: block; line-height: 1; margin-top: 1px; }
+
+/* pinch/drag zoom pill, shown while zooming and briefly after */
+.gh-cam-zoom-pill {
+  position: absolute; left: 50%; bottom: calc(var(--gh-safe-b) + 128px); transform: translateX(-50%);
+  background: rgba(0,0,0,0.45); color: #fff; font-size: 12px; font-weight: 700; padding: 5px 11px;
+  border-radius: 12px; z-index: 2; opacity: 0; transition: opacity 0.15s ease; pointer-events: none;
+}
+.gh-cam-zoom-pill[data-show="1"] { opacity: 1; }
+
+/* tap-to-focus ring */
+.gh-cam-focus {
+  position: absolute; width: 68px; height: 68px; margin: -34px 0 0 -34px;
+  border: 2px solid #fff; border-radius: 8px; z-index: 2; opacity: 0; pointer-events: none;
+  transform: scale(1.3); transition: opacity 0.15s ease, transform 0.25s var(--gh-spring);
+}
+.gh-cam-focus[data-show="1"] { opacity: 1; transform: scale(1); }
+
+/* flip: a blurred freeze-frame of the last frame plays a quick horizontal-squash "flip" while the new
+   stream (cached deviceId, so it's fast) warms up underneath */
+.gh-cam-freeze { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 1; opacity: 0; pointer-events: none; }
+.gh-camera[data-freeze="1"] .gh-cam-freeze { opacity: 1; filter: blur(8px); animation: gh-cam-flip-spin 0.5s ease; }
+@keyframes gh-cam-flip-spin { 0% { transform: scaleX(1); } 45% { transform: scaleX(0.05); } 55% { transform: scaleX(0.05); } 100% { transform: scaleX(1); } }
+
+/* recording timer pill, top center */
+.gh-cam-rectimer {
+  position: absolute; top: calc(var(--gh-safe-t) + 12px); left: 50%; transform: translateX(-50%);
+  background: rgba(255,59,92,0.9); color: #fff; font-size: 13px; font-weight: 700; letter-spacing: 0.02em;
+  padding: 4px 12px; border-radius: 10px; z-index: 2; opacity: 0; transition: opacity 0.15s ease; pointer-events: none;
+}
+.gh-camera[data-recording="1"] .gh-cam-rectimer { opacity: 1; }
+
+/* slide-to-lock target: appears up-and-left of the shutter while holding, like Snapchat */
+.gh-cam-lock {
+  position: absolute; right: calc(50% + 50px); bottom: calc(var(--gh-safe-b) + 92px); transform: scale(0.8);
+  width: 40px; height: 40px; border-radius: 50%; background: rgba(0,0,0,0.45); color: #fff;
+  display: flex; align-items: center; justify-content: center; z-index: 2;
+  opacity: 0; pointer-events: none; transition: opacity 0.18s ease, transform 0.18s var(--gh-spring);
+}
+.gh-camera[data-recording="1"] .gh-cam-lock { opacity: 1; transform: scale(1); pointer-events: auto; }
+.gh-camera[data-locked="1"] .gh-cam-lock { opacity: 0; pointer-events: none; }
+.gh-camera[data-locked="1"] .gh-shutter { border-color: #ff3b5c; }
+
+/* self-timer countdown, big center number */
+.gh-cam-selftimer {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 88px; font-weight: 800; color: #fff; text-shadow: 0 2px 24px rgba(0,0,0,0.6);
+  z-index: 2; opacity: 0; pointer-events: none; transition: opacity 0.15s ease;
+}
+.gh-cam-selftimer[data-show="1"] { opacity: 1; }
+
+/* front camera "flash": brighten the whole screen right around capture instead of a torch */
+.gh-camera.gh-cam-frontflash .gh-cam-live::after { content: ""; position: absolute; inset: 0; background: #fff; opacity: 1; }
 .gh-shutter {
   width: 84px; height: 84px; border-radius: 50%; position: relative;
   border: 5px solid #fff; background: transparent;
@@ -1295,7 +1354,68 @@ input, textarea {
 .gh-cam-review[data-open="1"] { display: block; animation: gh-fadein 0.18s ease; }
 .gh-cam-review-media { position: absolute; inset: 0; }
 .gh-cam-review-media img, .gh-cam-review-media video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.gh-cam-review-bottom { position: absolute; right: 16px; bottom: calc(var(--gh-safe-b) + 24px); z-index: 2; }
+
+/* ---- snap editor: text / draw / stickers on the review screen ------------------------------------------ */
+.gh-editor-draw { position: absolute; inset: 0; z-index: 4; pointer-events: none; touch-action: none; }
+.gh-editor-items { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+.gh-editor-item { position: absolute; touch-action: none; pointer-events: auto; }
+.gh-editor-item-text-inner { white-space: pre-wrap; word-break: break-word; text-align: center; font-weight: 700; font-size: 30px; line-height: 1.25; -webkit-font-smoothing: antialiased; }
+.gh-editor-item-text[data-style="0"] .gh-editor-item-text-inner { width: 100%; box-sizing: border-box; padding: 10px 16px; }
+.gh-editor-item-text[data-style="1"] .gh-editor-item-text-inner { font-size: 34.5px; font-weight: 800; padding: 0 10px; }
+.gh-editor-item-text[data-style="2"] .gh-editor-item-text-inner { padding: 8px 16px; border-radius: 999px; }
+.gh-editor-item-text[data-style="3"] .gh-editor-item-text-inner { text-align: left; font-size: 34.5px; font-weight: 800; padding: 0 10px; }
+.gh-editor-item-sticker { width: 110px; height: 110px; display: flex; align-items: center; justify-content: center; font-size: 64px; line-height: 1; }
+.gh-editor-item-sticker img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; -webkit-user-drag: none; }
+.gh-editor-textwrap { position: absolute; left: 16px; right: 16px; z-index: 7; display: none; text-align: center; }
+.gh-editor-textwrap[data-open="1"] { display: block; }
+.gh-editor-textinput {
+  display: inline-block; max-width: 100%; outline: none; min-height: 1.3em; font-size: 30px; font-weight: 700;
+  line-height: 1.25; text-align: center; color: #fff; -webkit-user-select: text; user-select: text;
+  -webkit-touch-callout: default; white-space: pre-wrap; word-break: break-word; caret-color: #fff;
+}
+.gh-editor-textinput:empty::before { content: attr(data-placeholder); opacity: 0.55; }
+.gh-editor-textinput[data-style="0"] { display: block; width: 100%; box-sizing: border-box; padding: 10px 16px; }
+.gh-editor-textinput[data-style="1"] { font-size: 34.5px; font-weight: 800; }
+.gh-editor-textinput[data-style="2"] { padding: 8px 16px; border-radius: 999px; }
+.gh-editor-textinput[data-style="3"] { text-align: left; font-size: 34.5px; font-weight: 800; }
+.gh-editor-colorbar {
+  /* display:none rather than opacity:0 while hidden: this machine's software (llvmpipe) WebKit compositor
+     paints a corrupted checkerboard where a `linear-gradient` background sits at opacity:0 - the same class
+     of stale/incorrectly-composited layer PROJECT_STATE.md and closeSheetGeneric()'s own comment already
+     document for this environment. display:none has no layer to get wrong. */
+  display: none; position: absolute; right: 10px; top: 20%; bottom: 32%; width: 14px; border-radius: 8px; z-index: 6;
+  touch-action: none; box-shadow: 0 0 0 1px rgba(255,255,255,0.25), 0 4px 16px rgba(0,0,0,0.35);
+}
+.gh-editor-colorbar[data-show="1"] { display: block; pointer-events: auto; }
+.gh-editor-colorthumb { position: absolute; left: 50%; top: 0; width: 26px; height: 26px; border-radius: 50%; background: #fff; border: 3px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.5); transform: translate(-50%,-50%); pointer-events: none; }
+.gh-editor-sizes { position: absolute; left: 10px; top: 38%; z-index: 6; display: none; flex-direction: column; gap: 10px; }
+.gh-editor-sizes[data-show="1"] { display: flex; }
+.gh-editor-size { width: 34px; height: 34px; border-radius: 50%; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; }
+.gh-editor-size i { display: block; border-radius: 50%; background: #fff; }
+.gh-editor-size[data-size="0"] i { width: 6px; height: 6px; }
+.gh-editor-size[data-size="1"] i { width: 11px; height: 11px; }
+.gh-editor-size[data-size="2"] i { width: 17px; height: 17px; }
+.gh-editor-size[data-on="1"] { background: var(--gh-accent); }
+/* the review's own top bar (discard + undo) must paint above the draw canvas, which covers the full screen
+   with pointer-events while the draw tool is active */
+.gh-cam-review > .gh-camera-top { z-index: 4; }
+.gh-editor-rail { position: absolute; right: 12px; top: calc(var(--gh-safe-t) + 64px); z-index: 4; display: flex; flex-direction: column; gap: 14px; }
+.gh-editor-tool[data-on="1"] { background: var(--gh-accent); }
+.gh-editor-trash {
+  position: absolute; left: 50%; bottom: calc(var(--gh-safe-b) + 26px); z-index: 8;
+  width: 60px; height: 60px; border-radius: 50%; background: rgba(20,20,20,0.55);
+  display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none;
+  transform: translateX(-50%) translateY(16px) scale(0.85);
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease;
+}
+.gh-editor-trash[data-show="1"] { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+.gh-editor-trash.gh-editor-trash-hover { background: var(--gh-danger); transform: translateX(-50%) translateY(0) scale(1.2); }
+.gh-editor-trash-ic { color: #fff; }
+.gh-cam-review-bottom-l { position: absolute; left: 16px; bottom: calc(var(--gh-safe-b) + 24px); z-index: 4; }
+.gh-cam-save { width: 46px; height: 46px; border-radius: 50%; background: rgba(0,0,0,0.35); color: #fff; display: flex; align-items: center; justify-content: center; }
+.gh-cam-save:active { transform: scale(0.9); }
+
+.gh-cam-review-bottom { position: absolute; right: 16px; bottom: calc(var(--gh-safe-b) + 24px); z-index: 4; }
 .gh-cam-sendto {
   display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 18px 0 22px; border-radius: 23px;
   background: var(--gh-accent); color: #fff; font-weight: 700; font-size: 16px; box-shadow: 0 6px 20px rgba(0,0,0,0.35);

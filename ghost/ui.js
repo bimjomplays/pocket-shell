@@ -100,6 +100,10 @@
     storiesTab: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/>',
     settingsTab: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.9 2.9l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1-1.6 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.9-2.9l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.9-2.9l.1.1a1.7 1.7 0 001.9.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.9 2.9l-.1.1a1.7 1.7 0 00-.3 1.9V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>',
     gallery: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5.5-5.5L6 19"/>',
+    textTool: '<path d="M4 6.5h16"/><path d="M12 6.5V19"/><path d="M9 19h6"/>',
+    undo: '<path d="M4 11h9a5.5 5.5 0 010 11h-3.5"/><path d="M8 6.5L3.5 11 8 15.5"/>',
+    flash: '<path d="M13 2L4 14h6l-1 8 9-12h-6z" fill="currentColor" stroke="none"/>',
+    timerIcon: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/>',
   };
   function icon(name, size, extraClass) {
     const wrap = document.createElement("span");
@@ -5293,15 +5297,29 @@
   // button. Then a full-screen preview and a "Send To" sheet with search + multi-select (someone may already be
   // picked when the camera was opened from a chat or by double-tapping their row). Sends as a real Snap (bridge sendSnap).
   const MAX_VIDEO_MS = 60000;
+  function perfNow() { return (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now(); }
+  function fmtRecTime(ms) { const s = Math.max(0, Math.floor(ms / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+
   function buildCamera(ctx) {
     const wrap = el("div", "gh-camera");
     wrap.innerHTML = `
       <div class="gh-cam-live"><div class="gh-camera-note">Starting camera…</div></div>
+      <canvas class="gh-cam-freeze"></canvas>
+      <div class="gh-cam-focus"></div>
       <div class="gh-camera-top">
         <button class="gh-cam-btn gh-hit" data-act="close"></button>
         <div class="gh-cam-to"></div>
-        <button class="gh-cam-btn gh-hit" data-act="flip"></button>
+        <div class="gh-cam-spacer"></div>
       </div>
+      <div class="gh-cam-rail">
+        <button class="gh-cam-btn gh-hit" data-act="flip"></button>
+        <button class="gh-cam-btn gh-hit" data-act="flash" data-state="off"></button>
+        <button class="gh-cam-btn gh-hit gh-cam-timer-btn" data-act="timer" data-mode="0"><span class="gh-cam-timer-label"></span></button>
+      </div>
+      <div class="gh-cam-zoom-pill" data-show="0">1.0x</div>
+      <div class="gh-cam-selftimer" data-show="0"></div>
+      <div class="gh-cam-rectimer">0:00</div>
+      <div class="gh-cam-lock"></div>
       <div class="gh-camera-bottom">
         <button class="gh-cam-btn gh-cam-lib gh-hit" data-act="library"></button>
         <button class="gh-shutter" aria-label="Take photo, hold for video">
@@ -5312,7 +5330,29 @@
       <input type="file" accept="image/*,video/*" hidden>
       <div class="gh-cam-review">
         <div class="gh-cam-review-media"></div>
-        <div class="gh-camera-top"><button class="gh-cam-btn gh-hit" data-act="retake"></button></div>
+        <canvas class="gh-editor-draw"></canvas>
+        <div class="gh-editor-items"></div>
+        <div class="gh-editor-textwrap">
+          <div class="gh-editor-textinput" contenteditable="true" data-style="0"></div>
+        </div>
+        <div class="gh-editor-colorbar"><div class="gh-editor-colorthumb"></div></div>
+        <div class="gh-editor-sizes">
+          <button class="gh-editor-size gh-hit" data-size="0"><i></i></button>
+          <button class="gh-editor-size gh-hit" data-size="1"><i></i></button>
+          <button class="gh-editor-size gh-hit" data-size="2"><i></i></button>
+        </div>
+        <div class="gh-camera-top">
+          <button class="gh-cam-btn gh-hit" data-act="retake"></button>
+          <div class="gh-cam-spacer"></div>
+          <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="undo" style="display:none"></button>
+        </div>
+        <div class="gh-editor-rail">
+          <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="text"></button>
+          <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="draw"></button>
+          <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="sticker"></button>
+        </div>
+        <div class="gh-editor-trash"><div class="gh-editor-trash-ic"></div></div>
+        <div class="gh-cam-review-bottom-l"><button class="gh-cam-save gh-hit" data-act="save"></button></div>
         <div class="gh-cam-review-bottom"><button class="gh-cam-sendto" data-act="sendto"><span>Send To</span></button></div>
       </div>
       <div class="gh-cam-picker">
@@ -5332,50 +5372,117 @@
     const q = (sel) => wrap.querySelector(sel);
     q('[data-act="close"]').appendChild(icon("close", 22)); q('[data-act="close"]').setAttribute("aria-label", "Close camera");
     q('[data-act="flip"]').appendChild(icon("flip", 22)); q('[data-act="flip"]').setAttribute("aria-label", "Flip camera");
+    q('[data-act="flash"]').appendChild(icon("flash", 18)); q('[data-act="flash"]').setAttribute("aria-label", "Flash");
+    q('[data-act="timer"]').insertBefore(icon("timerIcon", 15), q('[data-act="timer"]').firstChild); q('[data-act="timer"]').setAttribute("aria-label", "Self-timer");
+    q(".gh-cam-lock").appendChild(icon("lock", 16));
     q('[data-act="library"]').appendChild(icon("gallery", 22)); q('[data-act="library"]').setAttribute("aria-label", "Choose from library");
     q('[data-act="retake"]').appendChild(icon("close", 22)); q('[data-act="retake"]').setAttribute("aria-label", "Discard");
     q('[data-act="sendto"]').appendChild(icon("send", 18));
     q('[data-act="picker-back"]').appendChild(icon("back", 22)); q('[data-act="picker-back"]').setAttribute("aria-label", "Back");
     q('[data-act="send"]').appendChild(icon("send", 22));
+    q('[data-act="save"]').appendChild(icon("download", 20)); q('[data-act="save"]').setAttribute("aria-label", "Save to Photos");
+    q('[data-tool="text"]').appendChild(icon("textTool", 20)); q('[data-tool="text"]').setAttribute("aria-label", "Add text");
+    q('[data-tool="draw"]').appendChild(icon("edit", 20)); q('[data-tool="draw"]').setAttribute("aria-label", "Draw");
+    q('[data-tool="sticker"]').appendChild(icon("emoji", 20)); q('[data-tool="sticker"]').setAttribute("aria-label", "Stickers");
+    q('[data-tool="undo"]').appendChild(icon("undo", 20)); q('[data-tool="undo"]').setAttribute("aria-label", "Undo stroke");
 
     const c = {
       el: wrap, live: q(".gh-cam-live"), shutter: q(".gh-shutter"), ring: q(".gh-shutter-ring circle"), toEl: q(".gh-cam-to"),
       review: q(".gh-cam-review"), reviewMedia: q(".gh-cam-review-media"), picker: q(".gh-cam-picker"), list: q(".gh-cam-list"),
       search: q(".gh-cam-search input"), chosen: q(".gh-cam-chosen"), sendBtn: q('[data-act="send"]'), file: q('input[type="file"]'),
+      flashBtn: q('[data-act="flash"]'), timerBtn: q('[data-act="timer"]'), timerLabel: q(".gh-cam-timer-label"),
+      zoomPill: q(".gh-cam-zoom-pill"), focusRing: q(".gh-cam-focus"), freeze: q(".gh-cam-freeze"), lockTarget: q(".gh-cam-lock"),
+      recTimerEl: q(".gh-cam-rectimer"), selfTimerEl: q(".gh-cam-selftimer"),
       stream: null, video: null, facing: "user", recording: false, recorder: null, chunks: [], recStart: 0, recTimer: null,
       captured: null, picked: new Set(), preselect: null, sending: false,
+      gen: 0,                                            // bumped on every stream (re)start so a stale getUserMedia
+                                                           // promise (flip/open spam) stops its tracks instead of applying
+      devices: { user: null, environment: null, ultra: null }, devicesReady: false,
+      audioTrack: null,                                   // mic track, requested once on first recording, then reused
+      torchSupported: false, torchOn: false, flash: "off",
+      timerMode: 0,                                       // 0 / 3 / 10 (seconds)
+      selfTimerRunning: false, selfTimerTimer: null,
+      zoom: 1, zoomMin: 1, zoomMax: 1, zoomHardware: false, usingUltra: false, pinch: null,
+      lockedRecording: false, startingRecording: false, recordCancelled: false, recTickTimer: null,
+      _zoomTimer: null, _zoomPillTimer: null,
     };
     q('[data-act="close"]').addEventListener("click", () => { haptic("light"); closeCamera(ctx); });
     q('[data-act="flip"]').addEventListener("click", () => flipCamera(ctx));
+    c.flashBtn.addEventListener("click", () => toggleFlash(ctx));
+    c.timerBtn.addEventListener("click", () => cycleTimer(ctx));
     q('[data-act="library"]').addEventListener("click", () => { haptic("light"); c.file.click(); });
     c.file.addEventListener("change", () => {
       const f = c.file.files && c.file.files[0];
       c.file.value = "";
       if (f) openReview(ctx, f, f.type.startsWith("video") ? "video" : "image", false);
     });
-    q('[data-act="retake"]').addEventListener("click", () => { haptic("light"); closeReview(ctx); startCameraStream(ctx); });
+    q('[data-act="retake"]').addEventListener("click", () => { haptic("light"); discardReview(ctx); });
     q('[data-act="sendto"]').addEventListener("click", () => { haptic(); openPicker(ctx); });
     q('[data-act="picker-back"]').addEventListener("click", () => { haptic("light"); c.picker.dataset.open = "0"; });
     q('[data-act="send"]').addEventListener("click", () => sendSnapNow(ctx));
+    q('[data-act="save"]').addEventListener("click", () => saveSnapNow(ctx));
     c.search.addEventListener("input", () => renderPicker(ctx));
+    buildSnapEditor(ctx, c);
 
-    // double-tap the preview to flip, like Snapchat
-    let lastTap = 0;
-    c.live.addEventListener("click", () => { const t = nowMs(); if (t - lastTap < 300) { flipCamera(ctx); lastTap = 0; } else lastTap = t; });
+    // double-tap the preview to flip (kept as before); a single tap instead shows a focus ring and, on
+    // hardware that advertises point-of-interest focus (iOS cameras currently don't), asks for a real focus
+    // there. Two fingers pinching zooms (see beginPinch/movePinch below).
+    let lastTap = 0, tapTimer = null;
+    c.live.addEventListener("click", (e) => {
+      const t = nowMs();
+      if (t - lastTap < 300) { clearTimeout(tapTimer); lastTap = 0; flipCamera(ctx); return; }
+      lastTap = t;
+      const x = e.clientX, y = e.clientY;
+      tapTimer = setTimeout(() => { if (!c.pinch) tapToFocus(ctx, x, y); }, 300);
+    });
+    c.live.addEventListener("touchstart", (e) => { if (e.touches.length === 2) { clearTimeout(tapTimer); beginPinch(ctx, e); } }, { passive: true });
+    c.live.addEventListener("touchmove", (e) => { if (c.pinch && e.touches.length === 2) { e.preventDefault(); movePinch(ctx, e); } }, { passive: false });
+    c.live.addEventListener("touchend", (e) => { if (c.pinch && e.touches.length < 2) endPinch(ctx); }, { passive: true });
+    c.live.addEventListener("touchcancel", () => endPinch(ctx), { passive: true });
 
-    let pressTimer = null, pressed = false;
-    const down = (e) => { e.preventDefault(); pressed = true; pressTimer = setTimeout(() => { if (pressed) startRecording(ctx); }, 300); };
+    // shutter: tap = photo (through the self-timer if one is set), hold = record, drag up while holding =
+    // zoom (like Snapchat), drag onto the lock target while holding = hands-free recording.
+    let pressTimer = null, pressed = false, holdX0 = 0, holdY0 = 0, holdZoom0 = 1;
+    const down = (e) => {
+      if (c.lockedRecording) return; // once locked, only the shutter's click (below) stops it
+      if (c.selfTimerRunning) return; // a photo is already counting down
+      e.preventDefault();
+      pressed = true;
+      const t = (e.touches && e.touches[0]) || e;
+      holdX0 = t.clientX; holdY0 = t.clientY; holdZoom0 = c.zoom;
+      pressTimer = setTimeout(() => { if (pressed) startRecording(ctx); }, 300);
+    };
+    const moveHold = (e) => {
+      if (!pressed || !c.recording) return;
+      const t = (e.touches && e.touches[0]) || e;
+      const dx = t.clientX - holdX0, dy = t.clientY - holdY0;
+      if (!c.lockedRecording) {
+        const rect = c.lockTarget.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+        if (Math.hypot(t.clientX - cx, t.clientY - cy) < 34) lockRecording(ctx);
+      }
+      const range = (c.zoomMax - c.zoomMin) || 1;
+      setZoom(ctx, clamp(holdZoom0 + (-dy / 260) * range, c.zoomMin, c.zoomMax), { showPill: true });
+      void dx; // horizontal delta only feeds the lock-target hit test above, not the zoom
+    };
     const up = () => {
       if (!pressed) return;
       pressed = false;
       clearTimeout(pressTimer);
-      if (c.recording) stopRecording(ctx); else takePhoto(ctx);
+      if (c.lockedRecording) return; // stays recording until the shutter (or lock target) is tapped again
+      if (c.recording) { stopRecording(ctx); scheduleZoomPillHide(ctx); return; }
+      if (c.timerMode > 0) runSelfTimerThen(ctx, () => takePhoto(ctx));
+      else takePhoto(ctx);
     };
     c.shutter.addEventListener("touchstart", down, { passive: false });
+    c.shutter.addEventListener("touchmove", moveHold, { passive: true });
     c.shutter.addEventListener("touchend", up);
     c.shutter.addEventListener("touchcancel", up);
     c.shutter.addEventListener("mousedown", down);
+    c.shutter.addEventListener("mousemove", moveHold);
     c.shutter.addEventListener("mouseup", up);
+    c.shutter.addEventListener("click", () => { if (c.lockedRecording) stopRecording(ctx); });
+    c.lockTarget.addEventListener("click", () => { haptic("light"); if (c.lockedRecording) stopRecording(ctx); });
     return c;
   }
   function openCamera(ctx, opts) {
@@ -5386,25 +5493,42 @@
     c.toEl.textContent = conv ? conv.title : "";
     c.toEl.style.display = conv ? "" : "none";
     closeReview(ctx);
+    c.zoom = 1; c.usingUltra = false;
+    c.timerMode = 0; c.timerBtn.dataset.mode = "0"; c.timerLabel.textContent = "";
+    c.flash = "off"; c.torchOn = false;
     c.el.dataset.open = "1";
     requestAnimationFrame(() => { c.el.dataset.shown = "1"; });
     startCameraStream(ctx);
   }
   function closeCamera(ctx) {
     const c = ctx.camera;
+    c.gen++; // void any getUserMedia still in flight (open/flip spam) once it resolves
     if (c.recording) { try { c.recorder.stop(); } catch (e) {} c.recording = false; }
+    c.lockedRecording = false; c.el.dataset.locked = "0"; c.el.dataset.recording = "0";
+    clearInterval(c.recTickTimer); c.recTickTimer = null;
+    clearTimeout(c.selfTimerTimer); c.selfTimerRunning = false; c.selfTimerEl.dataset.show = "0";
     c.el.dataset.shown = "0";
-    stopCameraStream(ctx);
+    closeCameraTracks(ctx);
     setTimeout(() => { if (c.el.dataset.shown !== "1") { c.el.dataset.open = "0"; closeReview(ctx); } }, 280);
   }
-  async function startCameraStream(ctx) {
+  async function startCameraStream(ctx, opts) {
     const c = ctx.camera;
+    const myGen = ++c.gen;
     stopCameraStream(ctx);
     if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) { c.live.innerHTML = '<div class="gh-camera-note">No camera here</div>'; return; }
+    // Video-only by default: the mic is requested (and cached) the first time recording actually needs it,
+    // so flipping or reopening the camera never re-prompts for microphone access. A cached exact deviceId
+    // (see refreshDeviceMap) makes flips instant; otherwise we fall back to facingMode like before.
+    const wantDeviceId = opts && opts.deviceId;
+    const primary = wantDeviceId
+      ? { deviceId: { exact: wantDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+      : { facingMode: c.facing, width: { ideal: 1920 }, height: { ideal: 1080 } };
+    const fallback = wantDeviceId ? { deviceId: { exact: wantDeviceId } } : { facingMode: c.facing };
+    const t0 = perfNow();
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: c.facing, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: true })
-        .catch(() => navigator.mediaDevices.getUserMedia({ video: { facingMode: c.facing }, audio: false }));
-      if (ctx.camera.el.dataset.open !== "1") { stream.getTracks().forEach((t) => t.stop()); return; }
+      const stream = await navigator.mediaDevices.getUserMedia({ video: primary, audio: false })
+        .catch(() => navigator.mediaDevices.getUserMedia({ video: fallback, audio: false }));
+      if (myGen !== c.gen || c.el.dataset.open !== "1") { stream.getTracks().forEach((t) => t.stop()); return; }
       c.stream = stream;
       c.live.innerHTML = "";
       const video = el("video");
@@ -5413,32 +5537,285 @@
       video.dataset.mirror = c.facing === "user" ? "1" : "0";
       c.live.appendChild(video);
       c.video = video;
+      trackFirstFrame(video, t0, (opts && opts.label) || "open");
+      setupZoomCapability(ctx);
+      if (!c.devicesReady) refreshDeviceMap(ctx);
     } catch (e) {
       gtrail("camera failed " + (e && (e.name || e.message)));
       c.live.innerHTML = '<div class="gh-camera-note">Camera unavailable. Allow camera access for Ghost in Settings.</div>';
     }
   }
+  function trackFirstFrame(video, t0, label) {
+    // Prefer requestVideoFrameCallback (WebKit has shipped it since Safari 15.4) for a true first-decoded-
+    // frame timestamp; fall back to loadeddata on anything older. Logged through gtrail so device logs carry
+    // real open/flip timings instead of guesses.
+    const done = (how) => { gtrail("camera " + label + " ttff " + Math.round(perfNow() - t0) + "ms (" + how + ")"); };
+    if (typeof video.requestVideoFrameCallback === "function") video.requestVideoFrameCallback(() => done("rVFC"));
+    else video.addEventListener("loadeddata", () => done("loadeddata"), { once: true });
+  }
   function stopCameraStream(ctx) {
     const c = ctx.camera;
     if (c.stream) { c.stream.getTracks().forEach((t) => t.stop()); c.stream = null; }
+    if (c.video) { c.video.srcObject = null; c.video.remove(); }
     c.video = null;
   }
-  function flipCamera(ctx) {
-    haptic("light");
+  function closeCameraTracks(ctx) {
     const c = ctx.camera;
-    if (c.recording) return;
+    stopCameraStream(ctx);
+    if (c.audioTrack) { try { c.audioTrack.stop(); } catch (e) {} c.audioTrack = null; }
+  }
+  async function refreshDeviceMap(ctx) {
+    const c = ctx.camera;
+    c.devicesReady = true; // set up front so concurrent stream starts don't queue duplicate enumerations
+    try {
+      const list = await navigator.mediaDevices.enumerateDevices();
+      for (const d of list) {
+        if (d.kind !== "videoinput") continue;
+        const label = (d.label || "").toLowerCase();
+        if (label.includes("front")) c.devices.user = c.devices.user || d.deviceId;
+        else if (label.includes("ultra")) c.devices.ultra = c.devices.ultra || d.deviceId;
+        else if (label.includes("back") || label.includes("rear") || label.includes("environment")) c.devices.environment = c.devices.environment || d.deviceId;
+      }
+      // Labels can be blank pre-permission or generic on some devices: whichever facing we're already
+      // streaming from, if still unclassified, is at least the deviceId under our feet right now.
+      if (!c.devices[c.facing]) { const t = c.stream && c.stream.getVideoTracks()[0]; if (t) c.devices[c.facing] = (t.getSettings().deviceId) || null; }
+    } catch (e) { gtrail("enumerateDevices failed " + (e && e.message)); }
+  }
+  function setupZoomCapability(ctx) {
+    const c = ctx.camera;
+    c.zoomHardware = false;
+    const track = c.stream && c.stream.getVideoTracks()[0];
+    let caps = null;
+    if (track && typeof track.getCapabilities === "function") { try { caps = track.getCapabilities(); } catch (e) {} }
+    // Hardware zoom via the MediaStreamTrack `zoom` constraint is part of the Media Capture spec, but as of
+    // iOS 26 WebKit does not advertise a `zoom` entry from getCapabilities() on iPhone camera tracks (the
+    // Safari 26.0 release notes list no getUserMedia changes, and third-party testing confirms it - see
+    // oberhofer.co's MediaStreamTrack capabilities writeup and the Dynamsoft camera-zoom-control piece).
+    // This branch is here for whenever WebKit ships it; until then every device on this build takes the
+    // digital-zoom path below.
+    if (caps && caps.zoom && typeof caps.zoom.max === "number") {
+      c.zoomHardware = true;
+      c.zoomMin = caps.zoom.min || 1; c.zoomMax = caps.zoom.max;
+      c.zoom = clamp(c.zoom || 1, c.zoomMin, c.zoomMax);
+      throttledApplyHardwareZoom(ctx);
+    } else {
+      c.zoomMin = 1; c.zoomMax = 5; c.zoom = 1; // digital crop-in only; see applyZoomVisual/captureFrame
+    }
+    applyZoomVisual(ctx);
+    setupTorchCapability(ctx, caps);
+  }
+  function setupTorchCapability(ctx, caps) {
+    const c = ctx.camera;
+    // Torch (the back-camera flash constraint) IS supported by WebKit - added October 2023, confirmed
+    // working from iOS 17.5.1 onward (webkit.org bug 243075) - so this is a real hardware capability check,
+    // not a stub. Front camera has no torch; its "flash" is a screen-brightness flash at capture (takePhoto).
+    c.torchSupported = !!(caps && caps.torch);
+    c.torchOn = false;
+    paintFlashBtn(ctx);
+  }
+  function toggleFlash(ctx) {
+    const c = ctx.camera;
+    haptic("light");
+    if (c.facing === "environment") {
+      if (!c.torchSupported) { ctx.showToast("Flash isn't supported on this camera"); return; }
+      applyTorch(ctx, !c.torchOn);
+    } else {
+      c.flash = c.flash === "on" ? "off" : "on"; // front camera: a screen-flash right at capture (takePhoto)
+      paintFlashBtn(ctx);
+    }
+  }
+  function applyTorch(ctx, on) {
+    const c = ctx.camera;
+    const track = c.stream && c.stream.getVideoTracks()[0];
+    if (!track) return;
+    track.applyConstraints({ advanced: [{ torch: on }] })
+      .then(() => { c.torchOn = on; c.flash = on ? "on" : "off"; paintFlashBtn(ctx); })
+      .catch((e) => { gtrail("torch failed " + (e && e.message)); ctx.showToast("Couldn't switch on the flash"); });
+  }
+  function paintFlashBtn(ctx) {
+    const c = ctx.camera;
+    if (c.facing === "environment") c.flashBtn.dataset.state = !c.torchSupported ? "unsupported" : (c.torchOn ? "on" : "off");
+    else c.flashBtn.dataset.state = c.flash === "on" ? "on" : "off";
+  }
+  function cycleTimer(ctx) {
+    const c = ctx.camera;
+    haptic("light");
+    c.timerMode = c.timerMode === 0 ? 3 : c.timerMode === 3 ? 10 : 0;
+    c.timerBtn.dataset.mode = String(c.timerMode);
+    c.timerLabel.textContent = c.timerMode ? c.timerMode + "s" : "";
+  }
+  function runSelfTimerThen(ctx, fn) {
+    const c = ctx.camera;
+    if (c.selfTimerRunning) return;
+    c.selfTimerRunning = true;
+    let n = c.timerMode;
+    c.selfTimerEl.textContent = String(n);
+    c.selfTimerEl.dataset.show = "1";
+    const step = () => {
+      n--;
+      if (n <= 0) { c.selfTimerEl.dataset.show = "0"; c.selfTimerRunning = false; fn(); return; }
+      haptic("light");
+      c.selfTimerEl.textContent = String(n);
+      c.selfTimerTimer = setTimeout(step, 1000);
+    };
+    c.selfTimerTimer = setTimeout(step, 1000);
+  }
+  function tapToFocus(ctx, clientX, clientY) {
+    const c = ctx.camera;
+    const rect = c.live.getBoundingClientRect();
+    const x = clientX - rect.left, y = clientY - rect.top;
+    c.focusRing.style.left = x + "px"; c.focusRing.style.top = y + "px";
+    c.focusRing.dataset.show = "0"; void c.focusRing.offsetWidth; c.focusRing.dataset.show = "1";
+    setTimeout(() => { c.focusRing.dataset.show = "0"; }, 700);
+    const track = c.stream && c.stream.getVideoTracks()[0];
+    if (!track || typeof track.getCapabilities !== "function") return;
+    let caps = null; try { caps = track.getCapabilities(); } catch (e) {}
+    // Real point-of-interest focus needs `pointsOfInterest` + a manual/single-shot focusMode in
+    // getCapabilities(); iOS camera tracks don't currently advertise either, so this stays best-effort and
+    // the ring above (always shown) is the feedback that actually reaches the user on this hardware.
+    if (caps && caps.pointsOfInterest && caps.focusMode && caps.focusMode.indexOf("single-shot") !== -1) {
+      const nx = clamp(x / rect.width, 0, 1), ny = clamp(y / rect.height, 0, 1);
+      track.applyConstraints({ advanced: [{ focusMode: "single-shot", pointsOfInterest: [{ x: nx, y: ny }] }] }).catch(() => {});
+    }
+  }
+  function beginPinch(ctx, e) {
+    const c = ctx.camera;
+    const [a, b] = e.touches;
+    c.pinch = { d0: Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY), zoom0: c.zoom };
+  }
+  function movePinch(ctx, e) {
+    const c = ctx.camera;
+    if (!c.pinch) return;
+    const [a, b] = e.touches;
+    const d = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
+    const raw = d / Math.max(1, c.pinch.d0); // unclamped gesture ratio, also used to detect the 0.5x crossing
+    if (c.devices.ultra && !c.recording) {
+      if (!c.usingUltra && c.pinch.zoom0 * raw < 0.7) { switchUltraWide(ctx, true); return; }
+      if (c.usingUltra && c.pinch.zoom0 * raw > 1.6) { switchUltraWide(ctx, false); return; }
+    }
+    setZoom(ctx, clamp(c.pinch.zoom0 * raw, c.zoomMin, c.zoomMax), { showPill: true });
+  }
+  function endPinch(ctx) {
+    const c = ctx.camera;
+    if (!c.pinch) return;
+    c.pinch = null;
+    scheduleZoomPillHide(ctx);
+  }
+  function switchUltraWide(ctx, toUltra) {
+    // Optional/cheap: iPhone exposes the 0.5x lens as its own deviceId, so crossing the ~0.7x pinch
+    // threshold does a fast device-id switch (same freeze-frame path as flipCamera) instead of pretending to
+    // "zoom out" digitally, which the wide (already object-fit:cover) preview can't actually do.
+    const c = ctx.camera;
+    const targetId = toUltra ? c.devices.ultra : c.devices.environment;
+    if (!targetId) return;
+    c.usingUltra = toUltra;
+    haptic("light");
+    freezeCurrentFrame(ctx);
+    startCameraStream(ctx, { deviceId: targetId, label: "ultra-switch" }).then(() => {
+      c.zoom = 1;
+      if (c.pinch) c.pinch = { d0: c.pinch.d0, zoom0: 1 };
+      applyZoomVisual(ctx);
+      thawFrame(ctx);
+    });
+    setTimeout(() => thawFrame(ctx), 900);
+  }
+  function setZoom(ctx, value, opts) {
+    const c = ctx.camera;
+    c.zoom = value;
+    applyZoomVisual(ctx);
+    if (opts && opts.showPill) showZoomPill(ctx);
+    if (c.zoomHardware) throttledApplyHardwareZoom(ctx);
+  }
+  function applyZoomVisual(ctx) {
+    const c = ctx.camera;
+    const display = c.usingUltra ? c.zoom * 0.5 : c.zoom;
+    c.zoomPill.textContent = display.toFixed(1) + "x";
+    if (!c.video) return;
+    if (c.zoomHardware || c.zoom === 1) { c.video.style.transform = ""; return; }
+    // Digital zoom: scale (and later crop, in captureFrame) the preview. For video we deliberately only
+    // zoom the live preview, not the recorded output - re-rendering every frame through a canvas into
+    // MediaRecorder to bake the crop in would cost a per-frame draw for the whole clip's length, which is
+    // exactly the "hurts recording" case the brief says to avoid; a still photo pays that cost exactly once.
+    c.video.style.transform = (c.facing === "user" ? "scaleX(-1) " : "") + "scale(" + c.zoom.toFixed(3) + ")";
+  }
+  function throttledApplyHardwareZoom(ctx) {
+    const c = ctx.camera;
+    if (c._zoomTimer) return;
+    c._zoomTimer = setTimeout(() => {
+      c._zoomTimer = null;
+      const track = c.stream && c.stream.getVideoTracks()[0];
+      if (track) track.applyConstraints({ advanced: [{ zoom: c.zoom }] }).catch((e) => gtrail("zoom constraint failed " + (e && e.message)));
+    }, 60);
+  }
+  function showZoomPill(ctx) {
+    const c = ctx.camera;
+    clearTimeout(c._zoomPillTimer);
+    c.zoomPill.dataset.show = "1";
+  }
+  function scheduleZoomPillHide(ctx) {
+    const c = ctx.camera;
+    clearTimeout(c._zoomPillTimer);
+    c._zoomPillTimer = setTimeout(() => { c.zoomPill.dataset.show = "0"; }, 900);
+  }
+  function lockRecording(ctx) {
+    const c = ctx.camera;
+    if (c.lockedRecording) return;
+    c.lockedRecording = true;
+    c.el.dataset.locked = "1";
+    haptic("medium");
+  }
+  function freezeCurrentFrame(ctx) {
+    const c = ctx.camera;
+    const v = c.video;
+    if (!v || !v.videoWidth) return;
+    const cv = c.freeze;
+    cv.width = v.videoWidth; cv.height = v.videoHeight;
+    const g = cv.getContext("2d");
+    g.save();
+    if (c.facing === "user") { g.translate(cv.width, 0); g.scale(-1, 1); }
+    g.drawImage(v, 0, 0);
+    g.restore();
+    c.el.dataset.freeze = "1";
+    c.el.classList.add("gh-cam-flipping");
+  }
+  function thawFrame(ctx) {
+    const c = ctx.camera;
+    if (c.el.dataset.freeze !== "1") return;
+    c.el.dataset.freeze = "0";
+    setTimeout(() => c.el.classList.remove("gh-cam-flipping"), 260);
+  }
+  function flipCamera(ctx) {
+    const c = ctx.camera;
+    if (c.recording || c.pinch) return;
+    haptic("light");
+    freezeCurrentFrame(ctx);
     c.facing = c.facing === "user" ? "environment" : "user";
-    startCameraStream(ctx);
+    c.torchOn = false; c.flash = "off"; c.zoom = 1; c.usingUltra = false;
+    const targetId = c.devices[c.facing];
+    startCameraStream(ctx, targetId ? { deviceId: targetId, label: "flip" } : { label: "flip" }).then(() => thawFrame(ctx));
+    setTimeout(() => thawFrame(ctx), 900); // never leave the freeze frame up if the new stream stalls
   }
   function takePhoto(ctx) {
     const c = ctx.camera;
-    haptic("medium");
     const v = c.video;
     if (!v || !v.videoWidth) { ctx.showToast("Camera isn't ready yet"); return; }
-    // what you saw is what you send: crop the frame to the screen's shape (like the live preview), mirror selfies
+    haptic("medium");
+    if (c.facing === "user" && c.flash === "on") {
+      // Front camera has no torch, so "flash" is a screen-brightness flash timed around the capture.
+      c.el.classList.add("gh-cam-frontflash");
+      setTimeout(() => { captureFrame(ctx); setTimeout(() => c.el.classList.remove("gh-cam-frontflash"), 160); }, 120);
+    } else captureFrame(ctx);
+  }
+  function captureFrame(ctx) {
+    const c = ctx.camera;
+    const v = c.video;
+    // what you saw is what you send: crop the frame to the screen's shape (like the live preview), mirror
+    // selfies, and bake in whatever digital zoom the preview was showing (hardware zoom already changed the
+    // sensor's own output, so no extra crop is needed on that path).
     const W = v.videoWidth, H = v.videoHeight, target = c.live.clientWidth / Math.max(1, c.live.clientHeight);
     let sw = W, sh = H;
     if (W / H > target) sw = Math.round(H * target); else sh = Math.round(W / target);
+    if (!c.zoomHardware && c.zoom > 1) { sw = Math.round(sw / c.zoom); sh = Math.round(sh / c.zoom); }
     const canvas = document.createElement("canvas");
     canvas.width = sw; canvas.height = sh;
     const g = canvas.getContext("2d");
@@ -5448,18 +5825,40 @@
     setTimeout(() => c.el.classList.remove("gh-cam-flash"), 160);
     canvas.toBlob((blob) => { if (blob) openReview(ctx, blob, "image", true, { width: sw, height: sh }); }, "image/jpeg", 0.9);
   }
-  function startRecording(ctx) {
+  async function ensureAudioTrack(ctx) {
+    const c = ctx.camera;
+    if (c.audioTrack && c.audioTrack.readyState === "live") return c.audioTrack;
+    const a = await navigator.mediaDevices.getUserMedia({ audio: true });
+    c.audioTrack = a.getAudioTracks()[0] || null;
+    return c.audioTrack;
+  }
+  async function startRecording(ctx) {
     const c = ctx.camera;
     if (!c.stream || typeof MediaRecorder === "undefined") { ctx.showToast("Video isn't available here"); return; }
     haptic("medium");
     c.chunks = [];
+    c.startingRecording = true; c.recordCancelled = false;
+    c.el.dataset.recording = "1";
+    c.recTimerEl.textContent = "0:00";
+    let recStream = c.stream, hasAudio = false;
+    try {
+      // Mic permission/track is requested here, the first time a recording actually needs it, then cached
+      // on ctx.camera.audioTrack and reused - flipping or reopening the camera never touches the mic again.
+      const audioTrack = await ensureAudioTrack(ctx);
+      const videoTrack = c.stream.getVideoTracks()[0];
+      if (audioTrack && videoTrack) { recStream = new MediaStream([videoTrack, audioTrack]); hasAudio = true; }
+    } catch (e) { gtrail("mic permission failed " + (e && e.message)); }
+    c.startingRecording = false;
+    if (c.recordCancelled || c.el.dataset.open !== "1") { c.el.dataset.recording = "0"; return; }
     try {
       const type = ["video/mp4;codecs=avc1", "video/mp4", "video/webm"].find((t) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t));
-      c.recorder = type ? new MediaRecorder(c.stream, { mimeType: type }) : new MediaRecorder(c.stream);
+      c.recorder = type ? new MediaRecorder(recStream, { mimeType: type }) : new MediaRecorder(recStream);
       const mime = (c.recorder.mimeType || type || "video/mp4").split(";")[0];
-      const dims = { width: c.video ? c.video.videoWidth : 1080, height: c.video ? c.video.videoHeight : 1920, hasAudio: c.stream.getAudioTracks().length > 0 };
+      const dims = { width: c.video ? c.video.videoWidth : 1080, height: c.video ? c.video.videoHeight : 1920, hasAudio };
       c.recorder.ondataavailable = (e) => { if (e.data && e.data.size) c.chunks.push(e.data); };
       c.recorder.onstop = () => {
+        clearInterval(c.recTickTimer); c.recTickTimer = null;
+        c.el.dataset.recording = "0"; c.el.dataset.locked = "0"; c.lockedRecording = false;
         const blob = new Blob(c.chunks, { type: mime });
         if (nowMs() - c.recStart < 500 || !blob.size) { takePhotoFallback(ctx); return; }
         openReview(ctx, blob, "video", true, dims);
@@ -5467,6 +5866,7 @@
       c.recorder.start(250);
       c.recording = true; c.recStart = nowMs();
       c.shutter.dataset.recording = "1";
+      c.recTickTimer = setInterval(() => { c.recTimerEl.textContent = fmtRecTime(nowMs() - c.recStart); }, 250);
       const tick = () => {
         if (!c.recording) return;
         const p = Math.min(1, (nowMs() - c.recStart) / MAX_VIDEO_MS);
@@ -5475,14 +5875,19 @@
         requestAnimationFrame(tick);
       };
       tick();
-    } catch (e) { c.recording = false; gtrail("recorder failed " + (e && e.message)); ctx.showToast("Couldn't start recording"); }
+    } catch (e) {
+      c.recording = false; c.el.dataset.recording = "0";
+      gtrail("recorder failed " + (e && e.message)); ctx.showToast("Couldn't start recording");
+    }
   }
   function takePhotoFallback(ctx) { startCameraStream(ctx).then(() => {}); } // a hold that ended almost at once
   function stopRecording(ctx) {
     const c = ctx.camera;
+    if (c.startingRecording) { c.recordCancelled = true; return; } // released while still awaiting mic permission
     c.shutter.dataset.recording = "0";
     c.ring.style.strokeDashoffset = "";
     if (c.recording && c.recorder) { c.recording = false; haptic("light"); try { c.recorder.stop(); } catch (e) {} }
+    else { c.el.dataset.recording = "0"; c.el.dataset.locked = "0"; c.lockedRecording = false; clearInterval(c.recTickTimer); c.recTickTimer = null; }
   }
   function openReview(ctx, blob, kind, fromCamera, dims) {
     const c = ctx.camera;
@@ -5495,14 +5900,15 @@
     media.src = url;
     if (kind === "video") {
       media.autoplay = true; media.loop = true; media.playsInline = true; media.muted = false;
-      media.addEventListener("loadedmetadata", () => { if (!c.captured.width) { c.captured.width = media.videoWidth; c.captured.height = media.videoHeight; } }, { once: true });
+      media.addEventListener("loadedmetadata", () => { if (c.captured && !c.captured.width) { c.captured.width = media.videoWidth; c.captured.height = media.videoHeight; } }, { once: true });
       media.play().catch(() => { media.muted = true; media.play().catch(() => {}); });
     } else if (!c.captured.width) {
-      media.addEventListener("load", () => { c.captured.width = media.naturalWidth; c.captured.height = media.naturalHeight; }, { once: true });
+      media.addEventListener("load", () => { if (c.captured) { c.captured.width = media.naturalWidth; c.captured.height = media.naturalHeight; } }, { once: true });
     }
     c.reviewMedia.appendChild(media);
     c.review.dataset.open = "1";
     c.picked = new Set(c.preselect ? [c.preselect] : []);
+    resetEditor(ctx, c);
   }
   function closeReview(ctx) {
     const c = ctx.camera;
@@ -5512,6 +5918,14 @@
     c.reviewMedia.innerHTML = "";
     if (c.captured && c.captured.url) URL.revokeObjectURL(c.captured.url);
     c.captured = null;
+    teardownEditor(ctx, c);
+  }
+  function discardReview(ctx) {
+    const c = ctx.camera;
+    commitPendingEdits(ctx, c);
+    const go = () => { closeReview(ctx); c.zoom = 1; c.usingUltra = false; startCameraStream(ctx); }; // retake opens the normal lens at 1x
+    if (c.editor && c.editor.hasEdits()) confirmSheet(ctx, "Discard this Snap and your edits?", "Discard").then((ok) => { if (ok) go(); });
+    else go();
   }
   function openPicker(ctx) {
     const c = ctx.camera;
@@ -5567,10 +5981,15 @@
     const c = ctx.camera;
     if (!c.picked.size || !c.captured || c.sending) return;
     haptic();
+    commitPendingEdits(ctx, c);
     c.sending = true; c.sendBtn.dataset.sending = "1"; paintChosen(ctx);
     const cap = c.captured, ids = Array.from(c.picked);
     try {
-      await api.sendSnap(ids.filter((x) => x !== "__story__"), cap.blob, { kind: cap.kind, width: cap.width, height: cap.height, hasAudio: cap.hasAudio, myStory: ids.includes("__story__") });
+      const out = await renderEditorOutput(ctx, c);
+      await api.sendSnap(ids.filter((x) => x !== "__story__"), out.blob, {
+        kind: cap.kind, width: out.width || cap.width, height: out.height || cap.height,
+        hasAudio: cap.hasAudio, myStory: ids.includes("__story__"), overlay: out.overlay,
+      });
       haptic("success");
       closeCamera(ctx);
       ctx.showToast(ids.includes("__story__") ? (ids.length > 1 ? "Posted to your story and sent" : "Posted to your story") : ids.length > 1 ? `Snap sent to ${ids.length} chats` : "Snap sent");
@@ -5578,6 +5997,668 @@
       gtrail("snap send failed " + (e && e.message || e));
       ctx.showToast("Couldn't send that Snap");
     } finally { c.sending = false; c.sendBtn.dataset.sending = "0"; paintChosen(ctx); }
+  }
+  async function saveSnapNow(ctx) {
+    const c = ctx.camera;
+    if (!c.captured || c.saving) return;
+    commitPendingEdits(ctx, c);
+    c.saving = true;
+    try {
+      const out = await renderEditorOutput(ctx, c);
+      if (c.captured.kind === "video" && out.overlay) {
+        // No local re-encode pipeline exists (MediaRecorder here only captures a live stream, not an
+        // offline photo+overlay composite) - Photos gets the untouched video; the edits still reach the
+        // recipient via sendSnap's separate overlay (see BRIDGE_NOTES.md "sendSnap overlayMedia").
+        await saveRefToPhotos(ctx, { blob: c.captured.blob, type: "video" });
+        ctx.showToast("Saved to Photos (drawing/text send to friends, but aren't baked into the saved video yet)");
+      } else {
+        await saveRefToPhotos(ctx, { blob: out.blob, type: c.captured.kind === "video" ? "video" : "image" });
+      }
+    } catch (e) { gtrail("editor save failed " + (e && e.message || e)); ctx.showToast("Couldn't save"); }
+    finally { c.saving = false; }
+  }
+
+  // =====================================================================================================
+  // Snap editor — text, drawing and stickers on top of a captured photo/video, drawn in ITS OWN functions
+  // (called once from buildCamera) so the live-camera code (buildCamera/startCameraStream/flipCamera/
+  // takePhoto/startRecording) never has to change here. Everything below only touches openReview's review
+  // screen (c.review / c.reviewMedia) and c.captured - never the live preview.
+  //
+  // Coordinate model: every stroke point and item x/y is stored in REVIEW-BOX css-pixel space (c.review's
+  // own client rect - same box the media fills via object-fit:cover). At send/save time, `coverTransform`
+  // maps that box onto the captured media's real pixel size exactly the way object-fit:cover would have
+  // shown it, so what you drew lines up with what you saw, whether the photo/video's aspect ratio matches
+  // the screen or not (a recorded video's native resolution, unlike a photo's screen-cropped capture, can
+  // differ from the screen and get cropped by "cover" - handled the same way here).
+  // =====================================================================================================
+  const EDITOR_COLOR_STOPS = ["#ffffff", "#ff3b30", "#ff9500", "#ffd60a", "#34c759", "#00c7be", "#0a84ff", "#5e5ce6", "#bf5af2", "#ff2d55", "#000000"];
+  const BRUSH_SIZES = [4, 9, 16];
+  const TEXT_BASE_PX = 30;
+
+  function hexToRgb(hex) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "#ffffff");
+    return m ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) } : { r: 255, g: 255, b: 255 };
+  }
+  function luminance(hex) { const p = hexToRgb(hex); return (0.2126 * p.r + 0.7152 * p.g + 0.0722 * p.b) / 255; }
+  function hexToRgba(hex, a) { const p = hexToRgb(hex); return `rgba(${p.r},${p.g},${p.b},${a})`; }
+  function colorAtFraction(stops, t) {
+    t = clamp(t, 0, 1);
+    const n = stops.length - 1;
+    const seg = Math.min(n - 1, Math.floor(t * n));
+    const lt = t * n - seg;
+    const a = hexToRgb(stops[seg]), b = hexToRgb(stops[seg + 1]);
+    const mix = (x, y) => clamp(Math.round(x + (y - x) * lt), 0, 255);
+    return "#" + [mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b)].map((v) => v.toString(16).padStart(2, "0")).join("");
+  }
+  function dist(a, b) { return Math.hypot(b.x - a.x, b.y - a.y); }
+  function angle(a, b) { return Math.atan2(b.y - a.y, b.x - a.x); }
+  function coverTransform(vw, vh, mw, mh) {
+    const scale = Math.max(vw / mw, vh / mh) || 1;
+    return { scale, ox: (vw - mw * scale) / 2, oy: (vh - mh * scale) / 2 };
+  }
+  function viewportToMedia(t, x, y) { return { x: (x - t.ox) / t.scale, y: (y - t.oy) / t.scale }; }
+  function textColorFor(item) {
+    const col = item.color;
+    if (item.style === 0) return col ? (luminance(col) > 0.55 ? "#000000" : "#ffffff") : "#ffffff";
+    if (item.style === 2) return col ? (luminance(col) > 0.55 ? "#000000" : "#ffffff") : "#000000";
+    return col || "#ffffff";
+  }
+  function bgColorFor(item) {
+    if (item.style === 0) return item.color ? hexToRgba(item.color, 0.55) : "rgba(0,0,0,0.55)";
+    if (item.style === 2) return item.color || "#ffffff";
+    return "";
+  }
+  function roundRectPath(cx, x, y, w, h, r) {
+    r = Math.max(0, Math.min(r, w / 2, h / 2));
+    cx.beginPath();
+    cx.moveTo(x + r, y); cx.arcTo(x + w, y, x + w, y + h, r); cx.arcTo(x + w, y + h, x, y + h, r);
+    cx.arcTo(x, y + h, x, y, r); cx.arcTo(x, y, x + w, y, r); cx.closePath();
+  }
+
+  function buildSnapEditor(ctx, c) {
+    const root = c.review;
+    const ed = {
+      tool: null, editingText: null, trashOver: false, colorFrac: 0.5, color: null, sizeIdx: 1,
+      viewport: { w: 393, h: 852 }, items: [], itemSeq: 0, strokes: [], curStroke: null, stickerSheetObj: null,
+      drawCanvas: root.querySelector(".gh-editor-draw"), drawCtx: null,
+      itemsLayer: root.querySelector(".gh-editor-items"),
+      colorbar: root.querySelector(".gh-editor-colorbar"), colorthumb: root.querySelector(".gh-editor-colorthumb"),
+      sizesEl: root.querySelector(".gh-editor-sizes"),
+      textWrap: root.querySelector(".gh-editor-textwrap"), textInput: root.querySelector(".gh-editor-textinput"),
+      railText: root.querySelector('[data-tool="text"]'), railDraw: root.querySelector('[data-tool="draw"]'),
+      railSticker: root.querySelector('[data-tool="sticker"]'), railUndo: root.querySelector('[data-tool="undo"]'),
+      trash: root.querySelector(".gh-editor-trash"),
+      hasEdits: () => ed.strokes.length > 0 || ed.items.length > 0,
+    };
+    c.editor = ed;
+    ed.trash.querySelector(".gh-editor-trash-ic").appendChild(icon("trash", 24));
+    ed.colorbar.style.background = `linear-gradient(to bottom, ${EDITOR_COLOR_STOPS.join(",")})`;
+    ed.textInput.dataset.placeholder = "Tap to type";
+
+    // Tapping any rail button while the caption keyboard is open must NOT blur the contenteditable first -
+    // a plain <button> steals focus on mousedown/touchstart by default, which would fire our own blur ->
+    // commitTextEditing before the click handler below ever runs (so "tap T again to cycle styles" would
+    // instead see editingText already cleared and start a stray new item every time). preventDefault on the
+    // pointer-down phase keeps focus exactly where it was; the click still fires normally afterwards.
+    const keepFocus = (e) => e.preventDefault();
+    for (const b of [ed.railText, ed.railDraw, ed.railSticker, ed.railUndo]) {
+      b.addEventListener("mousedown", keepFocus);
+      b.addEventListener("touchstart", keepFocus, { passive: false });
+    }
+    ed.railText.addEventListener("click", () => { haptic("light"); onTextToolTap(ctx, c); });
+    ed.railDraw.addEventListener("click", () => { haptic("light"); toggleDrawTool(ctx, c); });
+    ed.railSticker.addEventListener("click", () => { haptic("light"); openStickerPicker(ctx, c); });
+    ed.railUndo.addEventListener("click", () => { haptic("light"); undoStroke(ctx, c); });
+    // Same focus race as the rail buttons above: tapping the photo to dismiss the keyboard is a plain <div>,
+    // not a focusable element, so its default mousedown would ALSO blur the contenteditable first - meaning
+    // by the time this click handler ran, ed.editingText would already be null (cleared by that implicit
+    // blur's own commitTextEditing call), and the branch below would misread "just committed" as "idle tap"
+    // and start a brand-new stray item on the very same tap. Keeping focus here too means the click handler
+    // is the only thing that ever calls commitTextEditing, so its own state check is reliable.
+    const mediaEl = root.querySelector(".gh-cam-review-media");
+    mediaEl.addEventListener("mousedown", keepFocus);
+    mediaEl.addEventListener("touchstart", keepFocus, { passive: false });
+    mediaEl.addEventListener("click", (e) => {
+      if (ed.editingText) { commitTextEditing(ctx, c); return; }
+      if (ed.tool) return;
+      const r = c.review.getBoundingClientRect();
+      startNewTextItem(ctx, c, e.clientX - r.left, e.clientY - r.top);
+    });
+
+    initDrawCanvas(ctx, c);
+    initColorbar(ctx, c);
+    initSizePicker(ctx, c);
+    initTextInput(ctx, c);
+  }
+
+  function resetEditor(ctx, c) {
+    const ed = c.editor;
+    if (!ed) return;
+    for (const item of ed.items) if (item.el) item.el.remove();
+    ed.items = []; ed.strokes = []; ed.curStroke = null; ed.itemSeq = 0;
+    ed.tool = null; ed.editingText = null; ed.trashOver = false;
+    ed.colorFrac = 0.5; ed.color = null; ed.sizeIdx = 1;
+    setColorThumb(ed, colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), ed.colorFrac);
+    paintSizeButtons(ed);
+    ed.textWrap.dataset.open = "0"; ed.textInput.textContent = ""; ed.colorbar.dataset.show = "0"; ed.sizesEl.dataset.show = "0";
+    ed.railText.dataset.on = "0"; ed.railDraw.dataset.on = "0"; ed.railSticker.dataset.on = "0"; ed.railUndo.style.display = "none";
+    if (ed.stickerSheetObj) closeSheetGeneric(ed.stickerSheetObj.backdrop, ed.stickerSheetObj.sheet);
+    hideTrash(ctx, c);
+    requestAnimationFrame(() => {
+      const rect = c.review.getBoundingClientRect();
+      ed.viewport = { w: rect.width || 393, h: rect.height || 852 };
+      sizeDrawCanvas(ed, ed.viewport.w, ed.viewport.h);
+    });
+  }
+  function teardownEditor(ctx, c) {
+    const ed = c.editor;
+    if (!ed) return;
+    ed.curStroke = null;
+    if (ed.editingText) { ed.editingText = null; ed.textWrap.dataset.open = "0"; try { ed.textInput.blur(); } catch (e) {} }
+    for (const item of ed.items) if (item.el) item.el.remove();
+    ed.items = []; ed.strokes = [];
+    if (ed.drawCtx) ed.drawCtx.clearRect(0, 0, ed.drawCanvas.width, ed.drawCanvas.height);
+    if (ed.stickerSheetObj) closeSheetGeneric(ed.stickerSheetObj.backdrop, ed.stickerSheetObj.sheet);
+    setTool(ctx, c, null);
+    hideTrash(ctx, c);
+  }
+  function commitPendingEdits(ctx, c) { if (c.editor && c.editor.editingText) commitTextEditing(ctx, c); }
+
+  function setTool(ctx, c, tool) {
+    const ed = c.editor;
+    if (!ed) return;
+    ed.tool = tool;
+    ed.railText.dataset.on = tool === "text" ? "1" : "0";
+    ed.railDraw.dataset.on = tool === "draw" ? "1" : "0";
+    ed.railSticker.dataset.on = tool === "sticker" ? "1" : "0";
+    ed.railUndo.style.display = tool === "draw" ? "" : "none";
+    ed.sizesEl.dataset.show = tool === "draw" ? "1" : "0";
+    ed.colorbar.dataset.show = (tool === "draw" || ed.editingText) ? "1" : "0";
+    ed.drawCanvas.style.pointerEvents = tool === "draw" ? "auto" : "none";
+  }
+
+  // ---- text ------------------------------------------------------------------------------------------
+  function onTextToolTap(ctx, c) {
+    const ed = c.editor;
+    if (ed.editingText) { cycleTextStyle(ctx, c); return; }
+    startNewTextItem(ctx, c);
+  }
+  function startNewTextItem(ctx, c, x, y) {
+    const ed = c.editor;
+    if (ed.editingText) return; // already composing one - tapping T again cycles its style instead
+    setTool(ctx, c, "text");
+    const item = {
+      id: "t" + (++ed.itemSeq), type: "text", text: "", style: 0, color: null,
+      x: x != null ? x : ed.viewport.w / 2, y: y != null ? y : ed.viewport.h * 0.42, rotation: 0, scale: 1, el: null,
+    };
+    ed.items.push(item);
+    openTextInputFor(ctx, c, item);
+  }
+  function openTextInputFor(ctx, c, item) {
+    const ed = c.editor;
+    ed.editingText = item;
+    ed.tool = "text";
+    ed.textWrap.dataset.open = "1";
+    ed.textInput.textContent = item.text || "";
+    paintTextInputStyle(ed, item);
+    ed.colorFrac = item.colorFrac != null ? item.colorFrac : 0.5;
+    setColorThumb(ed, item.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), ed.colorFrac);
+    ed.colorbar.dataset.show = "1";
+    ed.textWrap.style.top = clamp((item.style === 0 ? item.y : item.y) - 40, 60, Math.max(60, ed.viewport.h - 160)) + "px";
+    if (item.el) item.el.style.visibility = "hidden";
+    requestAnimationFrame(() => { try { ed.textInput.focus(); } catch (e) {} });
+  }
+  function paintTextInputStyle(ed, item) {
+    ed.textInput.dataset.style = item.style;
+    ed.textInput.style.color = textColorFor(item);
+    ed.textInput.style.background = bgColorFor(item);
+  }
+  function cycleTextStyle(ctx, c) {
+    const ed = c.editor;
+    const item = ed.editingText;
+    if (!item) return;
+    item.style = (item.style + 1) % 4;
+    paintTextInputStyle(ed, item);
+  }
+  function commitTextEditing(ctx, c) {
+    const ed = c.editor;
+    const item = ed.editingText;
+    if (!item) return;
+    const text = (ed.textInput.innerText || ed.textInput.textContent || "").replace(/ /g, " ").replace(/\n+$/, "").trim();
+    ed.textWrap.dataset.open = "0";
+    ed.editingText = null;
+    if (!text) {
+      ed.items = ed.items.filter((x) => x !== item);
+      if (item.el) item.el.remove();
+      setTool(ctx, c, null);
+      return;
+    }
+    item.text = text; item.color = ed.color; item.colorFrac = ed.colorFrac;
+    renderTextItemEl(ctx, c, item);
+    setTool(ctx, c, null);
+  }
+  function renderTextItemEl(ctx, c, item) {
+    const ed = c.editor;
+    if (!item.el) {
+      const wrap = el("div", "gh-editor-item gh-editor-item-text");
+      const inner = el("div", "gh-editor-item-text-inner");
+      wrap.appendChild(inner);
+      ed.itemsLayer.appendChild(wrap);
+      item.el = wrap; item.innerEl = inner;
+      attachItemGestures(ctx, c, item);
+    }
+    item.el.style.visibility = "";
+    item.el.dataset.style = item.style;
+    item.innerEl.textContent = item.text;
+    item.innerEl.style.color = textColorFor(item);
+    item.innerEl.style.background = bgColorFor(item);
+    positionItemEl(item);
+  }
+
+  // ---- drawing -----------------------------------------------------------------------------------------
+  function toggleDrawTool(ctx, c) {
+    const ed = c.editor;
+    commitPendingEdits(ctx, c);
+    setTool(ctx, c, ed.tool === "draw" ? null : "draw");
+  }
+  function sizeDrawCanvas(ed, w, h) {
+    const dpr = window.devicePixelRatio || 1;
+    ed.drawCanvas.width = Math.max(1, Math.round(w * dpr));
+    ed.drawCanvas.height = Math.max(1, Math.round(h * dpr));
+    ed.drawCanvas.style.width = w + "px"; ed.drawCanvas.style.height = h + "px";
+    ed.drawCtx = ed.drawCanvas.getContext("2d");
+    ed.drawCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    redrawDrawCanvas(ed);
+  }
+  function strokePath(cx, stroke) {
+    const pts = stroke.pts;
+    cx.strokeStyle = stroke.color; cx.lineWidth = stroke.size; cx.lineCap = "round"; cx.lineJoin = "round";
+    if (pts.length < 2) { cx.beginPath(); cx.fillStyle = stroke.color; cx.arc(pts[0].x, pts[0].y, stroke.size / 2, 0, Math.PI * 2); cx.fill(); return; }
+    cx.beginPath();
+    cx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length - 1; i++) { const mx = (pts[i].x + pts[i + 1].x) / 2, my = (pts[i].y + pts[i + 1].y) / 2; cx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my); }
+    cx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+    cx.stroke();
+  }
+  function redrawDrawCanvas(ed) {
+    if (!ed.drawCtx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = ed.drawCanvas.width / dpr, h = ed.drawCanvas.height / dpr;
+    ed.drawCtx.clearRect(0, 0, w, h);
+    for (const s of ed.strokes) strokePath(ed.drawCtx, s);
+    if (ed.curStroke) strokePath(ed.drawCtx, ed.curStroke);
+  }
+  function undoStroke(ctx, c) {
+    const ed = c.editor;
+    if (!ed.strokes.length) return;
+    ed.strokes.pop();
+    redrawDrawCanvas(ed);
+  }
+  function initDrawCanvas(ctx, c) {
+    const ed = c.editor;
+    const canvas = ed.drawCanvas;
+    const localPt = (t) => { const r = canvas.getBoundingClientRect(); return { x: t.clientX - r.left, y: t.clientY - r.top }; };
+    canvas.addEventListener("touchstart", (e) => {
+      if (ed.tool !== "draw" || !e.touches || e.touches.length !== 1) return;
+      e.preventDefault();
+      ed.curStroke = { color: ed.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), size: BRUSH_SIZES[ed.sizeIdx], pts: [localPt(e.touches[0])] };
+    }, { passive: false });
+    canvas.addEventListener("touchmove", (e) => {
+      if (!ed.curStroke || !e.touches || e.touches.length !== 1) return;
+      e.preventDefault();
+      ed.curStroke.pts.push(localPt(e.touches[0]));
+      redrawDrawCanvas(ed);
+    }, { passive: false });
+    const endStroke = () => { if (ed.curStroke && ed.curStroke.pts.length) ed.strokes.push(ed.curStroke); ed.curStroke = null; };
+    canvas.addEventListener("touchend", endStroke, { passive: true });
+    canvas.addEventListener("touchcancel", endStroke, { passive: true });
+    // mouse fallback so this is drivable on a mouse-only dev rig too
+    let mdown = false;
+    canvas.addEventListener("mousedown", (e) => { if (ed.tool !== "draw") return; mdown = true; ed.curStroke = { color: ed.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), size: BRUSH_SIZES[ed.sizeIdx], pts: [localPt(e)] }; });
+    canvas.addEventListener("mousemove", (e) => { if (!mdown || !ed.curStroke) return; ed.curStroke.pts.push(localPt(e)); redrawDrawCanvas(ed); });
+    window.addEventListener("mouseup", () => { if (mdown) { mdown = false; endStroke(); } });
+  }
+
+  // ---- color + size pickers -----------------------------------------------------------------------------
+  function setColorThumb(ed, color, frac) {
+    ed.colorthumb.style.background = color;
+    if (frac != null) ed.colorthumb.style.top = (frac * 100) + "%";
+  }
+  function applyColorToActive(ctx, c) {
+    const ed = c.editor;
+    if (ed.editingText) paintTextInputStyle(ed, { style: ed.editingText.style, color: ed.color });
+  }
+  function initColorbar(ctx, c) {
+    const ed = c.editor;
+    setColorThumb(ed, colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), ed.colorFrac);
+    const move = (clientY) => {
+      const r = ed.colorbar.getBoundingClientRect();
+      const frac = clamp((clientY - r.top) / Math.max(1, r.height), 0, 1);
+      ed.colorFrac = frac;
+      ed.color = colorAtFraction(EDITOR_COLOR_STOPS, frac);
+      setColorThumb(ed, ed.color, frac);
+      applyColorToActive(ctx, c);
+    };
+    ed.colorbar.addEventListener("touchstart", (e) => { e.preventDefault(); haptic("light"); move(e.touches[0].clientY); }, { passive: false });
+    ed.colorbar.addEventListener("touchmove", (e) => { e.preventDefault(); move(e.touches[0].clientY); }, { passive: false });
+    ed.colorbar.addEventListener("mousedown", (e) => { haptic("light"); move(e.clientY); const mv = (ev) => move(ev.clientY); const up = () => { window.removeEventListener("mousemove", mv); window.removeEventListener("mouseup", up); }; window.addEventListener("mousemove", mv); window.addEventListener("mouseup", up); });
+  }
+  function paintSizeButtons(ed) { for (const b of ed.sizesEl.querySelectorAll(".gh-editor-size")) b.dataset.on = Number(b.dataset.size) === ed.sizeIdx ? "1" : "0"; }
+  function initSizePicker(ctx, c) {
+    const ed = c.editor;
+    for (const b of ed.sizesEl.querySelectorAll(".gh-editor-size")) b.addEventListener("click", () => { haptic("light"); ed.sizeIdx = Number(b.dataset.size); paintSizeButtons(ed); });
+    paintSizeButtons(ed);
+  }
+  function initTextInput(ctx, c) {
+    const ed = c.editor;
+    ed.textInput.addEventListener("blur", () => commitTextEditing(ctx, c));
+  }
+
+  // ---- stickers (emoji grid + the app's own Bitmoji catalog/render host, reused read-only) --------------
+  function ensureStickerSheet(ctx, c) {
+    const ed = c.editor;
+    if (ed.stickerSheetObj) return ed.stickerSheetObj;
+    const backdrop = el("div", "gh-backdrop");
+    const sheet = el("div", "gh-sheet gh-gif-sheet gh-editor-sticker-sheet");
+    sheet.style.display = "none";
+    sheet.innerHTML = `
+      <div class="gh-sheet-grip"></div>
+      <div class="gh-gif-tabs">
+        <button class="gh-gif-tab" data-tab="emoji">Emoji</button>
+        <button class="gh-gif-tab" data-tab="bitmoji">Bitmoji</button>
+      </div>
+      <div class="gh-gif-body gh-sticker-grid gh-scroll"></div>
+    `;
+    c.el.append(backdrop, sheet);
+    const s = { backdrop, sheet, body: sheet.querySelector(".gh-gif-body"), tabs: {}, tab: "emoji" };
+    backdrop.addEventListener("click", () => { closeSheetGeneric(backdrop, sheet); setTool(ctx, c, null); });
+    for (const b of sheet.querySelectorAll(".gh-gif-tab")) { s.tabs[b.dataset.tab] = b; b.addEventListener("click", () => { haptic("light"); s.tab = b.dataset.tab; renderEditorStickers(ctx, c, s); }); }
+    ed.stickerSheetObj = s;
+    return s;
+  }
+  function openStickerPicker(ctx, c) {
+    const ed = c.editor;
+    commitPendingEdits(ctx, c);
+    setTool(ctx, c, "sticker");
+    const s = ensureStickerSheet(ctx, c);
+    s.tab = "emoji";
+    openSheetGeneric(s.backdrop, s.sheet);
+    renderEditorStickers(ctx, c, s);
+  }
+  function renderEditorStickers(ctx, c, s) {
+    for (const [name, b] of Object.entries(s.tabs)) b.dataset.on = s.tab === name ? "1" : "0";
+    s.body.innerHTML = "";
+    if (s.tab === "emoji") {
+      for (const em of EMOJI_GRID) {
+        const tile = el("button", "gh-sticker-tile gh-press");
+        tile.textContent = em;
+        tile.addEventListener("click", () => { haptic("light"); placeEmojiSticker(ctx, c, em); closeSheetGeneric(s.backdrop, s.sheet); setTool(ctx, c, null); });
+        s.body.appendChild(tile);
+      }
+    } else {
+      renderEditorBitmoji(ctx, c, s);
+    }
+  }
+  async function renderEditorBitmoji(ctx, c, s) {
+    const p = stickerPeople(ctx);
+    if (!p.me) { s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Your Bitmoji hasn't loaded yet" })); return; }
+    s.body.appendChild(el("div", "gh-spinner"));
+    let cat;
+    try { cat = await loadStickerCatalog(); } catch (e) { s.body.innerHTML = ""; s.body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Couldn't load stickers" })); return; }
+    if (s.tab !== "bitmoji") return; // a tab switch happened while this was loading
+    s.body.innerHTML = "";
+    for (const x of cat.solo.slice(0, 60)) {
+      const comic = x[0];
+      const tile = el("button", "gh-sticker-tile gh-press");
+      const img = el("img"); img.loading = "lazy"; img.alt = "";
+      img.src = stickerUrl(comic, p.me, null);
+      img.addEventListener("error", () => tile.remove(), { once: true });
+      tile.appendChild(img);
+      tile.addEventListener("click", () => { haptic("light"); placeBitmojiSticker(ctx, c, comic, p.me); closeSheetGeneric(s.backdrop, s.sheet); setTool(ctx, c, null); });
+      s.body.appendChild(tile);
+    }
+  }
+  function placeEmojiSticker(ctx, c, emoji) {
+    const ed = c.editor;
+    const item = { id: "s" + (++ed.itemSeq), type: "sticker", kind: "emoji", emoji, x: ed.viewport.w / 2, y: ed.viewport.h / 2, rotation: 0, scale: 1 };
+    ed.items.push(item);
+    renderStickerItemEl(ctx, c, item);
+  }
+  async function placeBitmojiSticker(ctx, c, comic, meAvatarId) {
+    const ed = c.editor;
+    const url = stickerUrl(comic, meAvatarId, null);
+    const item = { id: "s" + (++ed.itemSeq), type: "sticker", kind: "bitmoji", x: ed.viewport.w / 2, y: ed.viewport.h / 2, rotation: 0, scale: 1, img: null };
+    ed.items.push(item);
+    renderStickerItemEl(ctx, c, item, url);
+    // the on-screen <img> above uses the CDN URL directly (fine for display); compositing into a canvas
+    // needs an untainted source, so fetch through the app's native fetch bridge (same trick gmBytes already
+    // uses for GIFs/the chat sticker catalog) and decode a same-origin data: URL for the real pixels.
+    try {
+      const bytes = await gmBytes(url);
+      const dataUrl = bytesToDataUrl(bytes, "image/webp");
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = dataUrl; });
+      item.img = img;
+    } catch (e) { gtrail("editor sticker fetch failed " + (e && e.message || e)); }
+  }
+  function renderStickerItemEl(ctx, c, item, imgUrl) {
+    const ed = c.editor;
+    const wrap = el("div", "gh-editor-item gh-editor-item-sticker");
+    if (item.kind === "emoji") wrap.textContent = item.emoji;
+    else { const img = el("img"); img.src = imgUrl; img.alt = ""; wrap.appendChild(img); }
+    ed.itemsLayer.appendChild(wrap);
+    item.el = wrap;
+    positionItemEl(item);
+    attachItemGestures(ctx, c, item);
+  }
+
+  // ---- shared item interaction: drag (single touch), pinch+rotate (two touches), tap, trash ------------
+  function positionItemEl(item) {
+    if (item.type === "text" && item.style === 0) {
+      item.el.style.left = "0"; item.el.style.right = "0"; item.el.style.top = item.y + "px"; item.el.style.transform = "translateY(-50%)";
+    } else {
+      item.el.style.left = "0"; item.el.style.top = "0"; item.el.style.right = "";
+      item.el.style.transform = `translate(${item.x}px, ${item.y}px) translate(-50%,-50%) rotate(${item.rotation}rad) scale(${item.scale})`;
+    }
+  }
+  function bringToFront(ed, item) { ed.itemsLayer.appendChild(item.el); }
+  function showTrash(c) { c.editor.trash.dataset.show = "1"; }
+  function hideTrash(ctx, c) { c.editor.trash.dataset.show = "0"; c.editor.trash.classList.remove("gh-editor-trash-hover"); c.editor.trashOver = false; }
+  function updateTrashHover(c, item) {
+    const ed = c.editor;
+    const tr = ed.trash.getBoundingClientRect(), rr = c.review.getBoundingClientRect();
+    const tx = tr.left - rr.left + tr.width / 2, ty = tr.top - rr.top + tr.height / 2;
+    const over = Math.hypot(item.x - tx, item.y - ty) < 55;
+    if (over && !ed.trashOver) haptic("medium");
+    ed.trashOver = over;
+    ed.trash.classList.toggle("gh-editor-trash-hover", over);
+  }
+  function deleteItem(ctx, c, item) {
+    const ed = c.editor;
+    if (item.el) item.el.remove();
+    ed.items = ed.items.filter((x) => x !== item);
+    haptic("medium");
+  }
+  function attachItemGestures(ctx, c, item) {
+    const ed = c.editor;
+    const elx = item.el;
+    elx.style.touchAction = "none";
+    const touches = new Map();
+    let mode = null, start = null, downTime = 0, moved = false;
+    const isBar = () => item.type === "text" && item.style === 0;
+    const pt = (t) => { const r = c.review.getBoundingClientRect(); return { x: t.clientX - r.left, y: t.clientY - r.top }; };
+    function onStart(e) {
+      if (ed.tool === "draw" || ed.editingText) return;
+      e.stopPropagation();
+      for (const t of e.changedTouches) touches.set(t.identifier, pt(t));
+      bringToFront(ed, item);
+      if (isBar() || touches.size === 1) {
+        downTime = nowMs(); moved = false;
+        start = { x: item.x, y: item.y, touch: [...touches.values()][touches.size - 1] };
+        mode = "drag";
+        if (!isBar()) showTrash(c);
+      }
+      if (!isBar() && touches.size >= 2) {
+        const pts = [...touches.values()];
+        start = { scale: item.scale, rotation: item.rotation, d0: dist(pts[0], pts[1]), a0: angle(pts[0], pts[1]) };
+        mode = "pinch";
+        hideTrash(ctx, c);
+      }
+      e.preventDefault();
+    }
+    function onMove(e) {
+      if (!mode) return;
+      for (const t of e.changedTouches) if (touches.has(t.identifier)) touches.set(t.identifier, pt(t));
+      if (mode === "drag") {
+        const cur = [...touches.values()][0];
+        const dx = cur.x - start.touch.x, dy = cur.y - start.touch.y;
+        if (Math.abs(dx) > 8 || Math.abs(dy) > 8) moved = true;
+        if (isBar()) { item.y = clamp(start.y + dy, 40, ed.viewport.h - 40); }
+        else { item.x = start.x + dx; item.y = start.y + dy; updateTrashHover(c, item); }
+        positionItemEl(item);
+      } else if (mode === "pinch" && touches.size >= 2) {
+        const pts = [...touches.values()];
+        const d1 = dist(pts[0], pts[1]), a1 = angle(pts[0], pts[1]);
+        item.scale = clamp(start.scale * (d1 / Math.max(1, start.d0)), 0.3, 6);
+        item.rotation = start.rotation + (a1 - start.a0);
+        moved = true;
+        positionItemEl(item);
+      }
+      e.preventDefault();
+    }
+    function onEnd(e) {
+      for (const t of e.changedTouches) touches.delete(t.identifier);
+      if (touches.size === 0) {
+        if (!isBar() && ed.trashOver) { deleteItem(ctx, c, item); hideTrash(ctx, c); mode = null; return; }
+        hideTrash(ctx, c);
+        if (!moved && nowMs() - downTime < 350 && item.type === "text") openTextInputFor(ctx, c, item);
+        mode = null;
+      } else if (!isBar() && touches.size === 1) {
+        start = { x: item.x, y: item.y, touch: [...touches.values()][0] };
+        mode = "drag";
+      }
+    }
+    elx.addEventListener("touchstart", onStart, { passive: false });
+    elx.addEventListener("touchmove", onMove, { passive: false });
+    elx.addEventListener("touchend", onEnd, { passive: true });
+    elx.addEventListener("touchcancel", onEnd, { passive: true });
+    // mouse fallback (dev rig)
+    elx.addEventListener("mousedown", (e) => { if (ed.tool === "draw" || ed.editingText) return; e.stopPropagation(); downTime = nowMs(); moved = false; bringToFront(ed, item); start = { x: item.x, y: item.y, mx: e.clientX, my: e.clientY }; mode = "drag"; if (!isBar()) showTrash(c); window.addEventListener("mouseup", onMouseUp, { once: true }); });
+    elx.addEventListener("mousemove", (e) => { if (mode !== "drag" || !e.buttons) return; const dx = e.clientX - start.mx, dy = e.clientY - start.my; if (Math.abs(dx) > 8 || Math.abs(dy) > 8) moved = true; if (isBar()) item.y = clamp(start.y + dy, 40, ed.viewport.h - 40); else { item.x = start.x + dx; item.y = start.y + dy; updateTrashHover(c, item); } positionItemEl(item); });
+    // added per drag (once), not permanently: a window listener per sticker/text kept every item alive forever
+    function onMouseUp() {
+      if (mode !== "drag") return;
+      if (!isBar() && ed.trashOver) { deleteItem(ctx, c, item); hideTrash(ctx, c); mode = null; return; }
+      hideTrash(ctx, c);
+      if (!moved && item.type === "text") openTextInputFor(ctx, c, item);
+      mode = null;
+    }
+  }
+
+  // ---- final composite: everything drawn onto the media's real pixel size ------------------------------
+  function loadImageFromBlob(blob) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+      img.src = url;
+    });
+  }
+  function paintTextItemFinal(octx, item, t, vw) {
+    if (!item.text) return;
+    const big = item.style === 1 || item.style === 3;
+    const fontPx = Math.max(6, TEXT_BASE_PX * (big ? 1.15 : 1) * item.scale * t.scale);
+    const lines = item.text.split("\n");
+    octx.save();
+    octx.textBaseline = "middle";
+    octx.font = `${big ? 800 : 700} ${fontPx}px -apple-system, "SF Pro Display", sans-serif`;
+    if (item.style === 0) {
+      const my = (item.y - t.oy) / t.scale;
+      const mLeft = (0 - t.ox) / t.scale, mRight = (vw - t.ox) / t.scale;
+      const lineH = fontPx * 1.25, padY = fontPx * 0.5;
+      const totalH = lines.length * lineH + padY * 2;
+      octx.fillStyle = bgColorFor(item) || "rgba(0,0,0,0.55)";
+      octx.fillRect(mLeft, my - totalH / 2, mRight - mLeft, totalH);
+      octx.fillStyle = textColorFor(item);
+      octx.textAlign = "center";
+      let ly = my - totalH / 2 + padY + lineH / 2;
+      for (const line of lines) { octx.fillText(line, (mLeft + mRight) / 2, ly); ly += lineH; }
+    } else {
+      const p = viewportToMedia(t, item.x, item.y);
+      octx.translate(p.x, p.y);
+      octx.rotate(item.rotation);
+      const lineH = fontPx * 1.2;
+      const totalH = lines.length * lineH;
+      octx.textAlign = item.style === 3 ? "left" : "center";
+      let maxW = 0; for (const line of lines) maxW = Math.max(maxW, octx.measureText(line).width);
+      if (item.style === 2) {
+        const padX = fontPx * 0.55, padY = fontPx * 0.35;
+        octx.fillStyle = bgColorFor(item) || "#ffffff";
+        roundRectPath(octx, -(maxW + padX * 2) / 2, -(totalH + padY * 2) / 2, maxW + padX * 2, totalH + padY * 2, (totalH + padY * 2) / 2);
+        octx.fill();
+      }
+      octx.fillStyle = textColorFor(item);
+      const lx = item.style === 3 ? -maxW / 2 : 0;
+      let ly = -totalH / 2 + lineH / 2;
+      for (const line of lines) { octx.fillText(line, lx, ly); ly += lineH; }
+    }
+    octx.restore();
+  }
+  function paintStickerItemFinal(octx, item, t) {
+    const p = viewportToMedia(t, item.x, item.y);
+    octx.save();
+    octx.translate(p.x, p.y);
+    octx.rotate(item.rotation);
+    const baseSize = 110 * item.scale * t.scale;
+    if (item.kind === "emoji") {
+      octx.font = `${baseSize * 0.82}px -apple-system, sans-serif`;
+      octx.textAlign = "center"; octx.textBaseline = "middle";
+      octx.fillText(item.emoji, 0, baseSize * 0.03);
+    } else if (item.img) {
+      const ar = (item.img.naturalWidth / item.img.naturalHeight) || 1;
+      const w = ar >= 1 ? baseSize : baseSize * ar, h = ar >= 1 ? baseSize / ar : baseSize;
+      octx.drawImage(item.img, -w / 2, -h / 2, w, h);
+    }
+    octx.restore();
+  }
+  function paintEditorOverlay(ed, octx, mediaW, mediaH) {
+    const vw = ed.viewport.w || 1, vh = ed.viewport.h || 1;
+    const t = coverTransform(vw, vh, mediaW, mediaH);
+    octx.clearRect(0, 0, mediaW, mediaH);
+    for (const s of ed.strokes) {
+      const pts = s.pts.map((p) => viewportToMedia(t, p.x, p.y));
+      strokePath(octx, { color: s.color, size: Math.max(1, s.size * t.scale), pts });
+    }
+    for (const item of ed.items) {
+      if (item.type === "text") paintTextItemFinal(octx, item, t, vw);
+      else if (item.type === "sticker") paintStickerItemFinal(octx, item, t);
+    }
+  }
+  // { blob, overlay?, width, height } - blob is what to send/save as the media itself; overlay (video only,
+  // and only when there are edits) is a transparent PNG at the video's own dimensions for bridge.sendSnap's
+  // overlayMedia (see BRIDGE_NOTES.md). A photo's edits are always baked straight into the returned JPEG -
+  // no separate overlay - since a flat raster is exactly what sendMedia/sendSnap already expect for images.
+  async function renderEditorOutput(ctx, c) {
+    const cap = c.captured, ed = c.editor;
+    if (!ed || !ed.hasEdits()) return { blob: cap.blob };
+    const w = Math.max(1, Math.round(cap.width || 1080)), h = Math.max(1, Math.round(cap.height || 1920));
+    const overlayCanvas = document.createElement("canvas");
+    overlayCanvas.width = w; overlayCanvas.height = h;
+    const octx = overlayCanvas.getContext("2d");
+    paintEditorOverlay(ed, octx, w, h);
+    if (cap.kind === "video") {
+      const overlay = await new Promise((res) => overlayCanvas.toBlob(res, "image/png"));
+      return { blob: cap.blob, overlay, width: w, height: h };
+    }
+    const photoImg = await loadImageFromBlob(cap.blob);
+    const finalCanvas = document.createElement("canvas");
+    finalCanvas.width = w; finalCanvas.height = h;
+    const fctx = finalCanvas.getContext("2d");
+    fctx.drawImage(photoImg, 0, 0, w, h);
+    fctx.drawImage(overlayCanvas, 0, 0);
+    const blob = await new Promise((res) => finalCanvas.toBlob(res, "image/jpeg", 0.92));
+    return { blob, width: w, height: h };
   }
 
   // =====================================================================================================
