@@ -754,11 +754,12 @@ input, textarea {
   gap: 2px;
   margin: 3px 0 0 8px;
   font-size: 11.5px;
-  color: rgba(255,255,255,0.62);
+  color: var(--gh-meta-out, rgba(255,255,255,0.8));
   white-space: nowrap;
   user-select: none;
 }
-.gh-group[data-me="0"] .gh-bubble-meta { color: var(--gh-text-tertiary); }
+.gh-group[data-me="0"] .gh-bubble-meta { color: var(--gh-meta-in, rgba(255,255,255,0.8)); }
+.gh-group[data-me="1"] .gh-bubble-meta { text-shadow: 0 0 2px rgba(0,0,0,0.35); } /* mid-tone accents (yellow/orange) */
 .gh-bubble-meta .gh-tick { width: 15px; height: 15px; flex: none; }
 .gh-bubble-meta .gh-tick.gh-tick-pending { opacity: 0.55; }
 .gh-bubble-meta .gh-tick-fail { color: var(--gh-danger); }
@@ -815,8 +816,11 @@ input, textarea {
   gap: 2px;
   padding: 2px 7px;
   border-radius: 10px;
-  background: rgba(0,0,0,0.38);
+  /* over any photo, white or black: a darker frosted pill + a soft shadow on the text */
+  background: rgba(0,0,0,0.55);
+  -webkit-backdrop-filter: blur(6px) saturate(1.2); backdrop-filter: blur(6px) saturate(1.2);
   color: #fff;
+  text-shadow: 0 0 2px rgba(0,0,0,0.5);
   font-size: 11px;
 }
 .gh-media-meta .gh-tick { width: 14px; height: 14px; }
@@ -884,7 +888,8 @@ input, textarea {
   position: absolute; right: 4px; bottom: 2px;
   display: flex; align-items: center; gap: 2px;
   padding: 2px 6px; border-radius: 9px;
-  background: rgba(0,0,0,0.38); color: #fff; font-size: 10.5px;
+  background: rgba(0,0,0,0.55); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  color: #fff; text-shadow: 0 0 2px rgba(0,0,0,0.5); font-size: 10.5px;
 }
 .gh-sticker-meta .gh-tick { width: 13px; height: 13px; }
 
@@ -1648,7 +1653,7 @@ input, textarea {
 .gh-snap-row[data-opened="1"] .gh-snap-mark svg path { fill: none; }
 .gh-snap-row[data-opened="1"] { color: var(--gh-text-secondary); font-weight: 500; }
 .gh-snap-row[data-opened="1"] .gh-snap-mark { border-color: var(--snap); }
-.gh-snap-time { font-size: 11.5px; font-weight: 400; color: var(--gh-text-tertiary); margin-left: 2px; }
+.gh-snap-time { font-size: 11.5px; font-weight: 400; color: var(--gh-text-secondary); margin-left: 2px; }
 .gh-snap-row[data-loading="1"] .gh-snap-mark { animation: gh-pulse 0.8s ease-in-out infinite; }
 .gh-snap-row.gh-press:active { transform: scale(0.97); }
 .gh-viewer-overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 1; }

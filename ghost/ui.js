@@ -3729,6 +3729,12 @@
     storage.set("ghostPrefs", prefs);
     applyPrefs(ctx);
   }
+  // the little time on a bubble: a colour that always reads against that bubble (dark text on a light bubble,
+  // brighter white on a dark one) - it used to be a fixed 62% white / the theme's tertiary grey
+  function metaColorFor(hexes) {
+    const l = hexes.reduce((sum, h) => sum + luminance(h), 0) / hexes.length;
+    return l > 0.5 ? "rgba(0,0,0,0.7)" : l > 0.22 ? "#ffffff" : "rgba(255,255,255,0.8)";
+  }
   function applyPrefs(ctx) {
     const host = ctx.host;
     if (!host) return;
@@ -3741,6 +3747,7 @@
     set("--gh-bubble-in-1", t.in1); set("--gh-bubble-in-2", t.in2);
     set("--gh-text-secondary", t.sub); set("--gh-text-tertiary", t.ter); set("--gh-pill-bg", t.pill);
     set("--gh-accent", a[0]); set("--gh-accent-hover", a[1]); set("--gh-bubble-out-1", a[2]); set("--gh-bubble-out-2", a[3]);
+    set("--gh-meta-in", metaColorFor([t.in1, t.in2])); set("--gh-meta-out", metaColorFor([a[2], a[3]]));
     set("--gh-wall-image", w.css); set("--gh-wall-size", w.size); set("--gh-wall-pos", w.pos);
     set("--gh-text-scale", String(pref("textScale")));
     set("--gh-radius-md", pref("bubbleRadius") + "px");
@@ -4531,8 +4538,8 @@
     if (!scr) return;
     const key = convId && (pref("chatBubbles") || {})[convId];
     const a = key && ACCENT_SET[key];
-    if (a) { scr.style.setProperty("--gh-bubble-out-1", a[2]); scr.style.setProperty("--gh-bubble-out-2", a[3]); }
-    else { scr.style.removeProperty("--gh-bubble-out-1"); scr.style.removeProperty("--gh-bubble-out-2"); }
+    if (a) { scr.style.setProperty("--gh-bubble-out-1", a[2]); scr.style.setProperty("--gh-bubble-out-2", a[3]); scr.style.setProperty("--gh-meta-out", metaColorFor([a[2], a[3]])); }
+    else { scr.style.removeProperty("--gh-bubble-out-1"); scr.style.removeProperty("--gh-bubble-out-2"); scr.style.removeProperty("--gh-meta-out"); }
   }
   async function applyChatWallpaper(ctx, convId) {
     const m = ctx.conv && ctx.conv.messages;
