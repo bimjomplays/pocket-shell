@@ -1236,6 +1236,7 @@ input, textarea {
 .gh-friend-row { display: flex; align-items: center; gap: 12px; padding: 8px 16px; }
 .gh-friend-row:active { background: rgba(255,255,255,0.06); }
 .gh-friend-row .gh-avatar { width: 44px; height: 44px; }
+.gh-friend-av { position: relative; flex: none; }
 .gh-friend-name { flex: 1; min-width: 0; font-size: 16px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-friend-check {
   width: 22px; height: 22px; border-radius: 50%;

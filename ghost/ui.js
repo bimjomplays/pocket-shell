@@ -4296,7 +4296,8 @@
       const statusLabel = { friend: "Friends", requested: "Requested", "added-me": "Accept", none: "Add" };
       const personRow = (g, u, actions) => {
         const row = el("div", "gh-set-row gh-friend-row");
-        row.appendChild(makeAvatar(u, 40));
+        const avw = el("div", "gh-friend-av"); avw.appendChild(makeAvatar(u, 40)); gnSyncBadge(avw, u);
+        row.appendChild(avw);
         const col = el("div", "gh-set-label gh-friend-text");
         const n = el("div", "gh-friend-name"); n.textContent = u.name || u.username || "Snapchatter";
         const un = el("div", "gh-friend-user"); un.textContent = [u.username ? "@" + u.username : "", u.source || ""].filter(Boolean).join(" \u00b7 ");
