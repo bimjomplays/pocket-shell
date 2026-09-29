@@ -113,12 +113,40 @@
     try { c = typeof m.content === "string" ? JSON.parse(m.content) : m.content; } catch (e) { c = null; }
     return c && typeof c === "object" ? c : {};
   }
+  // TikTok's current chat items take only a clientId prop; the message object itself lives in a hook of the item's
+  // component (memoizedState chain, often under .current) - found on the phone 2026-09-29.
+  const isMsgObj = (v) => v && typeof v === "object" && !(v instanceof Node) && "isFromMe" in v && "content" in v && "createdAt" in v;
+  function msgFromHooks(el) {
+    let f = fiberOf(el);
+    for (let i = 0; f && i < 8; i++, f = f.return) {
+      let h = f.memoizedState;
+      for (let j = 0; h && typeof h === "object" && j < 40; j++, h = h.next) {
+        const v = h.memoizedState;
+        if (isMsgObj(v)) return v;
+        if (v && typeof v === "object" && isMsgObj(v.current)) return v.current;
+      }
+    }
+    return null;
+  }
+  // a shared TikTok: the card carries itemId / nickname props and draws its cover as a background image
+  function sharedVideo(it) {
+    const card = it.querySelector('[data-e2e="dm-new-shared-video"]');
+    if (!card) return null;
+    const p = propsUp(card, (x) => typeof x.itemId === "string" && x.itemId, 6);
+    const bg = (card.style && card.style.backgroundImage) || "";
+    const m = bg.match(/url\(["']?(.*?)["']?\)/);
+    return p ? { itemId: str(p.itemId, 40), cover: str(m ? m[1] : "", 600), name: str(p.nickname || "", 80) } : null;
+  }
   function readMessage(it, i, listRect) {
-    const mp = propsUp(it, isMsg, 25);
+    const hm = msgFromHooks(it);
+    const mp = propsUp(it, isMsg, 25) || (hm ? { message: hm } : null);
     if (mp) {
       const m = mp.message, c = parseContent(m);
       const thumb = c.content_thumb && (c.content_thumb.url_list || c.content_thumb.urlList);
-      const video = c.itemId || c.item_id ? { itemId: str(c.itemId || c.item_id, 40), cover: str(Array.isArray(thumb) ? thumb[0] : "", 600), name: str(c.content_name, 80) } : null;
+      let video = c.itemId || c.item_id ? { itemId: str(c.itemId || c.item_id, 40), cover: str(Array.isArray(thumb) ? thumb[0] : "", 600), name: str(c.content_name, 80) } : null;
+      const card = sharedVideo(it);
+      // the card's own cover first: content_thumb is often the 100x100 author picture, not the video
+      if (card) video = { itemId: (video && video.itemId) || card.itemId, cover: card.cover || (video && video.cover) || "", name: (video && video.name) || card.name };
       let text = typeof c.text === "string" ? str(c.text, 6000) : "";
       if (!text && !video) text = str(lines(it).join(" "), 400); // stickers, photos, cards: what TikTok shows
       return {
@@ -253,8 +281,20 @@
     for (let i = 0; i < 40; i++) { await sleep(150); if (isOpen(id, name)) return true; }
     return false;
   }
+  // TikTok marks a chat read only while its page has focus; this hidden page never does. While a chat is on screen in
+  // Ghost the page reports focus (so opening a chat in Ghost reads it, like on the website); otherwise it doesn't, so
+  // messages arriving in the chat TikTok's page still has open aren't marked read behind the user's back.
+  let viewing = false;
+  try { Object.defineProperty(document, "hasFocus", { configurable: true, value: () => viewing }); } catch (e) {}
+  function setViewing(on) {
+    if (viewing === !!on) return;
+    viewing = !!on;
+    try { window.dispatchEvent(new Event(viewing ? "focus" : "blur")); document.dispatchEvent(new Event("visibilitychange")); } catch (e) {}
+  }
+  window.__ghostDMViewing = (on) => { setViewing(on); return viewing; };
   window.__ghostDMOpen = async function (id, name) {
     const ok = await open(str(id, 120), str(name, 80));
+    if (ok) setViewing(true);
     report(true);
     return { ok };
   };

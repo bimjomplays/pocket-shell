@@ -55,6 +55,8 @@ final class GhostTikTokDM: NSObject, WKScriptMessageHandler, WKNavigationDelegat
                 self.sendsInFlight = max(0, self.sendsInFlight - 1)
                 if self.sendsInFlight == 0 && self.stopWhenIdle { self.stop() }
             }
+        case "dmLeave":
+            call("return window.__ghostDMViewing ? window.__ghostDMViewing(false) : false;", [:], reply: reply)
         case "dmOlder":
             call("return window.__ghostDMOlder ? window.__ghostDMOlder() : false;", [:], reply: reply)
         case "dmShow": show(); reply(true, nil)

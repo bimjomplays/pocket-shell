@@ -10311,7 +10311,8 @@
     };
     sendB.addEventListener("click", () => { haptic("light"); go(); });
     T.dm.listeners.add(paint);
-    pg.onDestroy = () => { T.dm.listeners.delete(paint); ttDMUse(ctx, false); };
+    // leaving the chat stops TikTok's page from marking new messages in it read (tiktok-dm-page.js setViewing)
+    pg.onDestroy = () => { T.dm.listeners.delete(paint); ttPost("dmLeave", {}).catch(() => {}); ttDMUse(ctx, false); };
     pg.onShow = paint;
     page.querySelector(".gh-tts-back").addEventListener("click", () => { haptic("light"); popTTPage(ctx); });
     pushTTPage(ctx, pg);
