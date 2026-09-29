@@ -60,7 +60,19 @@
     return null;
   }
   const lines = (el) => String((el && (el.innerText || el.textContent)) || "").split("\n").map((s) => s.trim()).filter(Boolean);
-  const imgSrc = (el) => { const i = el && el.querySelector("img"); return (i && (i.getAttribute("src") || i.currentSrc)) || ""; };
+  // Images are blocked in this hidden page, so TikTok swaps the <img> for its placeholder <svg> and the picture URL only
+  // lives in the avatar component's props (`src`, checked on the phone 2026-09-29). Try the <img> first, then the props.
+  const isPicUrl = (v) => typeof v === "string" && /^https:\/\/[^/]+\.(tiktokcdn(-us)?\.com|ibyteimg\.com|byteimg\.com)\//.test(v);
+  const imgSrc = (el) => {
+    if (!el) return "";
+    const i = el.querySelector("img"); const a = i && (i.getAttribute("src") || i.currentSrc);
+    if (a) return a;
+    for (const e of [el.querySelector("span, div"), el].filter(Boolean)) {
+      const p = propsUp(e, (x) => isPicUrl(x.src) || isPicUrl(x.avatar) || isPicUrl(x.url), 8);
+      if (p) return isPicUrl(p.src) ? p.src : isPicUrl(p.avatar) ? p.avatar : p.url;
+    }
+    return "";
+  };
   const isConv = (p) => typeof p.id === "string" && p.id && ("shortId" in p);
   const isMsg = (p) => p.message && typeof p.message === "object" && ("content" in p.message || "isFromMe" in p.message);
 
@@ -153,12 +165,12 @@
     if (hEl) handle = hEl.textContent.trim();
     else if (nameEl && nameEl.nextElementSibling && /^@/.test(nameEl.nextElementSibling.textContent.trim())) handle = nameEl.nextElementSibling.textContent.trim();
     const box = q1(doc, SEL.chatBox) || (nameEl && nameEl.closest("div"));
-    const av = box && box.querySelector('[data-e2e="top-chat-avatar"] img, img');
+    const av = (box && box.querySelector('[data-e2e="top-chat-avatar"]')) || doc.querySelector('[data-e2e="top-chat-avatar"]');
     return {
       id: currentConvId(doc),
       name: str(nameEl ? nameEl.textContent.trim() : "", 80),
       handle: str(handle.replace(/^@/, ""), 60),
-      avatar: str(av ? av.getAttribute("src") || "" : "", 600),
+      avatar: str(imgSrc(av), 600),
       messages: readMessages(doc),
       canSend: !!q1(doc, SEL.editor),
     };

@@ -1580,7 +1580,10 @@ input, textarea {
    hints, long links, media) is clipped instead of widening the scroller. */
 :host { overflow: hidden; overscroll-behavior: none; }
 .gh-messages { overflow-x: hidden !important; touch-action: pan-y; overscroll-behavior-x: none; }
-.gh-screen, .gh-conv, .gh-home { overflow-x: hidden; }
+/* Screens never scroll themselves (their bodies do). overflow-x:hidden alone turned overflow-y into "auto", so the home
+   screen became scrollable by the Gallery selection bar parked below it: dragging a short list (TikTok messages) moved
+   the whole screen up and showed that bar (phone report 2026-09-29). clip = no scrolling at all, not even from code. */
+.gh-screen, .gh-conv, .gh-home { overflow: hidden; overflow: clip; }
 .gh-bubble { max-width: 100%; overflow-wrap: anywhere; }
 
 /* Bubble tails off: the masked tail shape drew a visible glitch at the bubbles' bottom-left corner on the phone
