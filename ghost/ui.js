@@ -114,6 +114,10 @@
     heartFill: '<path d="M12 20s-7.5-4.6-9.2-9.4C1.7 7.3 3.9 4 7.3 4c2 0 3.5 1.1 4.7 2.8C13.2 5.1 14.7 4 16.7 4c3.4 0 5.6 3.3 4.5 6.6C19.5 15.4 12 20 12 20z" fill="currentColor"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r="0.6" fill="currentColor"/>',
     more: '<circle cx="5.5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor"/>',
+    clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+    arrowUpLeft: '<path d="M17 17L7 7"/><path d="M7 15V7h8"/>',
+    hash: '<path d="M9.5 4L7.5 20"/><path d="M16.5 4l-2 16"/><path d="M4.5 9h15"/><path d="M4 15h15"/>',
+    playOutline: '<path d="M8 5.5v13l10.5-6.5z"/>',
   };
   function icon(name, size, extraClass) {
     const wrap = document.createElement("span");
@@ -9086,7 +9090,7 @@
     wrap.dataset.open = "0";
     wrap.innerHTML = `
       <div class="gh-tt-pager"></div>
-      <div class="gh-tt-top"><span class="gh-tt-title">For You</span></div>
+      <div class="gh-tt-top"><span class="gh-tt-title">For You</span><button class="gh-tt-search-btn gh-press" data-ttact="search" aria-label="Search TikTok"></button></div>
       <div class="gh-tt-banner" style="display:none"><span>Sign in to TikTok for your own For You feed</span><button class="gh-tt-banner-btn gh-press" data-ttact="signin">Sign In</button></div>
       <div class="gh-tt-empty" style="display:none">
         <div class="gh-tt-empty-title">TikTok</div>
@@ -9095,17 +9099,23 @@
         <button class="gh-tt-empty-link gh-press" data-ttact="retry">Try Again</button>
       </div>
       <div class="gh-tt-loading"><div class="gh-spinner"></div></div>
+      <div class="gh-tts"></div>
     `;
     screen.insertBefore(wrap, tabBar);
+    wrap.querySelector('[data-ttact="search"]').appendChild(icon("search", 25));
     const T = {
       el: wrap, pager: wrap.querySelector(".gh-tt-pager"), banner: wrap.querySelector(".gh-tt-banner"),
       empty: wrap.querySelector(".gh-tt-empty"), loading: wrap.querySelector(".gh-tt-loading"),
       items: [], ids: new Set(), index: 0, slides: new Map(), started: false, signedIn: null,
       drag: null, anim: false, moreAt: 0, emptyTimer: null, paused: false,
+      onNearEnd: () => ttPost("more").catch(() => {}),
+      search: { el: wrap.querySelector(".gh-tts"), stack: [], recent: null },
     };
     ctx.tiktok = T;
+    ttCtx = ctx;
     for (const b of wrap.querySelectorAll('[data-ttact="signin"]')) b.addEventListener("click", () => { haptic("light"); ttPost("signIn").catch(() => {}); });
     wrap.querySelector('[data-ttact="retry"]').addEventListener("click", () => { haptic("light"); T.empty.style.display = "none"; T.loading.style.display = ""; ttPost("more").catch(() => {}); armEmptyTimer(ctx); });
+    wrap.querySelector('[data-ttact="search"]').addEventListener("click", () => { haptic("light"); openTTSearch(ctx); });
 
     // native -> ui.js (darkmobile world)
     window.__ghostTikTok = {
@@ -9113,50 +9123,54 @@
       status: (s) => ttApplyStatus(ctx, s || {}),
       reset: () => { ttClear(ctx); if (T.el.dataset.open === "1") { T.loading.style.display = ""; armEmptyTimer(ctx); } },
     };
-
-    // swipe: the finger drags the whole column; let go past 18% of the screen (or a quick flick) = next/previous
-    const H = () => T.pager.clientHeight || window.innerHeight;
-    T.pager.addEventListener("touchstart", (e) => {
-      if (T.anim || e.touches.length !== 1) return;
-      T.drag = { y0: e.touches[0].clientY, t0: nowMs(), dy: 0, moved: false };
-    }, { passive: true });
-    T.pager.addEventListener("touchmove", (e) => {
-      if (!T.drag) return;
-      let dy = (e.touches[0].clientY - T.drag.y0) * pagePxToLocal();
-      if (Math.abs(dy) > 6) T.drag.moved = true;
-      // rubber band at the ends
-      if ((dy > 0 && T.index === 0) || (dy < 0 && T.index >= T.items.length - 1)) dy *= 0.3;
-      T.drag.dy = dy;
-      layoutTikTok(ctx, dy);
-      if (T.drag.moved) e.preventDefault();
-    }, { passive: false });
-    const end = () => {
-      const d = T.drag; T.drag = null;
-      if (!d) return;
-      if (!d.moved) { toggleTikTokPause(ctx); return; }
-      const v = d.dy / Math.max(1, nowMs() - d.t0); // px per ms
-      let to = T.index;
-      if ((d.dy < -H() * 0.18 || v < -0.45) && T.index < T.items.length - 1) to = T.index + 1;
-      else if ((d.dy > H() * 0.18 || v > 0.45) && T.index > 0) to = T.index - 1;
-      goTikTok(ctx, to, d.dy);
-    };
-    T.pager.addEventListener("touchend", end);
-    T.pager.addEventListener("touchcancel", end);
-    // mouse / trackpad (no touch): wheel pages, click pauses
-    let wheelAt = 0;
-    T.pager.addEventListener("wheel", (e) => {
-      e.preventDefault();
-      if (nowMs() - wheelAt < 450 || Math.abs(e.deltaY) < 12) return;
-      wheelAt = nowMs();
-      goTikTok(ctx, clamp(T.index + (e.deltaY > 0 ? 1 : -1), 0, Math.max(0, T.items.length - 1)), 0);
-    }, { passive: false });
-    T.pager.addEventListener("click", () => { if (!("ontouchstart" in window)) toggleTikTokPause(ctx); });
+    wireTikTokPager(ctx, T);
 
     // pause whenever something covers the tab (Settings, the camera, a chat) or Ghost goes to the background
     document.addEventListener("visibilitychange", () => syncTikTokPlayback(ctx));
     T.coverTimer = null;
     applyTikTokTab(ctx);
     return T;
+  }
+  // A player P: the feed (ctx.tiktok itself) or a search results player - { pager, items, index, slides, paused, drag,
+  // anim, onNearEnd }. Swipe: the finger drags the whole column; let go past 18% of the screen (or a quick flick) =
+  // next/previous. A tap pauses, or opens what it hit (@name, #hashtag, the sound) in the caption.
+  function wireTikTokPager(ctx, P) {
+    const H = () => P.pager.clientHeight || window.innerHeight;
+    P.pager.addEventListener("touchstart", (e) => {
+      if (P.anim || e.touches.length !== 1) return;
+      P.drag = { y0: e.touches[0].clientY, t0: nowMs(), dy: 0, moved: false, target: e.target };
+    }, { passive: true });
+    P.pager.addEventListener("touchmove", (e) => {
+      if (!P.drag) return;
+      let dy = (e.touches[0].clientY - P.drag.y0) * pagePxToLocal();
+      if (Math.abs(dy) > 6) P.drag.moved = true;
+      // rubber band at the ends
+      if ((dy > 0 && P.index === 0) || (dy < 0 && P.index >= P.items.length - 1)) dy *= 0.3;
+      P.drag.dy = dy;
+      layoutTikTok(ctx, dy, false, P);
+      if (P.drag.moved) e.preventDefault();
+    }, { passive: false });
+    const end = () => {
+      const d = P.drag; P.drag = null;
+      if (!d) return;
+      if (!d.moved) { if (!openTTLink(ctx, d.target, P)) toggleTikTokPause(ctx, P); return; }
+      const v = d.dy / Math.max(1, nowMs() - d.t0); // px per ms
+      let to = P.index;
+      if ((d.dy < -H() * 0.18 || v < -0.45) && P.index < P.items.length - 1) to = P.index + 1;
+      else if ((d.dy > H() * 0.18 || v > 0.45) && P.index > 0) to = P.index - 1;
+      goTikTok(ctx, to, d.dy, P);
+    };
+    P.pager.addEventListener("touchend", end);
+    P.pager.addEventListener("touchcancel", end);
+    // mouse / trackpad (no touch): wheel pages, click pauses
+    let wheelAt = 0;
+    P.pager.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      if (nowMs() - wheelAt < 450 || Math.abs(e.deltaY) < 12) return;
+      wheelAt = nowMs();
+      goTikTok(ctx, clamp(P.index + (e.deltaY > 0 ? 1 : -1), 0, Math.max(0, P.items.length - 1)), 0, P);
+    }, { passive: false });
+    P.pager.addEventListener("click", (e) => { if (!("ontouchstart" in window) && !openTTLink(ctx, e.target, P)) toggleTikTokPause(ctx, P); });
   }
   function tikTokCovered(ctx) {
     const T = ctx.tiktok;
@@ -9171,10 +9185,16 @@
     const T = ctx.tiktok;
     if (!T) return;
     const covered = tikTokCovered(ctx);
-    for (const [i, s] of T.slides) {
+    const top = T.search.stack[T.search.stack.length - 1];
+    // the feed plays only with no search page over it; a search player only while it's the top page
+    syncTikTokPlayer(T, covered || !!top);
+    for (const pg of T.search.stack) if (pg.player) syncTikTokPlayer(pg.player, covered || pg !== top);
+  }
+  function syncTikTokPlayer(P, covered) {
+    for (const [i, s] of P.slides) {
       const v = s.video;
       if (!v) continue;
-      if (i === T.index && !covered && !T.paused && s.ready) { const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+      if (i === P.index && !covered && !P.paused && s.ready) { const p = v.play(); if (p && p.catch) p.catch(() => {}); }
       else { try { v.pause(); } catch (e) {} }
     }
   }
@@ -9184,7 +9204,7 @@
     const on = pref("tiktokTab") !== false;
     const tab = ctx.home && ctx.home.screen.querySelector('[data-tab="tiktok"]');
     if (tab) tab.style.display = on ? "" : "none";
-    if (!on && (T.started || T.el.dataset.open === "1")) {
+    if (!on && (T.started || T.el.dataset.open === "1" || T.search.stack.length)) {
       if (T.el.dataset.open === "1") { closeTikTok(ctx); const chats = ctx.home.screen.querySelector('[data-tab="chats"]'); if (chats) { for (const t of ctx.home.screen.querySelectorAll(".gh-tab-btn")) t.dataset.active = "0"; chats.dataset.active = "1"; } }
       ttClear(ctx);
       T.started = false; T.signedIn = null;
@@ -9253,53 +9273,54 @@
   }
   function ttClear(ctx) {
     const T = ctx.tiktok;
+    closeTTSearchAll(ctx, true);
     for (const i of Array.from(T.slides.keys())) dropTikTokSlide(ctx, i);
     T.items = []; T.ids = new Set(); T.index = 0; T.paused = false;
     clearTimeout(T.emptyTimer);
     T.loading.style.display = "none"; T.empty.style.display = "none"; T.banner.style.display = "none";
   }
-  function toggleTikTokPause(ctx) {
-    const T = ctx.tiktok;
-    const s = T.slides.get(T.index);
+  function toggleTikTokPause(ctx, P) {
+    P = P || ctx.tiktok;
+    const s = P.slides.get(P.index);
     if (!s) return;
-    T.paused = !T.paused;
+    P.paused = !P.paused;
     haptic("light");
-    s.el.dataset.paused = T.paused ? "1" : "0";
+    s.el.dataset.paused = P.paused ? "1" : "0";
     syncTikTokPlayback(ctx);
   }
-  function goTikTok(ctx, to, fromDy) {
-    const T = ctx.tiktok;
-    const changed = to !== T.index;
-    const H = T.pager.clientHeight || window.innerHeight;
+  function goTikTok(ctx, to, fromDy, P) {
+    P = P || ctx.tiktok;
+    const changed = to !== P.index;
+    const H = P.pager.clientHeight || window.innerHeight;
     // animate from where the finger left the column to the new resting place
-    T.anim = true;
-    const startOffset = fromDy + (changed ? (to > T.index ? H : -H) : 0);
+    P.anim = true;
+    const startOffset = fromDy + (changed ? (to > P.index ? H : -H) : 0);
     if (changed) {
-      const old = T.slides.get(T.index);
+      const old = P.slides.get(P.index);
       if (old) { old.el.dataset.paused = "0"; if (old.video) { try { old.video.pause(); old.video.currentTime = 0; } catch (e) {} } }
-      T.index = to; T.paused = false;
+      P.index = to; P.paused = false;
       haptic("light");
     }
-    layoutTikTok(ctx, startOffset, true);
+    layoutTikTok(ctx, startOffset, true, P);
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      T.pager.dataset.anim = "1";
-      layoutTikTok(ctx, 0);
-      setTimeout(() => { T.pager.dataset.anim = "0"; T.anim = false; syncTikTokPlayback(ctx); }, 300);
+      P.pager.dataset.anim = "1";
+      layoutTikTok(ctx, 0, false, P);
+      setTimeout(() => { P.pager.dataset.anim = "0"; P.anim = false; syncTikTokPlayback(ctx); }, 300);
     }));
-    if (T.index >= T.items.length - 3 && nowMs() - T.moreAt > 4000) { T.moreAt = nowMs(); ttPost("more").catch(() => {}); }
+    if (P.index >= P.items.length - 3 && nowMs() - P.moreAt > 4000 && P.onNearEnd) { P.moreAt = nowMs(); P.onNearEnd(); }
   }
   // Puts slides index-1 .. index+2 in place (offset = the finger's drag), builds missing ones, frees the rest.
-  function layoutTikTok(ctx, offset, noAnim) {
-    const T = ctx.tiktok;
-    if (noAnim) T.pager.dataset.anim = "0";
-    const H = T.pager.clientHeight || window.innerHeight;
-    const lo = Math.max(0, T.index - TT_KEEP_BEHIND), hi = Math.min(T.items.length - 1, T.index + TT_KEEP_AHEAD);
-    for (const i of Array.from(T.slides.keys())) if (i < lo || i > hi) dropTikTokSlide(ctx, i);
+  function layoutTikTok(ctx, offset, noAnim, P) {
+    P = P || ctx.tiktok;
+    if (noAnim) P.pager.dataset.anim = "0";
+    const H = P.pager.clientHeight || window.innerHeight;
+    const lo = Math.max(0, P.index - TT_KEEP_BEHIND), hi = Math.min(P.items.length - 1, P.index + TT_KEEP_AHEAD);
+    for (const i of Array.from(P.slides.keys())) if (i < lo || i > hi) dropTikTokSlide(ctx, i, P);
     for (let i = lo; i <= hi; i++) {
-      let s = T.slides.get(i);
-      if (!s) s = buildTikTokSlide(ctx, i);
-      s.el.style.transform = `translate3d(0, ${Math.round((i - T.index) * H + offset)}px, 0)`;
-      s.el.dataset.current = i === T.index ? "1" : "0";
+      let s = P.slides.get(i);
+      if (!s) s = buildTikTokSlide(ctx, i, P);
+      s.el.style.transform = `translate3d(0, ${Math.round((i - P.index) * H + (offset || 0))}px, 0)`;
+      s.el.dataset.current = i === P.index ? "1" : "0";
     }
   }
   function fmtCount(n) {
@@ -9309,9 +9330,25 @@
     if (x >= 1e3) return (x / 1e3).toFixed(x >= 1e4 ? 0 : 1).replace(/\.0$/, "") + "K";
     return String(x);
   }
-  function buildTikTokSlide(ctx, i) {
-    const T = ctx.tiktok;
-    const it = T.items[i];
+  // caption text with #hashtags and @mentions as tappable spans (TikTok's app opens those pages)
+  function ttCaption(node, text, tags) {
+    const known = new Map((tags || []).map((t) => [t.name.toLowerCase(), t]));
+    const re = /([#＃][\p{L}\p{N}_]+)|(@[A-Za-z0-9._]{2,24})/gu;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) node.append(document.createTextNode(text.slice(last, m.index)));
+      const span = el("span", "gh-tt-link");
+      span.textContent = m[0];
+      if (m[1]) { const name = m[1].slice(1); const t = known.get(name.toLowerCase()); span.dataset.ttlink = "tag"; span.dataset.name = name; if (t && t.id) span.dataset.id = t.id; }
+      else { span.dataset.ttlink = "user"; span.dataset.handle = m[2].slice(1); }
+      node.append(span);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) node.append(document.createTextNode(text.slice(last)));
+  }
+  function buildTikTokSlide(ctx, i, P) {
+    P = P || ctx.tiktok;
+    const it = P.items[i];
     const slide = el("div", "gh-tt-slide");
     slide.dataset.i = String(i);
     slide.innerHTML = `
@@ -9319,16 +9356,16 @@
       <video class="gh-tt-video" playsinline webkit-playsinline loop preload="auto"></video>
       <div class="gh-tt-shade"></div>
       <div class="gh-tt-info">
-        <div class="gh-tt-author"><span class="gh-tt-av"></span><span class="gh-tt-name"></span></div>
+        <div class="gh-tt-author" data-ttlink="author"><span class="gh-tt-av"></span><span class="gh-tt-name"></span></div>
         <div class="gh-tt-desc"></div>
-        <div class="gh-tt-music"></div>
+        <div class="gh-tt-music" data-ttlink="sound"></div>
       </div>
       <div class="gh-tt-side"><div class="gh-tt-stat"></div></div>
       <div class="gh-tt-paused-ic"></div>
       <div class="gh-tt-progress"><i></i></div>
     `;
     slide.querySelector(".gh-tt-name").textContent = "@" + (it.author && (it.author.uniqueId || it.author.nickname) || "tiktok");
-    slide.querySelector(".gh-tt-desc").textContent = it.desc || "";
+    ttCaption(slide.querySelector(".gh-tt-desc"), it.desc || "", it.tags);
     const mus = slide.querySelector(".gh-tt-music");
     if (it.music) { mus.append(icon("music", 13)); mus.append(document.createTextNode(" " + it.music)); } else mus.remove();
     const stat = slide.querySelector(".gh-tt-stat");
@@ -9341,32 +9378,693 @@
     video.addEventListener("timeupdate", () => { if (video.duration > 0) bar.style.width = (100 * video.currentTime / video.duration).toFixed(2) + "%"; });
     const keep = (u) => { s.urls.push(u); return u; };
     const tok = s.tok;
-    if (it.cover) ttBlob(it.cover, false).then((b) => { if (s.tok !== tok || !T.slides.has(i)) return; cover.src = keep(URL.createObjectURL(b)); }, () => {});
+    const alive = () => s.tok === tok && P.slides.get(i) === s;
+    if (it.cover) ttBlob(it.cover, false).then((b) => { if (!alive()) return; cover.src = keep(URL.createObjectURL(b)); }, () => {});
     if (it.author && it.author.avatar) ttBlob(it.author.avatar, false).then((b) => {
-      if (s.tok !== tok || !T.slides.has(i)) return;
+      if (!alive()) return;
       const img = el("img"); img.alt = ""; img.src = keep(URL.createObjectURL(b)); slide.querySelector(".gh-tt-av").appendChild(img);
     }, () => {});
-    ttBlob(it.play, true, () => s.tok === tok && T.slides.has(i)).then((b) => {
-      if (s.tok !== tok || !T.slides.has(i)) return;
+    P.slides.set(i, s);
+    ttBlob(it.play, true, alive).then((b) => {
+      if (!alive()) return;
       video.src = keep(URL.createObjectURL(b));
       s.ready = true;
       slide.dataset.ready = "1";
       syncTikTokPlayback(ctx);
     }, (e) => { if (s.tok !== tok) return; slide.dataset.failed = "1"; gtrail("tiktok video failed " + (e && e.message || e)); });
-    T.pager.appendChild(slide);
-    T.slides.set(i, s);
+    P.pager.appendChild(slide);
     return s;
   }
-  function dropTikTokSlide(ctx, i) {
-    const T = ctx.tiktok;
-    const s = T.slides.get(i);
+  function dropTikTokSlide(ctx, i, P) {
+    P = P || ctx.tiktok;
+    const s = P.slides.get(i);
     if (!s) return;
-    T.slides.delete(i);
+    P.slides.delete(i);
     s.tok = null;
     try { s.video.pause(); s.video.removeAttribute("src"); s.video.load(); } catch (e) {}
     for (const u of s.urls) URL.revokeObjectURL(u);
     s.urls = [];
     s.el.remove();
+  }
+  // a tap on @name / #hashtag / the sound line in a caption opens that page (search screens stack over the player)
+  function openTTLink(ctx, target, P) {
+    const a = target && target.closest && target.closest("[data-ttlink]");
+    if (!a) return false;
+    const it = P.items[P.index];
+    haptic("light");
+    const kind = a.dataset.ttlink;
+    if (kind === "author" && it && it.author) openTTProfile(ctx, Object.assign({}, it.author, it.authorStats || {}));
+    else if (kind === "user") openTTProfile(ctx, { uniqueId: a.dataset.handle });
+    else if (kind === "tag") openTTTag(ctx, { id: a.dataset.id || "", name: a.dataset.name });
+    else if (kind === "sound" && it && it.musicInfo) openTTSound(ctx, it.musicInfo);
+    else return false;
+    return true;
+  }
+
+  // =====================================================================================================
+  // TikTok search, like the TikTok app's: search screen (recent + "You may like" + live suggestions), results with
+  // Top · Videos · Users · Sounds · Hashtags, profile / sound / hashtag pages with video grids, and a player that
+  // swipes through whatever list it was opened from. Every request goes to native ("tt" api) which runs one of
+  // tiktok-page.js's allow-listed requests inside the hidden TikTok page, signed by TikTok's own code.
+  // Pages stack (T.search.stack); only the top one is shown and only its player plays. Grid pictures load as they
+  // come near the screen and are freed when they scroll far away.
+  // =====================================================================================================
+  const TT_RECENT_KEY = "ghostTTRecent", TT_RECENT_MAX = 20;
+  async function ttApi(kind, params) {
+    const r = await ttPost("api", { kind, params: params || {} });
+    if (r && r.captcha) {
+      const T = ttCtx && ttCtx.tiktok;
+      if (T && nowMs() - (T.captchaToastAt || 0) > 8000) { T.captchaToastAt = nowMs(); ttCtx.showToast("TikTok wants you to verify - open Settings > TikTok > Sign In"); }
+      throw Object.assign(new Error("captcha"), { captcha: true });
+    }
+    if (!r || r.error) throw new Error((r && r.error) || "no answer");
+    return r;
+  }
+  var ttCtx; // set from buildTikTok (var, no initializer: buildTikTok may run before this line is reached)
+  // pictures in lists: at most 4 downloads at once; a slot is freed when its download ends, whatever happened to the
+  // tile (a tile scrolled away mid-download just drops the result)
+  const ttThumbQ = { running: 0, waiting: [] };
+  function ttThumb(url) {
+    return new Promise((resolve, reject) => {
+      const go = () => {
+        ttThumbQ.running++;
+        ttBlob(url, false).then(resolve, reject).finally(() => { ttThumbQ.running--; const n = ttThumbQ.waiting.shift(); if (n) n(); });
+      };
+      if (ttThumbQ.running < 4) go(); else ttThumbQ.waiting.push(go);
+    });
+  }
+  // lazy pictures inside one scroll box: load within ~1 screen, free beyond ~2
+  function ttLazy(scroller) {
+    const L = { imgs: new Map() };
+    const load = (img) => {
+      const st = L.imgs.get(img);
+      if (!st || st.url || st.loading || !st.src) return;
+      st.loading = true;
+      const tok = st.tok = {};
+      ttThumb(st.src).then((b) => {
+        st.loading = false;
+        if (st.tok !== tok || !L.imgs.has(img) || !st.near) return;
+        st.url = URL.createObjectURL(b); img.src = st.url; img.dataset.loaded = "1";
+      }, () => { st.loading = false; });
+    };
+    const free = (img) => { const st = L.imgs.get(img); if (!st) return; st.tok = null; st.loading = false; if (st.url) { URL.revokeObjectURL(st.url); st.url = null; } img.removeAttribute("src"); img.dataset.loaded = "0"; };
+    const near = new IntersectionObserver((es) => { for (const e of es) { const st = L.imgs.get(e.target); if (!st) continue; st.near = e.isIntersecting; if (e.isIntersecting) load(e.target); } }, { root: scroller, rootMargin: "700px 0px" });
+    const far = new IntersectionObserver((es) => { for (const e of es) if (!e.isIntersecting) free(e.target); }, { root: scroller, rootMargin: "1600px 0px" });
+    L.add = (img, src) => { if (!src || L.dead) return; L.imgs.set(img, { src, url: null, near: false }); near.observe(img); far.observe(img); };
+    L.destroy = () => { L.dead = true; near.disconnect(); far.disconnect(); for (const img of L.imgs.keys()) free(img); L.imgs.clear(); };
+    L.count = () => { let n = 0; for (const st of L.imgs.values()) if (st.url) n++; return n; };
+    return L;
+  }
+  // A list that loads pages: { items, ids, cursor, hasMore, loading, more() }
+  function ttSource(fetchPage, keyOf) {
+    const S = { items: [], ids: new Set(), cursor: 0, extra: {}, hasMore: true, loading: false, error: null, started: false, listeners: new Set() };
+    S.more = async () => {
+      if (S.loading || !S.hasMore) return;
+      S.loading = true; S.started = true;
+      try {
+        const r = await fetchPage(S.cursor, S);
+        let added = 0;
+        for (const x of r.list || []) { const k = keyOf(x); if (!k || S.ids.has(k)) continue; S.ids.add(k); S.items.push(x); added++; }
+        S.cursor = r.cursor;
+        // no new rows = the end, even if TikTok says there's more (stops endless empty pages)
+        S.hasMore = !!r.hasMore && added > 0;
+        S.error = null;
+      } catch (e) { S.error = e; S.hasMore = false; }
+      S.loading = false;
+      for (const f of S.listeners) { try { f(); } catch (e) {} }
+    };
+    // the first page is in (starts it if nobody has; waits if it's on its way) - for lists built from another list
+    S.ready = async () => {
+      if (!S.started) await S.more();
+      while (S.loading) await new Promise((r) => { const f = () => { S.listeners.delete(f); r(); }; S.listeners.add(f); });
+    };
+    return S;
+  }
+  // ---- page stack ----
+  function pushTTPage(ctx, pg) {
+    const T = ctx.tiktok;
+    ttCtx = ctx;
+    const prev = T.search.stack[T.search.stack.length - 1];
+    T.search.stack.push(pg);
+    T.search.el.appendChild(pg.el);
+    T.search.el.dataset.open = "1";
+    pg.el.dataset.anim = "1";
+    requestAnimationFrame(() => requestAnimationFrame(() => { pg.el.dataset.in = "1"; }));
+    setTimeout(() => { pg.el.dataset.anim = "0"; if (prev && T.search.stack.includes(prev)) prev.el.dataset.hidden = "1"; }, 280);
+    syncTikTokPlayback(ctx);
+    return pg;
+  }
+  function popTTPage(ctx) {
+    const T = ctx.tiktok;
+    const pg = T.search.stack.pop();
+    if (!pg) return;
+    if (pg.player) syncTikTokPlayer(pg.player, true); // silent while it slides away
+    const prev = T.search.stack[T.search.stack.length - 1];
+    if (prev) prev.el.dataset.hidden = "0";
+    pg.el.dataset.anim = "1"; pg.el.dataset.in = "0";
+    setTimeout(() => destroyTTPage(pg), 280);
+    if (!T.search.stack.length) T.search.el.dataset.open = "0";
+    if (prev && prev.onShow) prev.onShow();
+    syncTikTokPlayback(ctx);
+  }
+  function destroyTTPage(pg) {
+    if (pg.dead) return;
+    pg.dead = true;
+    if (pg.player) for (const i of Array.from(pg.player.slides.keys())) dropTikTokSlide(null, i, pg.player);
+    for (const L of pg.lazies || []) L.destroy();
+    if (pg.onDestroy) pg.onDestroy();
+    pg.el.remove();
+  }
+  function closeTTSearchAll(ctx, now) {
+    const T = ctx.tiktok;
+    if (!T) return;
+    while (T.search.stack.length) { const pg = T.search.stack.pop(); if (pg.player) syncTikTokPlayer(pg.player, true); if (now) destroyTTPage(pg); else { pg.el.dataset.in = "0"; setTimeout(() => destroyTTPage(pg), 280); } }
+    T.search.el.dataset.open = "0";
+  }
+  function ttPageShell(kind, title) {
+    const page = el("div", "gh-tts-page");
+    page.dataset.kind = kind;
+    page.innerHTML = `<div class="gh-tts-head"><button class="gh-tts-back gh-press" aria-label="Back"></button><div class="gh-tts-head-title"></div><span class="gh-tts-head-gap"></span></div><div class="gh-tts-body"></div>`;
+    page.querySelector(".gh-tts-back").appendChild(icon("back", 24));
+    page.querySelector(".gh-tts-head-title").textContent = title || "";
+    return page;
+  }
+  function ttAvatar(L, src, size, cls) {
+    const box = el("span", "gh-tts-av" + (cls ? " " + cls : ""));
+    box.style.width = box.style.height = size + "px";
+    const img = el("img"); img.alt = ""; box.appendChild(img);
+    L.add(img, src);
+    return box;
+  }
+  // ---- search screen ----
+  async function loadTTRecent(T) { if (!T.search.recent) T.search.recent = (await storage.get(TT_RECENT_KEY, [])).filter((x) => typeof x === "string").slice(0, TT_RECENT_MAX); return T.search.recent; }
+  function saveTTRecent(T) { storage.set(TT_RECENT_KEY, T.search.recent.slice(0, TT_RECENT_MAX)); }
+  function openTTSearch(ctx, initial) {
+    const T = ctx.tiktok;
+    if (!T || pref("tiktokTab") === false) return;
+    const page = el("div", "gh-tts-page");
+    page.dataset.kind = "search";
+    page.innerHTML = `
+      <div class="gh-tts-bar">
+        <button class="gh-tts-back gh-press" aria-label="Back"></button>
+        <label class="gh-tts-field"><input type="search" enterkeyhint="search" placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"><button class="gh-tts-clear" aria-label="Clear"></button></label>
+        <button class="gh-tts-go gh-press">Search</button>
+      </div>
+      <div class="gh-tts-body gh-tts-home"></div>
+      <div class="gh-tts-body gh-tts-sugs" style="display:none"></div>`;
+    page.querySelector(".gh-tts-back").appendChild(icon("back", 24));
+    page.querySelector(".gh-tts-field").prepend(icon("search", 18));
+    page.querySelector(".gh-tts-clear").appendChild(icon("close", 12));
+    const input = page.querySelector("input"), home = page.querySelector(".gh-tts-home"), sugs = page.querySelector(".gh-tts-sugs");
+    const pg = { kind: "search", el: page, input, lazies: [] };
+    const go = (q) => {
+      q = String(q || "").trim();
+      if (!q) return;
+      input.blur();
+      addTTRecent(T, q);
+      openTTResults(ctx, q);
+    };
+    const paintHome = async () => {
+      const recent = await loadTTRecent(T);
+      home.innerHTML = "";
+      if (recent.length) {
+        const h = el("div", "gh-tts-sec"); h.innerHTML = `<span>Recent</span><button class="gh-tts-sec-act gh-press">Clear all</button>`;
+        h.querySelector("button").addEventListener("click", () => { haptic("light"); T.search.recent = []; saveTTRecent(T); paintHome(); });
+        home.appendChild(h);
+        for (const q of recent.slice(0, 8)) {
+          const row = el("div", "gh-tts-row gh-press"); row.dataset.recent = q;
+          row.append(icon("clock", 19), Object.assign(el("span", "gh-tts-row-text"), { textContent: q }));
+          const x = el("button", "gh-tts-row-x"); x.setAttribute("aria-label", "Remove"); x.appendChild(icon("close", 14));
+          x.addEventListener("click", (e) => { e.stopPropagation(); haptic("light"); T.search.recent = T.search.recent.filter((y) => y !== q); saveTTRecent(T); paintHome(); });
+          row.appendChild(x);
+          row.addEventListener("click", () => { input.value = q; go(q); });
+          home.appendChild(row);
+        }
+      }
+      const h2 = el("div", "gh-tts-sec"); h2.innerHTML = `<span>You may like</span>`; home.appendChild(h2);
+      const grid = el("div", "gh-tts-like"); home.appendChild(grid);
+      try {
+        const r = T.search.guide || (T.search.guide = await ttApi("guide"));
+        for (const w of r.words || []) {
+          const b = el("div", "gh-tts-like-item gh-press"); b.dataset.word = w.word;
+          b.append(Object.assign(el("i", "gh-tts-dot" + (w.hot ? " hot" : "")), {}), Object.assign(el("span"), { textContent: w.word }));
+          b.addEventListener("click", () => { input.value = w.word; go(w.word); });
+          grid.appendChild(b);
+        }
+      } catch (e) { T.search.guide = null; grid.appendChild(Object.assign(el("div", "gh-tts-note"), { textContent: e.captcha ? "TikTok wants you to verify first." : "Couldn't load suggestions." })); }
+    };
+    let sugTimer = null, sugSeq = 0;
+    const paintSugs = async (q) => {
+      const my = ++sugSeq;
+      let words = [];
+      try { words = (await ttApi("sug", { q })).words || []; } catch (e) {}
+      if (my !== sugSeq || input.value.trim() !== q) return;
+      sugs.innerHTML = "";
+      const all = [q].concat(words.filter((w) => w.toLowerCase() !== q.toLowerCase()));
+      for (const w of all.slice(0, 12)) {
+        const row = el("div", "gh-tts-row gh-press"); row.dataset.sug = w;
+        const text = el("span", "gh-tts-row-text");
+        const i = w.toLowerCase().indexOf(q.toLowerCase());
+        if (i >= 0) { text.append(document.createTextNode(w.slice(0, i)), Object.assign(el("b"), { textContent: w.slice(i, i + q.length) }), document.createTextNode(w.slice(i + q.length))); }
+        else text.textContent = w;
+        const fill = el("button", "gh-tts-row-x"); fill.setAttribute("aria-label", "Use"); fill.appendChild(icon("arrowUpLeft", 17));
+        fill.addEventListener("click", (e) => { e.stopPropagation(); input.value = w + " "; input.focus(); onInput(); });
+        row.append(icon("search", 18), text, fill);
+        row.addEventListener("click", () => { input.value = w; go(w); });
+        sugs.appendChild(row);
+      }
+    };
+    const onInput = () => {
+      const q = input.value.trim();
+      page.querySelector(".gh-tts-clear").style.display = input.value ? "" : "none";
+      clearTimeout(sugTimer);
+      if (!q) { sugs.style.display = "none"; home.style.display = ""; sugSeq++; return; }
+      sugs.style.display = ""; home.style.display = "none";
+      sugTimer = setTimeout(() => paintSugs(q), 250);
+    };
+    input.addEventListener("input", onInput);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(input.value); } });
+    page.querySelector(".gh-tts-clear").addEventListener("click", (e) => { e.preventDefault(); input.value = ""; onInput(); input.focus(); });
+    page.querySelector(".gh-tts-go").addEventListener("click", () => { haptic("light"); if (input.value.trim()) go(input.value); else popTTPage(ctx); });
+    page.querySelector(".gh-tts-back").addEventListener("click", () => { haptic("light"); input.blur(); popTTPage(ctx); });
+    pg.onShow = () => { paintHome(); };
+    pg.onDestroy = () => { clearTimeout(sugTimer); };
+    if (initial) input.value = initial;
+    onInput();
+    paintHome();
+    pushTTPage(ctx, pg);
+    setTimeout(() => { if (!pg.dead) input.focus(); }, 60);
+    return pg;
+  }
+  function addTTRecent(T, q) {
+    const r = (T.search.recent || []).filter((x) => x.toLowerCase() !== q.toLowerCase());
+    r.unshift(q);
+    T.search.recent = r.slice(0, TT_RECENT_MAX);
+    saveTTRecent(T);
+  }
+  // ---- results ----
+  const TT_TABS = [["top", "Top"], ["videos", "Videos"], ["users", "Users"], ["sounds", "Sounds"], ["tags", "Hashtags"]];
+  function openTTResults(ctx, q) {
+    const T = ctx.tiktok;
+    const page = el("div", "gh-tts-page");
+    page.dataset.kind = "results";
+    page.innerHTML = `
+      <div class="gh-tts-bar">
+        <button class="gh-tts-back gh-press" aria-label="Back"></button>
+        <div class="gh-tts-field gh-tts-field-ro"><span class="gh-tts-q"></span></div>
+        <button class="gh-tts-go gh-press" data-act="edit">Search</button>
+      </div>
+      <div class="gh-tts-tabs"></div>
+      <div class="gh-tts-panes"></div>`;
+    page.querySelector(".gh-tts-back").appendChild(icon("back", 24));
+    page.querySelector(".gh-tts-field").prepend(icon("search", 18));
+    page.querySelector(".gh-tts-q").textContent = q;
+    const tabsEl = page.querySelector(".gh-tts-tabs"), panes = page.querySelector(".gh-tts-panes");
+    const pg = { kind: "results", el: page, q, lazies: [], panes: {}, tab: null };
+    // the shared lists: Top = TikTok's own mixed results; the other tabs fall back to what Top found
+    const top = ttSource(async (cursor, S) => {
+      const r = await ttApi("top", { q, cursor, searchId: S.extra.searchId || "" });
+      if (r.searchId) S.extra.searchId = r.searchId;
+      for (const u of r.users || []) if (!pg.topUsers.some((x) => x.uniqueId === u.uniqueId)) pg.topUsers.push(u);
+      return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
+    }, (x) => x.id);
+    pg.topUsers = [];
+    pg.top = top;
+    for (const [key, label] of TT_TABS) {
+      const b = el("button", "gh-tts-tab gh-press"); b.dataset.tab = key; b.textContent = label;
+      b.addEventListener("click", () => { haptic("light"); showTTTab(ctx, pg, key); });
+      tabsEl.appendChild(b);
+      const pane = el("div", "gh-tts-pane"); pane.dataset.tab = key;
+      panes.appendChild(pane);
+      const L = ttLazy(pane); pg.lazies.push(L);
+      pg.panes[key] = { el: pane, L, built: false };
+    }
+    tabsEl.appendChild(el("i", "gh-tts-tab-line"));
+    const back = () => { haptic("light"); popTTPage(ctx); };
+    page.querySelector(".gh-tts-back").addEventListener("click", back);
+    const edit = () => { haptic("light"); popTTPage(ctx); const s = T.search.stack[T.search.stack.length - 1]; if (s && s.kind === "search") { s.input.value = q; s.input.dispatchEvent(new Event("input")); s.input.focus(); } };
+    page.querySelector(".gh-tts-field").addEventListener("click", edit);
+    page.querySelector('[data-act="edit"]').addEventListener("click", edit);
+    pushTTPage(ctx, pg);
+    showTTTab(ctx, pg, "top");
+    return pg;
+  }
+  function showTTTab(ctx, pg, key) {
+    pg.tab = key;
+    for (const b of pg.el.querySelectorAll(".gh-tts-tab")) b.dataset.on = b.dataset.tab === key ? "1" : "0";
+    const on = pg.el.querySelector(`.gh-tts-tab[data-tab="${key}"]`), line = pg.el.querySelector(".gh-tts-tab-line");
+    if (on && line) { line.style.width = on.offsetWidth * 0.5 + "px"; line.style.transform = `translateX(${on.offsetLeft + on.offsetWidth * 0.25}px)`; }
+    for (const k in pg.panes) pg.panes[k].el.dataset.on = k === key ? "1" : "0";
+    const P = pg.panes[key];
+    if (!P.built) { P.built = true; buildTTPane(ctx, pg, key, P); }
+  }
+  // infinite scroll: ask for the next page when the bottom is within ~1.5 screens
+  function ttInfinite(pane, S) {
+    const check = () => { if (pane.scrollTop + pane.clientHeight * 2.5 >= pane.scrollHeight) S.more(); };
+    pane.addEventListener("scroll", check, { passive: true });
+    return check;
+  }
+  function ttStatusRow(pane, S, emptyText) {
+    let row = pane.querySelector(":scope > .gh-tts-status");
+    if (!row) { row = el("div", "gh-tts-status"); pane.appendChild(row); } else pane.appendChild(row);
+    row.innerHTML = "";
+    if (S.loading) row.appendChild(el("div", "gh-spinner"));
+    else if (S.error && S.error.captcha) row.textContent = "TikTok wants you to verify - open Settings > TikTok > Sign In.";
+    else if (!S.items.length && S.started) row.textContent = emptyText || "No results";
+    return row;
+  }
+  function buildTTPane(ctx, pg, key, P) {
+    const T = ctx.tiktok, pane = P.el, L = P.L;
+    const signHint = () => (T.signedIn ? "" : " Sign in to TikTok (Settings > TikTok) for full results.");
+    if (key === "top" || key === "videos") {
+      // Videos: TikTok's own video search when it answers, else the videos from Top (the website's Top is videos)
+      let S = pg.top;
+      if (key === "videos") {
+        S = ttSource(async (cursor, src) => {
+          if (!src.extra.fallback) {
+            try {
+              const r = await ttApi("videos", { q: pg.q, cursor, searchId: src.extra.searchId || "" });
+              if ((r.items || []).length || cursor) return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
+            } catch (e) { if (e.captcha) throw e; }
+            src.extra.fallback = true; // 403 / nothing: the website only has Top
+          }
+          // first page: what Top has; scrolling further asks Top for its next page
+          await pg.top.ready();
+          if (src.items.length && pg.top.hasMore) await pg.top.more();
+          return { list: pg.top.items.slice(), cursor: 0, hasMore: pg.top.hasMore };
+        }, (x) => x.id);
+        pg.videos = S;
+      }
+      const users = el("div", "gh-tts-topusers"), grid = el("div", "gh-tts-grid2");
+      pane.append(users, grid);
+      let shown = 0;
+      const paint = () => {
+        for (; shown < S.items.length; shown++) grid.appendChild(ttVideoCard(ctx, S, shown, L));
+        if (key === "top") paintTopUsers();
+        ttStatusRow(pane, S, "No videos found." + signHint());
+        checkMore();
+      };
+      // Top starts with a few accounts, like the app ("Users" section, See more -> Users tab)
+      let usersPainted = false;
+      const paintTopUsers = () => {
+        if (usersPainted) return;
+        // only real account matches (TikTok's user search), never the creators Users falls back to
+        const list = pg.topUsers.length ? pg.topUsers : (pg.usersSrc && !pg.usersSrc.extra.fromTop && pg.usersSrc.items) || [];
+        if (!list.length) return;
+        usersPainted = true;
+        const h = el("div", "gh-tts-sec"); h.innerHTML = `<span>Users</span><button class="gh-tts-sec-act gh-press">See more</button>`;
+        h.querySelector("button").addEventListener("click", () => { haptic("light"); showTTTab(ctx, pg, "users"); });
+        users.appendChild(h);
+        for (const u of list.slice(0, 3)) users.appendChild(ttUserRow(ctx, u, L));
+      };
+      S.listeners.add(paint);
+      const checkMore = ttInfinite(pane, S);
+      if (key === "top") {
+        // the accounts for Top's Users section: TikTok's user search (signed in), quietly
+        const us = pg.usersSrc || (pg.usersSrc = ttUsersSource(pg));
+        us.listeners.add(() => paintTopUsers());
+        if (!us.started) us.more();
+      }
+      if (!S.started) S.more(); else paint();
+      if (S.loading) ttStatusRow(pane, S); // the spinner while the first page loads
+      return;
+    }
+    if (key === "users") {
+      const S = pg.usersSrc || (pg.usersSrc = ttUsersSource(pg));
+      const list = el("div", "gh-tts-list"); pane.appendChild(list);
+      let shown = 0;
+      const paint = () => {
+        for (; shown < S.items.length; shown++) list.appendChild(ttUserRow(ctx, S.items[shown], L));
+        const note = S.extra.fromTop ? "Accounts from the top results." + signHint() : "No accounts found." + signHint();
+        const row = ttStatusRow(pane, S, note);
+        if (S.extra.fromTop && S.items.length && !S.loading) row.textContent = note;
+        checkMore();
+      };
+      S.listeners.add(paint);
+      const checkMore = ttInfinite(pane, S);
+      if (!S.started) S.more(); else paint();
+      if (S.loading) ttStatusRow(pane, S); // the spinner while the first page loads
+      return;
+    }
+    if (key === "sounds") {
+      const S = ttSource(async (cursor, src) => {
+        if (!src.extra.fallback) {
+          try {
+            const r = await ttApi("sounds", { q: pg.q, cursor });
+            if ((r.sounds || []).length || cursor) return { list: r.sounds || [], cursor: r.cursor, hasMore: r.hasMore };
+          } catch (e) { if (e.captcha) throw e; }
+          src.extra.fallback = true;
+        }
+        // the sounds used by the videos TikTok found
+        await pg.top.ready();
+        return { list: pg.top.items.map((v) => v.musicInfo).filter(Boolean), cursor: 0, hasMore: false };
+      }, (x) => x.id);
+      const list = el("div", "gh-tts-list"); pane.appendChild(list);
+      let shown = 0;
+      const paint = () => { for (; shown < S.items.length; shown++) list.appendChild(ttSoundRow(ctx, S.items[shown], L)); ttStatusRow(pane, S, "No sounds found."); checkMore(); };
+      S.listeners.add(paint);
+      const checkMore = ttInfinite(pane, S);
+      S.more();
+      if (S.loading) ttStatusRow(pane, S); // the spinner while the first page loads
+      return;
+    }
+    if (key === "tags") {
+      // The website has no hashtag search: hashtags come from the videos TikTok found (most used first) and from its
+      // suggestions for the query; typing a # word puts that hashtag first.
+      const list = el("div", "gh-tts-list"); pane.appendChild(list);
+      const S = { items: [], loading: true, started: true };
+      if (S.loading) ttStatusRow(pane, S); // the spinner while the first page loads
+      (async () => {
+        const counts = new Map();
+        const add = (t, n) => { const k = t.name.toLowerCase(); const c = counts.get(k) || { name: t.name, id: t.id || "", n: 0 }; c.n += n; if (!c.id && t.id) c.id = t.id; counts.set(k, c); };
+        const word = pg.q.replace(/^[#＃]/, "").trim();
+        if (/^[\p{L}\p{N}_]+$/u.test(word)) add({ name: word }, 1000);
+        try { await pg.top.ready(); } catch (e) {}
+        for (const v of pg.top.items) for (const t of v.tags || []) add(t, 1);
+        try { for (const w of (await ttApi("sug", { q: "#" + word })).words || []) if (/^[#＃]?[\p{L}\p{N}_]+$/u.test(w)) add({ name: w.replace(/^[#＃]/, "") }, 0.5); } catch (e) {}
+        S.items = [...counts.values()].sort((a, b) => b.n - a.n).slice(0, 40);
+        S.loading = false;
+        for (const t of S.items) list.appendChild(ttTagRow(ctx, t, t.n >= 1000 ? 0 : Math.floor(t.n)));
+        ttStatusRow(pane, S, "No hashtags found.");
+      })();
+    }
+  }
+  function ttUsersSource(pg) {
+    return ttSource(async (cursor, src) => {
+      if (!src.extra.fromTop) {
+        try {
+          const r = await ttApi("users", { q: pg.q, cursor });
+          if ((r.users || []).length || cursor) return { list: r.users || [], cursor: r.cursor, hasMore: r.hasMore };
+        } catch (e) { if (e.captcha) throw e; }
+        src.extra.fromTop = true; // signed out the website answers nothing here: the creators of the top videos
+      }
+      await pg.top.ready();
+      const seen = new Set(), list = [];
+      for (const u of pg.topUsers.concat(pg.top.items.map((v) => Object.assign({}, v.author, v.authorStats || {})))) if (u.uniqueId && !seen.has(u.uniqueId)) { seen.add(u.uniqueId); list.push(u); }
+      return { list, cursor: 0, hasMore: false };
+    }, (x) => x.uniqueId);
+  }
+  // ---- rows and cards ----
+  function ttVideoCard(ctx, S, i, L) {
+    const v = S.items[i];
+    const card = el("div", "gh-tts-card gh-press"); card.dataset.id = v.id;
+    card.innerHTML = `<div class="gh-tts-card-cover"><img alt=""><span class="gh-tts-card-plays"></span></div><div class="gh-tts-card-desc"></div><div class="gh-tts-card-meta"><span class="gh-tts-card-name"></span><span class="gh-tts-card-likes"></span></div>`;
+    L.add(card.querySelector("img"), v.cover);
+    card.querySelector(".gh-tts-card-desc").textContent = v.desc || "";
+    const meta = card.querySelector(".gh-tts-card-meta");
+    meta.prepend(ttAvatar(L, v.author && v.author.avatar, 18));
+    card.querySelector(".gh-tts-card-name").textContent = (v.author && (v.author.nickname || v.author.uniqueId)) || "";
+    const likes = card.querySelector(".gh-tts-card-likes"); likes.append(icon("heart", 13), document.createTextNode(fmtCount(v.stats && v.stats.likes)));
+    if (v.created) card.querySelector(".gh-tts-card-plays").textContent = ttAgo(v.created);
+    else card.querySelector(".gh-tts-card-plays").remove();
+    card.addEventListener("click", () => { haptic("light"); openTTPlayer(ctx, S, S.items.indexOf(v)); });
+    return card;
+  }
+  function ttGridTile(ctx, S, i, L) {
+    const v = S.items[i];
+    const tile = el("div", "gh-tts-tile gh-press"); tile.dataset.id = v.id;
+    tile.innerHTML = `<img alt=""><span class="gh-tts-tile-plays"></span>`;
+    L.add(tile.querySelector("img"), v.cover);
+    const plays = tile.querySelector(".gh-tts-tile-plays"); plays.append(icon("playOutline", 13), document.createTextNode(fmtCount(v.stats && (Number(v.stats.plays) ? v.stats.plays : v.stats.likes))));
+    tile.addEventListener("click", () => { haptic("light"); openTTPlayer(ctx, S, S.items.indexOf(v)); });
+    return tile;
+  }
+  function ttAgo(sec) {
+    const d = (Date.now() / 1000 - sec) / 86400;
+    if (d < 1) return Math.max(1, Math.floor(d * 24)) + "h ago";
+    if (d < 7) return Math.floor(d) + "d ago";
+    if (d < 30) return Math.floor(d / 7) + "w ago";
+    const dt = new Date(sec * 1000);
+    return (dt.getFullYear() === new Date().getFullYear() ? "" : dt.getFullYear() + "-") + (dt.getMonth() + 1) + "-" + dt.getDate();
+  }
+  function ttUserRow(ctx, u, L) {
+    const row = el("div", "gh-tts-urow gh-press"); row.dataset.user = u.uniqueId;
+    row.appendChild(ttAvatar(L, u.avatar, 56));
+    const col = el("div", "gh-tts-urow-text");
+    const n = el("div", "gh-tts-urow-name"); n.textContent = u.nickname || u.uniqueId;
+    if (u.verified) n.appendChild(Object.assign(el("span", "gh-tts-verified"), { textContent: "✓" }));
+    const sub = el("div", "gh-tts-urow-sub");
+    const f = Number(u.followers) || 0;
+    sub.textContent = u.uniqueId + (f ? " · " + fmtCount(f) + " followers" : "");
+    col.append(n, sub);
+    if (u.signature) col.appendChild(Object.assign(el("div", "gh-tts-urow-bio"), { textContent: u.signature.split("\n")[0] }));
+    row.appendChild(col);
+    row.addEventListener("click", () => { haptic("light"); openTTProfile(ctx, u); });
+    return row;
+  }
+  function ttSoundRow(ctx, s, L) {
+    const row = el("div", "gh-tts-srow gh-press"); row.dataset.sound = s.id;
+    const cov = el("span", "gh-tts-srow-cover"); const img = el("img"); img.alt = ""; cov.appendChild(img); L.add(img, s.cover);
+    cov.appendChild(icon("play", 18));
+    const col = el("div", "gh-tts-urow-text");
+    col.append(Object.assign(el("div", "gh-tts-urow-name"), { textContent: s.title || "Original sound" }), Object.assign(el("div", "gh-tts-urow-sub"), { textContent: s.author || "" }));
+    const bits = [];
+    if (s.duration) bits.push(Math.floor(s.duration / 60) + ":" + String(Math.round(s.duration % 60)).padStart(2, "0"));
+    if (Number(s.uses)) bits.push(fmtCount(s.uses) + " videos");
+    if (bits.length) col.appendChild(Object.assign(el("div", "gh-tts-urow-bio"), { textContent: bits.join(" · ") }));
+    row.append(cov, col);
+    row.addEventListener("click", () => { haptic("light"); openTTSound(ctx, s); });
+    return row;
+  }
+  function ttTagRow(ctx, t, n) {
+    const row = el("div", "gh-tts-srow gh-press"); row.dataset.tag = t.name;
+    const cov = el("span", "gh-tts-srow-cover gh-tts-hash"); cov.appendChild(icon("hash", 22));
+    const col = el("div", "gh-tts-urow-text");
+    col.append(Object.assign(el("div", "gh-tts-urow-name"), { textContent: t.name }), Object.assign(el("div", "gh-tts-urow-sub"), { textContent: n ? n + (n === 1 ? " video" : " videos") + " in these results" : "Hashtag" }));
+    row.append(cov, col);
+    row.addEventListener("click", () => { haptic("light"); openTTTag(ctx, t); });
+    return row;
+  }
+  // ---- profile / sound / hashtag pages ----
+  function ttGridPage(ctx, kind, title, S, emptyText) {
+    const page = ttPageShell(kind, title);
+    const body = page.querySelector(".gh-tts-body");
+    const L = ttLazy(body);
+    const header = el("div", "gh-tts-phead"), grid = el("div", "gh-tts-grid3");
+    body.append(header, grid);
+    const pg = { kind, el: page, lazies: [L], L, header, source: S };
+    page.querySelector(".gh-tts-back").addEventListener("click", () => { haptic("light"); popTTPage(ctx); });
+    let shown = 0;
+    const paint = () => {
+      for (; shown < S.items.length; shown++) grid.appendChild(ttGridTile(ctx, S, shown, L));
+      ttStatusRow(body, S, typeof emptyText === "function" ? emptyText() : emptyText);
+      checkMore();
+    };
+    S.listeners.add(paint);
+    const checkMore = ttInfinite(body, S);
+    pushTTPage(ctx, pg);
+    S.more();
+    if (S.loading) ttStatusRow(body, S);
+    return pg;
+  }
+  function ttStats(pairs) {
+    const row = el("div", "gh-tts-stats");
+    for (const [n, label] of pairs) { const c = el("div", "gh-tts-stat"); c.append(Object.assign(el("b"), { textContent: fmtCount(n) }), Object.assign(el("span"), { textContent: label })); row.appendChild(c); }
+    return row;
+  }
+  function openTTProfile(ctx, u0) {
+    const T = ctx.tiktok;
+    const u = Object.assign({}, u0 || {});
+    if (!u.uniqueId) return;
+    const S = ttSource(async (cursor) => {
+      if (!u.secUid) { try { const r = await ttApi("user", { uniqueId: u.uniqueId }); if (r.user && !pg.dead) { Object.assign(u, r.user); paintHead(); } } catch (e) { if (e.captcha) throw e; } }
+      if (!u.secUid) return { list: [], cursor: 0, hasMore: false };
+      const r = await ttApi("userVideos", { secUid: u.secUid, cursor });
+      return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
+    }, (x) => x.id);
+    const pg = ttGridPage(ctx, "profile", u.nickname || u.uniqueId, S, () => (u.privateAccount ? "This account is private." : T.signedIn ? "No videos yet." : "Sign in to TikTok (Settings > TikTok) to see their videos."));
+    const paintHead = () => {
+      const h = pg.header; h.innerHTML = "";
+      h.appendChild(ttAvatar(pg.L, u.avatarLarge || u.avatar, 96, "gh-tts-big-av"));
+      const name = el("div", "gh-tts-phead-name"); name.textContent = "@" + u.uniqueId;
+      if (u.verified) name.appendChild(Object.assign(el("span", "gh-tts-verified"), { textContent: "✓" }));
+      h.appendChild(name);
+      h.appendChild(ttStats([[u.following, "Following"], [u.followers, "Followers"], [u.likes, "Likes"]]));
+      if (u.signature) h.appendChild(Object.assign(el("div", "gh-tts-phead-bio"), { textContent: u.signature }));
+      pg.el.querySelector(".gh-tts-head-title").textContent = u.nickname || u.uniqueId;
+    };
+    paintHead();
+    // refresh the header from the profile page itself (counts, bio) when we only had a video's author
+    if (u.secUid) ttApi("user", { uniqueId: u.uniqueId }).then((r) => { if (r.user && !pg.dead) { Object.assign(u, r.user); paintHead(); } }, () => {});
+    return pg;
+  }
+  function openTTSound(ctx, s0) {
+    const s = Object.assign({}, s0 || {});
+    if (!s.id) return;
+    const S = ttSource(async (cursor) => {
+      const r = await ttApi("soundVideos", { id: s.id, cursor });
+      return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
+    }, (x) => x.id);
+    const pg = ttGridPage(ctx, "sound", s.title || "Sound", S, "No videos with this sound yet.");
+    const paintHead = () => {
+      const h = pg.header; h.innerHTML = ""; h.dataset.kind = "sound";
+      const cov = el("span", "gh-tts-sq"); const img = el("img"); img.alt = ""; cov.appendChild(img); pg.L.add(img, s.cover);
+      const col = el("div", "gh-tts-sq-text");
+      col.append(Object.assign(el("div", "gh-tts-phead-title"), { textContent: s.title || "Original sound" }), Object.assign(el("div", "gh-tts-phead-sub"), { textContent: s.author || "" }));
+      if (Number(s.uses)) col.appendChild(Object.assign(el("div", "gh-tts-phead-sub"), { textContent: fmtCount(s.uses) + " videos" }));
+      h.append(cov, col);
+    };
+    paintHead();
+    ttApi("sound", { id: s.id, slug: s.title }).then((r) => { if (r.sound && !pg.dead) { Object.assign(s, r.sound); paintHead(); } }, () => {});
+    return pg;
+  }
+  function openTTTag(ctx, t0) {
+    const T = ctx.tiktok;
+    const t = Object.assign({}, t0 || {});
+    if (!t.name) return;
+    const S = ttSource(async (cursor, src) => {
+      if (!t.id && !src.extra.triedPage) {
+        src.extra.triedPage = true;
+        try { const r = await ttApi("tag", { name: t.name }); if (r.tag && !pg.dead) { Object.assign(t, r.tag); paintHead(); } } catch (e) { if (e.captcha) throw e; }
+      }
+      if (t.id && !src.extra.fallback) {
+        try {
+          const r = await ttApi("tagVideos", { id: t.id, cursor });
+          if ((r.items || []).length || cursor) return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
+        } catch (e) { if (e.captcha) throw e; }
+      }
+      // signed out the hashtag's own list is empty: search for "#name" instead
+      src.extra.fallback = true;
+      const r = await ttApi("top", { q: "#" + t.name, cursor, searchId: src.extra.searchId || "" });
+      if (r.searchId) src.extra.searchId = r.searchId;
+      return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
+    }, (x) => x.id);
+    const pg = ttGridPage(ctx, "tag", "#" + t.name, S, "No videos found." + (T.signedIn ? "" : " Sign in to TikTok (Settings > TikTok) for more."));
+    const paintHead = () => {
+      const h = pg.header; h.innerHTML = ""; h.dataset.kind = "tag";
+      const cov = el("span", "gh-tts-sq gh-tts-hash"); cov.appendChild(icon("hash", 44));
+      const col = el("div", "gh-tts-sq-text");
+      col.appendChild(Object.assign(el("div", "gh-tts-phead-title"), { textContent: "#" + t.name }));
+      const bits = [];
+      if (Number(t.views)) bits.push(fmtCount(t.views) + " views");
+      if (Number(t.videos)) bits.push(fmtCount(t.videos) + " videos");
+      col.appendChild(Object.assign(el("div", "gh-tts-phead-sub"), { textContent: bits.join(" · ") || "Hashtag" }));
+      if (t.desc) col.appendChild(Object.assign(el("div", "gh-tts-phead-bio"), { textContent: t.desc }));
+      h.append(cov, col);
+    };
+    paintHead();
+    return pg;
+  }
+  // ---- a player over a list (grid -> tap -> swipe through that list; Back returns to the grid where it was) ----
+  function openTTPlayer(ctx, S, index) {
+    if (index < 0) return;
+    const page = el("div", "gh-tts-page gh-tts-playerpage");
+    page.dataset.kind = "player";
+    page.innerHTML = `<div class="gh-tt-pager"></div><button class="gh-tts-pback gh-press" aria-label="Back"></button>`;
+    page.querySelector(".gh-tts-pback").appendChild(icon("back", 26));
+    const P = { pager: page.querySelector(".gh-tt-pager"), items: S.items, index, slides: new Map(), paused: false, drag: null, anim: false, moreAt: 0,
+      onNearEnd: () => { if (S.hasMore) S.more(); } };
+    const pg = { kind: "player", el: page, player: P, lazies: [] };
+    wireTikTokPager(ctx, P);
+    // the list grows while the player is open: lay out again so the next ones get slides
+    const grew = () => { if (!pg.dead) layoutTikTok(ctx, 0, false, P); };
+    S.listeners.add(grew);
+    pg.onDestroy = () => S.listeners.delete(grew);
+    page.querySelector(".gh-tts-pback").addEventListener("click", () => { haptic("light"); popTTPage(ctx); });
+    pushTTPage(ctx, pg);
+    layoutTikTok(ctx, 0, true, P);
+    syncTikTokPlayback(ctx);
+    return pg;
   }
 
   async function loadGallery(ctx) {

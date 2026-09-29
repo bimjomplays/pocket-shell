@@ -58,6 +58,7 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             setActive(body["on"] as? Bool == true); reply(true, nil)
         case "more": more(); reply(true, nil)
         case "fetch": fetch(body, reply: reply)
+        case "api": api(body, reply: reply)
         case "signIn": signIn(); reply(true, nil)
         case "signOut": signOut(reply: reply)
         case "status": status(reply: reply)
@@ -177,6 +178,41 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
                 reply(out, nil)
             }
         }
+    }
+
+    // MARK: search / profile / sound / hashtag data for ui.js
+
+    /// Runs one of tiktok-page.js's allow-listed requests (window.__ghostTTApi: search, suggestions, profile, sound and
+    /// hashtag pages) inside the hidden TikTok page, through TikTok's own request signer. The page returns compact
+    /// JSON (a few KB); nothing else about the page comes back.
+    private func api(_ body: [String: Any], reply: @escaping (Any?, String?) -> Void) {
+        guard let kind = body["kind"] as? String, kind.count < 20 else { return reply(nil, "bad kind") }
+        let params = (body["params"] as? [String: Any]) ?? [:]
+        if web == nil { start() }
+        idleTimer?.invalidate(); idleTimer = nil
+        guard let wv = web else { return reply(nil, "TikTok isn't running") }
+        // the page script may not be in place yet (the page is still loading): try again for a while
+        func attempt(_ n: Int) {
+            wv.callAsyncJavaScript(
+                "if (!window.__ghostTTApi) return { notReady: true }; return await window.__ghostTTApi(kind, params);",
+                arguments: ["kind": kind, "params": params], in: nil, in: .page
+            ) { [weak self] result in
+                guard let self, self.web === wv else { return reply(nil, "stopped") }
+                switch result {
+                case .success(let value):
+                    if let d = value as? [String: Any], d["notReady"] as? Bool == true, n < 20 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { attempt(n + 1) }
+                        return
+                    }
+                    reply(value, nil)
+                case .failure(let error):
+                    // a reload (sign-in, a fresh feed) cancels the call: once more after the new page is up
+                    if n < 3 { DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { attempt(n + 4) }; return }
+                    reply(nil, error.localizedDescription)
+                }
+            }
+        }
+        attempt(0)
     }
 
     // MARK: video / picture bytes for ui.js
