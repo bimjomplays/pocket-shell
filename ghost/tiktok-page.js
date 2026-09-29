@@ -160,6 +160,7 @@
   // ---- end compact ----
   const seen = new Set();
   function onFeed(text, url) {
+    try { noteRec(String(url || "")); } catch (e) {}
     let d; try { d = JSON.parse(text); } catch (e) { return; }
     const list = (d && d.itemList) || [];
     const items = [];
@@ -269,8 +270,25 @@
     let y = y0; const tick = () => { y -= (y0 - y1) / 10; if (y > y1) { fire("move", y); setTimeout(tick, 16); } else fire("end", y1); };
     setTimeout(tick, 16);
   }
+  // Asking TikTok's own signed fetch for the next For You page, with the same parameters its first request used
+  // (checked on the phone 2026-09-29, signed in: 8 new videos each call; the slider swipes below never made TikTok's
+  // page fetch more, so the feed ran out after the first batch). The answer goes through the hook above -> onFeed.
+  let lastRec = "", moreBusy = false, moreAt = 0;
+  function noteRec(url) { if (/\/api\/recommend\/item_list\//.test(url)) lastRec = url; }
+  async function fetchMore() {
+    if (!lastRec || moreBusy || Date.now() - moreAt < 2500) return false;
+    moreBusy = true; moreAt = Date.now();
+    try {
+      const u = new URL(lastRec, location.href);
+      ["X-Bogus", "X-Gnarly", "msToken", "_signature"].forEach((k) => u.searchParams.delete(k));
+      u.searchParams.set("pullType", "2"); u.searchParams.set("count", "8");
+      const r = await window.fetch(u.pathname + u.search, { credentials: "include" });
+      return r.ok;
+    } catch (e) { return false; } finally { moreBusy = false; }
+  }
   window.__ghostTTMore = function (n) {
     sweep();
+    fetchMore();
     const count = Math.max(1, Math.min(6, Number(n) || 3));
     for (let i = 0; i < count; i++) setTimeout(() => {
       swipeOnce();
