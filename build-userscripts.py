@@ -80,7 +80,9 @@ if (ghost / 'ui.js').exists():
     css = (ghost / 'ui.css').read_text() if (ghost / 'ui.css').exists() else ''
     # the GIF player from the Snapchat-look app, without its page scanner: animates GIFs sent as photos
     gifanim = 'window.__ghostNoGifScan = true;\n' + read('gif-anim.js') + '\n'
-    (app / 'ghost-ui.js').write_text(gifanim + 'const GHOST_CSS = ' + json.dumps(css) + ';\n' + (ghost / 'ui.js').read_text())
+    # network.js (Ghost accounts core) defines GhostNetCore at the top of the same script, before ui.js reads it
+    net = (ghost / 'network.js').read_text() + '\n' if (ghost / 'network.js').exists() else ''
+    (app / 'ghost-ui.js').write_text(gifanim + 'const GHOST_CSS = ' + json.dumps(css) + ';\n' + net + (ghost / 'ui.js').read_text())
 
 with zipfile.ZipFile(root / 'Dark-Mobile-Safari.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
     for path in sorted(out.glob('*.user.js')):

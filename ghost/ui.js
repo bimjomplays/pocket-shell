@@ -547,6 +547,7 @@
       }).catch(() => {});
       startStreakKeeper(ctx);
       initMessageNotifications(ctx);
+      gnStart(ctx).catch((e) => gnTrail("start " + (e && e.message)));
       api.friendRequests().then((r) => { ctx.friendReqCount = (r || []).length; }).catch(() => {});
       ctx.revealHome = () => { boot.classList.add("gh-boot-fade"); markReady(true); };
       if (state.listShown) ctx.revealHome();
@@ -907,9 +908,12 @@
   function avatarSig(conv) {
     const u = convAvatarUser(conv);
     return [pref("avatars"), u.convId && customAvatarUrls.get("conv:" + u.convId), u.id && customAvatarUrls.get("user:" + u.id), u.bitmojiUrl,
+      u.id && !u.members ? (gnPicFor(u.id) || "") + (gnFriend(u.id) ? "g" : "") : "",
       (u.members || []).slice(0, 3).map((m) => m.bitmojiUrl || "").join(",")].join("|");
   }
   const customAvatarUrls = new Map(); // "user:<id>" / "conv:<id>" -> object URL of your chosen photo
+  // Ghost network state (section "Ghost network"); declared up here because makeAvatar/nickify read it from the start
+  const gn = { net: null, ctx: null, picUrls: new Map(), rev: 0, timer: null, refreshT: null, round: null, polling: false };
   async function loadCustomAvatars() {
     for (const key of Object.keys(pref("customAvatars") || {})) {
       if (customAvatarUrls.has(key)) continue;
@@ -964,7 +968,8 @@
     return box;
   }
   function makeAvatar(user, size) {
-    const custom = user && ((user.convId && customAvatarUrls.get("conv:" + user.convId)) || (user.id && customAvatarUrls.get("user:" + user.id)));
+    // your own picture for them > their Ghost profile picture (connected Ghost friends) > Bitmoji
+    const custom = user && ((user.convId && customAvatarUrls.get("conv:" + user.convId)) || (user.id && customAvatarUrls.get("user:" + user.id)) || (user.id && !user.members && gnPicFor(user.id)));
     if (custom) {
       const img = el("img", "gh-avatar");
       img.style.width = size + "px"; img.style.height = size + "px"; img.width = size; img.height = size; img.alt = "";
@@ -1074,7 +1079,8 @@
       text = you + p.text;
       if (st.status === "new") emph = "var(--gh-text)";
     }
-    const body = st.media === "chat" ? (p.body || (p.kind === "text" && p.text && !/^(New Chat|Received|Delivered|Opened)$/.test(p.text) ? p.text : "")) : "";
+    let body = st.media === "chat" ? (p.body || (p.kind === "text" && p.text && !/^(New Chat|Received|Delivered|Opened)$/.test(p.text) ? p.text : "")) : "";
+    if (body && gnOn() && GhostNetCore.parseInvite(body)) body = "Ghost invite";
     if (mode === "status" && st.media === "chat" && !["screenshot", "replayed", "sending", "failed", "reacted"].includes(st.status)) {
       text = st.status === "new" ? (st.voice ? "New Voice Note" : "New Chat") : (STATUS_WORD[st.status] || "");
       emph = st.status === "new" ? color : null;
@@ -1092,7 +1098,7 @@
     const you = p.fromMe ? "You: " : "";
     const tick = p.fromMe ? tickFor(p.status) : null;
     switch (p.kind) {
-      case "text": return { text: you + (p.body || p.text || ""), iconName: null, tick, emph: !p.fromMe && p.state && p.state.status === "new" ? "var(--gh-text)" : null };
+      case "text": return { text: you + (gnOn() && GhostNetCore.parseInvite(p.body || p.text) ? "Ghost invite" : (p.body || p.text || "")), iconName: null, tick, emph: !p.fromMe && p.state && p.state.status === "new" ? "var(--gh-text)" : null };
       case "chat-media": return { text: you + "Sent a photo", iconName: "photo", tick };
       case "gif": return { text: you + "Sent a GIF", iconName: "gifBadge", tick };
       case "audio": return { text: you + "Sent a voice message", iconName: "mic", tick };
@@ -1170,6 +1176,7 @@
     `;
     const avatarWrap = rowEl.querySelector(".gh-row-avatar-wrap");
     avatarWrap.insertBefore(makeAvatar(convAvatarUser(conv), 52), avatarWrap.firstChild);
+    gnSyncBadge(avatarWrap, convAvatarUser(conv));
     rowEl._avSig = avatarSig(conv);
     // tap = open the chat; double-tap = snap camera for this person (like Snapchat). The chat opens at once on the
     // first tap (no waiting to see if a second one comes); the camera then slides up over it.
@@ -1289,6 +1296,7 @@
       const old = wrap.querySelector(".gh-avatar");
       const fresh = makeAvatar(convAvatarUser(conv), 52);
       if (old) old.replaceWith(fresh); else wrap.insertBefore(fresh, wrap.firstChild);
+      gnSyncBadge(wrap, convAvatarUser(conv));
     }
     rowEl.dataset.unread = conv.unreadCount > 0 || conv.hasUnreadSnap ? "1" : "0";
     rowEl.querySelector(".gh-row-name").textContent = conv.title || "Unknown";
@@ -1585,6 +1593,7 @@
     const av = convAvatarUser(convData);
     conv.avatarSlot.innerHTML = "";
     conv.avatarSlot.appendChild(makeAvatar(av, 34));
+    gnSyncBadge(conv.avatarSlot, av);
     conv.messages.dataset.group = convData.isGroup ? "1" : "0";
     // back-button badge: how many OTHER conversations still have something unread, like iOS Mail/Messages
     let otherUnread = 0;
@@ -2059,7 +2068,7 @@
     const convId = ctx.state.currentConvId;
     return [m.kind, m.ts, m.text || "", reacts, media, reply, m.saved ? 1 : 0, m.opened ? 1 : 0, m.replayable ? 1 : 0, m.snapSound ? 1 : 0,
       m.edited ? 1 : 0, m.pending ? 1 : 0, m.failed ? 1 : 0, m.retained ? 1 : 0, m.retainedMedia ? 1 : 0, m.mediaUnavailable ? 1 : 0,
-      m.status || "", isMe ? 1 : 0, isLast ? 1 : 0, (ctx.conv && ctx.conv.searchQ) || "", convId && isBookmarked(convId, m.id) ? 1 : 0].join("\u0001");
+      m.status || "", isMe ? 1 : 0, isLast ? 1 : 0, (ctx.conv && ctx.conv.searchQ) || "", convId && isBookmarked(convId, m.id) ? 1 : 0, gnCardSig(ctx, m, isMe)].join("\u0001");
   }
   function reusedWrapEl(ctx, oldWraps, m, isMe, isLast, paintKey) {
     const sig = wrapSig(ctx, m, isMe, isLast);
@@ -2247,6 +2256,8 @@
     if (m.retained && m.kind === "gif") m = { ...m, kind: "chat-media" }; // archived bytes load locally, without the live GIPHY fetch path
     switch (m.kind) {
       case "text": {
+        const gnCode = gnInviteCode(ctx, m);
+        if (gnCode) return gnCardBubble(ctx, m, isMe, isLast, gnCode);
         const b = el("div", "gh-bubble");
         if (isLast) b.dataset.tail = "1";
         appendRichText(ctx, b, m.text);
@@ -3958,14 +3969,14 @@
     if (!data || typeof data !== "object" || (depth || 0) > 6) return data;
     if (Array.isArray(data)) { for (const x of data) nickify(x, (depth || 0) + 1); return data; }
     if (typeof data.id === "string" && typeof data.name === "string") {
-      const n = nicks && nicks[data.id];
+      const n = (nicks && nicks[data.id]) || gnNameFor(data.id); // your nickname > their Ghost profile name > Snapchat
       if (n) { if (data._realName === undefined) data._realName = data.name; data.name = n; }
       else if (data._realName !== undefined) { data.name = data._realName; delete data._realName; }
     }
     // a 1:1 chat is titled by the person
     if (Array.isArray(data.participants) && data.isGroup === false && data.participants.length === 1) {
       const p = data.participants[0]; nickify(p, (depth || 0) + 1);
-      const n = nicks && p && nicks[p.id];
+      const n = p && ((nicks && nicks[p.id]) || gnNameFor(p.id));
       if (n) { if (data._realTitle === undefined) data._realTitle = data.title; data.title = n; }
       else if (data._realTitle !== undefined) { data.title = data._realTitle; delete data._realTitle; }
     }
@@ -4153,8 +4164,10 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost" };
+  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile" };
   const SETTINGS_PAGES = {
+    gnProfile(ctx, body) { return GN_SETTINGS.gnProfile(ctx, body); }, // section "Ghost network"
+    gnShare(ctx, body) { return GN_SETTINGS.gnShare(ctx, body); },
     // Every photo/video (and saved snap) and every link in the open chat, newest first. Older history loads on
     // demand. Only what Snapchat Web can still fetch shows up (media that has expired on Snapchat's side can't).
     gallery(ctx, body) {
@@ -4379,6 +4392,7 @@
         } catch (e) { ctx.showToast("Couldn't open that chat"); }
       } });
       // (Remove/Block: Snapchat Web's gateway refuses those calls - use the Snapchat app for them)
+      gnFriendRows(ctx, body, u);
     },
     main(ctx, body) {
       const me = ctx.state.me || {};
@@ -4389,6 +4403,7 @@
       prof.append(nm, un);
       body.appendChild(prof);
       let g = setGroup(body);
+      if (gn.net) setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Ghost Profile", value: gn.net.profile().name || (gn.net.profile().v ? "" : "Set Up"), onClick: () => pushSettingsPage(ctx, "gnProfile") });
       setRow(g, { icon: "bookmark", tint: "linear-gradient(135deg,#f0b232,#ff9433)", label: "Bookmarks", value: String((pref("bookmarks") || []).length || ""), onClick: () => { ctx.settings.bookmarksConv = null; pushSettingsPage(ctx, "bookmarks"); } });
       setRow(g, { icon: "addFriend", tint: "linear-gradient(135deg,#23a55a,#1fb8c4)", label: "Friends", value: ctx.friendReqCount ? String(ctx.friendReqCount) : "", onClick: () => pushSettingsPage(ctx, "friends") });
       g = setGroup(body);
@@ -4570,6 +4585,7 @@
       setRow(g, { label: "Hide Message Previews", toggle: { get: () => !!pref("hidePreviews"), set: (v) => setPref(ctx, "hidePreviews", v) } });
       g = setGroup(body, null, "Your Bitmoji in chats you have open.");
       setRow(g, { label: "Show Me in Chats", toggle: { get: () => nativeSetting("showInChats", true) !== false, set: (v) => setNativeSetting("showInChats", v) } });
+      gnPrivacyRows(ctx, body);
     },
     media(ctx, body) {
       let g = setGroup(body);
@@ -4863,12 +4879,13 @@
       ctx.root.appendChild(ov);
     });
   }
-  function promptSheet(ctx, text, value) {
+  function promptSheet(ctx, text, value, maxLength) {
     return new Promise((res) => {
       const ov = el("div", "gh-confirm");
       ov.innerHTML = '<div class="gh-confirm-box"><div class="gh-confirm-text"></div><input class="gh-confirm-input" maxlength="60"><div class="gh-confirm-row"><button data-v="0">Cancel</button><button data-v="1" class="gh-confirm-ok">Save</button></div></div>';
       ov.querySelector(".gh-confirm-text").textContent = text;
       const inp = ov.querySelector("input"); inp.value = value || "";
+      if (maxLength) inp.maxLength = maxLength;
       ov.addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; ov.remove(); res(b.dataset.v === "1" ? inp.value.trim() : null); });
       ctx.root.appendChild(ov);
       setTimeout(() => inp.focus(), 50);
@@ -5239,6 +5256,7 @@
         await setNickname(ctx, other.id, v); nm.textContent = cd.title;
         ctx.showToast(v ? "Nickname saved" : "Nickname removed");
       } });
+      gnChatSheetRows(ctx, ng0, cd, other, () => closeSheetGeneric(s.backdrop, s.sheet));
     }
     // Streak Keeper: a black snap to this chat at the same time every day
     {
@@ -10591,6 +10609,339 @@
       closeVault(ctx);
       ctx.showToast("My Eyes Only erased");
     }
+  }
+
+  // =====================================================================================================
+  // Ghost network: Ghost accounts between two Ghost apps (plan: ghost/ACCOUNTS_PLAN.md; protocol: ghost/network.js).
+  // A friend is connected only after a VISIBLE invite ("ghost:connect XXXX-XXXX-XXXX" in the chat, drawn here as a
+  // Connect card) is accepted; then their Ghost profile (name, picture, banner, bio, accent) replaces their Snapchat
+  // name/Bitmoji in Ghost unless you set your own nickname/picture for them. Native: ios/Sources/GhostNet.swift.
+  // =====================================================================================================
+  const gnTrail = (t) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST net " + String(t).slice(0, 300) }).catch(() => {}); } catch (e) {} };
+  function gnOn() { return !!(gn.net && gn.net.isOn()); }
+  function gnFriend(snapId) {
+    if (!gnOn() || !snapId) return null;
+    const f = gn.net.friendBySnap(snapId);
+    return f && f.state === "connected" ? f : null;
+  }
+  function gnNameFor(snapId) { const f = gnFriend(snapId); return (f && f.profile && f.profile.name) || null; }
+  function gnPicFor(snapId) { const f = gnFriend(snapId); return (f && f.profile && f.profile.pic && gn.picUrls.get(f.id + ":pic")) || null; }
+  function gnBannerFor(snapId) { const f = gnFriend(snapId); return (f && f.profile && f.profile.banner && gn.picUrls.get(f.id + ":banner")) || null; }
+  function gnBadgeEl(size) {
+    const b = el("span", "gh-gn-badge");
+    b.setAttribute("aria-label", "Connected on Ghost");
+    b.appendChild(icon("ghost", size || 11));
+    return b;
+  }
+  // the small ghost mark on an avatar (chat list, chat header) for connected Ghost friends only
+  function gnSyncBadge(wrap, user) {
+    if (!wrap) return;
+    const old = wrap.querySelector(":scope > .gh-gn-badge");
+    const want = !!(user && !user.members && gnFriend(user.id));
+    if (want && !old) wrap.appendChild(gnBadgeEl());
+    else if (!want && old) old.remove();
+  }
+  async function gnLoadPics() {
+    const want = new Map();
+    if (gn.net) {
+      for (const f of gn.net.friends()) if (f.state === "connected" && f.profile) for (const k of ["pic", "banner"]) if (f.profile[k]) want.set(f.id + ":" + k, 1);
+      const p = gn.net.profile();
+      for (const k of ["pic", "banner"]) if (p[k]) want.set("me:" + k, 1);
+    }
+    const next = new Map();
+    for (const key of want.keys()) {
+      const blob = await wallDB.get("gn:" + key).catch(() => null);
+      if (blob) next.set(key, URL.createObjectURL(blob));
+    }
+    const old = gn.picUrls;
+    gn.picUrls = next;
+    setTimeout(() => { for (const u of old.values()) URL.revokeObjectURL(u); }, 1500); // anything still on screen swaps first
+  }
+  // something changed (connections, a profile, the switch): names, pictures, badges and cards everywhere
+  function gnChanged(ctx) {
+    clearTimeout(gn.refreshT);
+    gn.refreshT = setTimeout(async () => {
+      gn.rev++;
+      await gnLoadPics().catch(() => {});
+      try {
+        const convs = Array.from(ctx.state.convById.values());
+        nickify(convs);
+        for (const e of ctx.state.messagesByConv.values()) nickify(e.messages);
+      } catch (e) { gnTrail("refresh names " + (e && e.message)); }
+      try { applyConversations(ctx, await api.listConversations()); } catch (e) {}
+      refreshAvatars(ctx);
+      if (ctx.conv && ctx.state.currentConvId) { try { paintWindow(ctx, ctx.conv); } catch (e) {} }
+      const top = ctx.settings && ctx.settings.el && ctx.settings.el.dataset.open === "1" && ctx.settings.stack[ctx.settings.stack.length - 1];
+      if (top && top.refresh && /^(gn|friend$|privacy$|main$)/.test(top.name)) top.refresh();
+    }, 60);
+  }
+  async function gnStart(ctx) {
+    if (gn.net || typeof GhostNetCore === "undefined") return;
+    if (!(window.crypto && crypto.subtle)) { gnTrail("no WebCrypto here - Ghost Network unavailable"); return; } // https pages only
+    gn.ctx = ctx; ctx.gn = gn;
+    gn.net = GhostNetCore.create({
+      gnet: (a) => dgPost("gnet", a).catch((e) => { gnTrail("gnet " + (e && e.message || e)); return null; }),
+      keysGet: async () => { const r = await dgPost("gnKeys", {}).catch(() => null); return typeof r === "string" && r ? r : storage.get("ghostNetKeys", null); },
+      keysSet: async (t) => { const r = await dgPost("gnKeys", { set: t }).catch(() => null); if (r !== true) await storage.set("ghostNetKeys", t); }, // no native side (test rig)
+      keysDelete: async () => { await dgPost("gnKeys", { delete: true }).catch(() => {}); await storage.set("ghostNetKeys", null); },
+      load: () => storage.get("ghostNet", null),
+      save: (s) => storage.set("ghostNet", s),
+      picGet: (k) => wallDB.get("gn:" + k), picPut: (k, b) => wallDB.put("gn:" + k, b), picDel: (k) => wallDB.del("gn:" + k),
+      me: () => ctx.state.me, log: gnTrail,
+      onChange: (what, d) => {
+        if (d && d.keyChanged) { const cd = Array.from(ctx.state.convById.values()).find((c) => !c.isGroup && c.participants && c.participants[0] && c.participants[0].id === d.snap); ctx.showToast(((cd && cd.title) || "A friend") + "'s Ghost has new keys (reinstalled?) · reconnected"); }
+        gnChanged(ctx);
+      },
+    });
+    try { await gn.net.init(); } catch (e) { gnTrail("init " + (e && e.message)); }
+    if (gn.net.friends().length) gnChanged(ctx);
+    const round = async (withSync) => {
+      if (document.hidden || !gn.net.hasWork() || gn.polling) return;
+      gn.polling = true;
+      try { await gn.net.poll(); if (withSync) await gn.net.sync(withSync === "force"); }
+      catch (e) { gnTrail("poll " + (e && e.message)); }
+      finally { gn.polling = false; }
+    };
+    gn.round = round;
+    setTimeout(() => round("force"), window.__ghostMockFast ? 50 : 3000);
+    gn.timer = setInterval(() => round(true), 20000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) setTimeout(() => round("force"), 1000); });
+  }
+
+  // ---- the Connect card (a "ghost:connect" message in a 1:1 chat) ----
+  function gnInviteCode(ctx, m) {
+    if (!m || m.kind !== "text" || !gnOn()) return null;
+    const code = GhostNetCore.parseInvite(m.text);
+    if (!code) return null;
+    const cd = ctx.state.convById.get(m.conversationId || ctx.state.currentConvId);
+    return cd && !cd.isGroup ? code : null;
+  }
+  function gnCardSig(ctx, m, isMe) {
+    const code = gnInviteCode(ctx, m);
+    return code ? gn.rev + ":" + gn.net.inviteState(code, isMe, m.from && m.from.id, m.ts) : "";
+  }
+  const GN_CARD_TEXT = {
+    mine: { waiting: "Invite sent · waiting for them", connected: "Connected on Ghost", expired: "Invite expired", unknown: "Sent from another phone", ended: "Disconnected" },
+    theirs: { connect: null, ended: "Disconnected · ask for a new invite", connecting: "Connecting… waiting for their Ghost", connected: "Connected on Ghost", expired: "This invite expired · ask for a new one", failed: "Didn't connect · ask for a new invite" },
+  };
+  function gnCardBubble(ctx, m, isMe, isLast, code) {
+    const b = el("div", "gh-bubble gh-gn-card");
+    if (isLast) b.dataset.tail = "1";
+    const cd = ctx.state.convById.get(m.conversationId || ctx.state.currentConvId);
+    const other = cd && cd.participants && cd.participants[0];
+    const state = gn.net.inviteState(code, isMe, m.from && m.from.id, m.ts);
+    b.dataset.gnState = state;
+    const top = el("div", "gh-gn-card-top");
+    const av = el("div", "gh-gn-card-av");
+    av.appendChild(makeAvatar(isMe ? (ctx.state.me || { name: "You" }) : (m.from || other || { name: "?" }), 42));
+    av.appendChild(gnBadgeEl(12));
+    const col = el("div", "gh-gn-card-titles");
+    const t1 = el("div", "gh-gn-card-title"); t1.textContent = "Ghost invite";
+    const t2 = el("div", "gh-gn-card-sub");
+    t2.textContent = isMe ? "You invited " + ((other && other.name) || "them") + " to connect" : ((m.from && m.from.name) || "They") + " wants to connect on Ghost";
+    col.append(t1, t2); top.append(av, col); b.appendChild(top);
+    const text = (isMe ? GN_CARD_TEXT.mine : GN_CARD_TEXT.theirs)[state];
+    if (!isMe && state === "connect") {
+      const note = el("div", "gh-gn-card-note"); note.textContent = "You'll see each other's Ghost profile. It goes over Ghost's own encrypted line, not Snapchat.";
+      const btn = el("button", "gh-gn-card-btn gh-press"); btn.textContent = "Connect"; btn.dataset.gnact = "connect";
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (btn.disabled) return;
+        haptic("light"); btn.disabled = true; btn.textContent = "Connecting…";
+        try {
+          await gn.net.accept(code, m.from && m.from.id, m.conversationId || ctx.state.currentConvId);
+          ctx.showToast("Sent · you're connected once their Ghost sees it");
+          if (gn.round) setTimeout(() => gn.round(false), 1500);
+        } catch (err) { ctx.showToast(String(err && err.message || "Couldn't connect")); btn.disabled = false; btn.textContent = "Connect"; }
+        gnChanged(ctx);
+      });
+      b.append(note, btn);
+    } else if (text) {
+      const st = el("div", "gh-gn-card-state"); st.textContent = text;
+      if (state === "connected") st.prepend(icon("check", 14));
+      b.appendChild(st);
+    }
+    b.appendChild(tickMetaEl(m, isMe));
+    if (m.failed) b.dataset.failed = "1";
+    return b;
+  }
+  // chat sheet rows: Connect on Ghost / Invite sent / Ghost Profile
+  function gnChatSheetRows(ctx, group, cd, other, done) {
+    if (!gnOn() || !other || cd.isGroup) return;
+    const f = gnFriend(other.id);
+    if (f) {
+      setRow(group, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Ghost Profile", onClick: () => { done(); ctx.settings.friendTarget = other; openSettingsAt(ctx, "friend"); } });
+      return;
+    }
+    const pending = gn.net.inviteFor(cd.id);
+    if (pending) {
+      setRow(group, { icon: "ghost", tint: "#8e8e93", label: "Ghost Invite Sent", value: "Waiting", onClick: () => ctx.showToast("They connect by tapping Connect on the invite in Ghost") });
+      return;
+    }
+    setRow(group, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Connect on Ghost", onClick: async () => {
+      const ok = await confirmSheet(ctx, "Send a Ghost invite to " + (other.name || "them") + "? It's a normal message they can see (\"ghost:connect\" and a code). In Ghost it shows a Connect button; in Snapchat it's just text.", "Send Invite");
+      if (!ok) return;
+      try {
+        const text = await gn.net.createInvite(cd.id, other.id);
+        await api.sendText(cd.id, text, {});
+        done(); ctx.showToast("Invite sent");
+      } catch (e) { ctx.showToast(String(e && e.message || "Couldn't send the invite")); }
+    } });
+  }
+
+  // ---- pictures for My Ghost Profile ----
+  async function gnCropPhoto(file, w, h) {
+    const d = await decodePhoto(file);
+    try {
+      const k = Math.max(w / d.w, h / d.h), sw = w / k, sh = h / k;
+      const c = document.createElement("canvas"); c.width = w; c.height = h;
+      c.getContext("2d").drawImage(d.src, (d.w - sw) / 2, (d.h - sh) / 2, sw, sh, 0, 0, w, h);
+      const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.85));
+      if (!blob) throw new Error("bad photo");
+      return blob;
+    } finally { if (d.url) URL.revokeObjectURL(d.url); if (d.src && d.src.close) d.src.close(); }
+  }
+  // a profile header with banner, picture, name, badge and bio (yours or a connected friend's)
+  function gnProfileHead(user, prof, banner, pic, connected) {
+    const box = el("div", "gh-gn-prof");
+    const bn = el("div", "gh-gn-prof-banner");
+    const acc = ACCENT_SET[(prof && prof.accent) || ""];
+    bn.style.background = banner ? `center / cover no-repeat url("${banner}")` : acc ? `linear-gradient(135deg, ${acc[0]}, ${acc[3]})` : "linear-gradient(135deg, var(--gh-accent), var(--gh-bubble-out-2))";
+    const av = el("div", "gh-gn-prof-av");
+    if (pic) { const img = el("img", "gh-avatar"); img.alt = ""; img.src = pic; av.appendChild(img); }
+    else av.appendChild(makeAvatar(user, 84));
+    const nmRow = el("div", "gh-gn-prof-name");
+    const nm = el("span"); nm.textContent = (prof && prof.name) || user.name || "You";
+    nmRow.appendChild(nm);
+    if (connected) nmRow.appendChild(gnBadgeEl(13));
+    if (acc) nm.style.color = acc[0];
+    const un = el("div", "gh-set-profile-user"); un.textContent = user.username ? "@" + user.username : "";
+    box.append(bn, av, nmRow, un);
+    if (prof && prof.bio) { const bio = el("div", "gh-gn-prof-bio"); bio.textContent = prof.bio; box.appendChild(bio); }
+    return box;
+  }
+  const GN_SETTINGS = {
+    // Settings > Ghost Profile: what connected Ghost friends see instead of your Snapchat name and Bitmoji
+    gnProfile(ctx, body) {
+      const me = ctx.state.me || {};
+      const p = gn.net ? gn.net.profile() : { name: "", bio: "", accent: "" };
+      body.appendChild(gnProfileHead(me, p, gn.picUrls.get("me:banner"), gn.picUrls.get("me:pic"), true));
+      if (!gnOn()) { const g0 = setGroup(body, null, "Ghost Network is off. Turn it on in Settings > Privacy to connect with friends' Ghosts."); setRow(g0, { label: "Privacy Settings", onClick: () => pushSettingsPage(ctx, "privacy") }); }
+      const save = async (patch, msg) => {
+        try { await gn.net.setProfile(patch); ctx.showToast(msg || "Saved"); }
+        catch (e) { gnTrail("profile save " + (e && e.message)); ctx.showToast(/reachable|ntfy/.test(e && e.message || "") ? "Saved · friends get it when Ghost is online" : "Couldn't save that"); }
+        await gnLoadPics(); gnChanged(ctx);
+      };
+      let g = setGroup(body, null, "Your name and bio on Ghost, for connected Ghost friends only.");
+      setRow(g, { icon: "edit", tint: "#3e88f7", label: "Name", value: p.name || me.name || "", onClick: async () => {
+        const v = await promptSheet(ctx, "Your Ghost name", p.name || me.name || "", 40);
+        if (v != null) save({ name: v });
+      } });
+      setRow(g, { icon: "newMsg", tint: "#23a55a", label: "Bio", value: p.bio ? (p.bio.length > 18 ? p.bio.slice(0, 18) + "…" : p.bio) : "Add", onClick: async () => {
+        const v = await promptSheet(ctx, "Bio", p.bio || "", 300);
+        if (v != null) save({ bio: v });
+      } });
+      g = setGroup(body, "Pictures");
+      const photoRow = (label, kind, w, h) => {
+        setRow(g, { icon: "photo", tint: "#ff9433", label: (p[kind] ? "Change " : "Choose ") + label, onClick: async () => {
+          const f = await pickPhoto(); if (!f) return;
+          try { await save({ [kind]: await gnCropPhoto(f, w, h) }, label + " updated"); } catch (e) { ctx.showToast("Couldn't use that photo"); }
+        } });
+        if (p[kind]) setRow(g, { label: "Remove " + label, danger: true, onClick: () => save({ [kind]: null }, label + " removed") });
+      };
+      photoRow("Profile Picture", "pic", 480, 480);
+      photoRow("Banner", "banner", 1200, 480);
+      g = setGroup(body, "Accent Colour");
+      setChoice(g, [["", "Same as Ghost"]].concat(Object.keys(ACCENT_SET).map((k) => [k, k[0].toUpperCase() + k.slice(1)])), () => p.accent || "", (v) => { p.accent = v; save({ accent: v }); });
+      const friends = gn.net ? gn.net.friends().filter((f) => f.state === "connected") : [];
+      const conv = (f) => Array.from(ctx.state.convById.values()).find((c) => !c.isGroup && c.participants && c.participants[0] && c.participants[0].id === f.snap);
+      g = setGroup(body, "Connected on Ghost", friends.length ? null : "No one yet. Open a chat > tap the name at the top > Connect on Ghost.");
+      for (const f of friends) {
+        const c = conv(f), u = (c && c.participants[0]) || { id: f.snap, name: (f.profile && f.profile.name) || "Ghost friend" };
+        const row = el("button", "gh-set-row gh-press gh-friend-row");
+        row.appendChild(makeAvatar(u, 34));
+        const l = el("span", "gh-set-label"); l.textContent = u.name || "Ghost friend"; row.appendChild(l);
+        row.appendChild(icon("back", 16, "gh-set-chev"));
+        row.addEventListener("click", () => { haptic("light"); ctx.settings.friendTarget = u; pushSettingsPage(ctx, "friend"); });
+        g.appendChild(row);
+      }
+      const id = gn.net && gn.net.myId();
+      if (id) { const foot = el("div", "gh-set-group-foot gh-gn-id"); foot.textContent = "Ghost ID " + id.replace(/(.{5})/g, "$1 ").trim(); body.appendChild(foot); }
+    },
+    // Privacy > Share My Profile With
+    gnShare(ctx, body) {
+      const sh = gn.net.share();
+      let g = setGroup(body, null, "Friends you leave out see your Snapchat name and Bitmoji instead.");
+      setChoice(g, [["all", "All Connected Ghost Friends"], ["chosen", "Only Friends I Choose"]], () => sh.mode, async (v) => {
+        sh.mode = v; await gn.net.setShare(v, sh.with).catch(() => ctx.showToast("Saved · friends get it later")); gnChanged(ctx);
+      });
+      if (sh.mode !== "chosen") return;
+      const friends = gn.net.friends().filter((f) => f.state === "connected");
+      g = setGroup(body, "Share With", friends.length ? null : "No connected Ghost friends yet.");
+      for (const f of friends) {
+        const c = Array.from(ctx.state.convById.values()).find((x) => !x.isGroup && x.participants && x.participants[0] && x.participants[0].id === f.snap);
+        setRow(g, { label: (c && c.title) || (f.profile && f.profile.name) || "Ghost friend", toggle: { get: () => sh.with.includes(f.id), set: async (on) => {
+          sh.with = on ? sh.with.concat(f.id) : sh.with.filter((x) => x !== f.id);
+          await gn.net.setShare("chosen", sh.with).catch(() => {});
+        } } });
+      }
+    },
+  };
+  // Privacy page: the Ghost Network group
+  function gnPrivacyRows(ctx, body) {
+    if (!gn.net) return;
+    let g = setGroup(body, "Ghost Network", "Connect with friends who also use Ghost: they see your Ghost profile and you see theirs. Invites are normal messages you can see, and nothing is hidden in your Snapchat chats. Off: no invites shown or accepted, and Ghost stops checking for Ghost messages.");
+    setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Ghost Network", toggle: { get: () => gn.net.isOn(), set: async (v) => { await gn.net.setOn(v); if (v && gn.round) gn.round("force"); } } });
+    if (!gn.net.isOn()) return;
+    setRow(g, { label: "Share My Profile With", value: gn.net.share().mode === "chosen" ? "Chosen Friends" : "All", onClick: () => pushSettingsPage(ctx, "gnShare") });
+    g = setGroup(body, null, "Tells your connected Ghost friends you left, then deletes your Ghost keys, your Ghost profile and every profile you received.");
+    setRow(g, { label: "Leave Ghost Network", danger: true, onClick: async () => {
+      if (!(await confirmSheet(ctx, "Leave Ghost Network? Everyone you're connected with has to connect again if you come back.", "Leave"))) return;
+      await gn.net.leave().catch((e) => gnTrail("leave " + (e && e.message)));
+      ctx.showToast("You left Ghost Network");
+    } });
+  }
+  // Friend page: their Ghost profile, your own overrides, Disconnect
+  function gnFriendRows(ctx, body, u) {
+    const f = gnFriend(u.id);
+    if (!f) {
+      if (gnOn()) { const n = el("div", "gh-set-group-foot"); n.textContent = "Not connected on Ghost. Open your chat with them, tap their name at the top, then Connect on Ghost."; body.appendChild(n); }
+      return;
+    }
+    // their banner, the Ghost badge on the picture and their bio, added to the page's own header (name/picture are
+    // already theirs through nickify/makeAvatar unless you picked your own)
+    const prof = body.querySelector(".gh-set-profile");
+    if (prof) {
+      prof.classList.add("gh-gn-friend-prof");
+      const bn = el("div", "gh-gn-prof-banner");
+      const acc = ACCENT_SET[(f.profile && f.profile.accent) || ""];
+      const banner = gnBannerFor(u.id);
+      bn.style.background = banner ? `center / cover no-repeat url("${banner}")` : acc ? `linear-gradient(135deg, ${acc[0]}, ${acc[3]})` : "linear-gradient(135deg, var(--gh-accent), var(--gh-bubble-out-2))";
+      prof.prepend(bn);
+      const img = prof.querySelector(".gh-avatar");
+      if (img) { const w = el("div", "gh-gn-avwrap"); img.replaceWith(w); w.append(img, gnBadgeEl(14)); }
+      if (f.profile && f.profile.bio) { const bio = el("div", "gh-gn-prof-bio"); bio.textContent = f.profile.bio; prof.appendChild(bio); }
+    }
+    if (f.keyChanged) {
+      const kg = setGroup(body, null, "Their Ghost reconnected with new keys on " + fmtDaySeparator(f.keyChanged) + " - usually a reinstall or a new phone. If you didn't expect that, ask them in person.");
+      setRow(kg, { icon: "lock", tint: "#ff9433", label: "New Ghost Keys", value: "OK", onClick: async () => { await gn.net.ackKeyChange(f.id); gnChanged(ctx); } });
+    }
+    const g = setGroup(body, "Ghost", "Your nickname and picture for them show only on this phone. Reset goes back to the profile they chose.");
+    setRow(g, { icon: "photo", tint: "#ff9433", label: "Change Picture", onClick: async () => {
+      const file = await pickPhoto(); if (!file) return;
+      try { await saveCustomAvatar(ctx, "user:" + u.id, file); ctx.showToast("Picture updated for you"); gnChanged(ctx); } catch (e) { ctx.showToast("Couldn't use that photo"); }
+    } });
+    const hasOwn = !!((pref("nicknames") || {})[u.id] || customAvatarUrls.has("user:" + u.id));
+    if (hasOwn) setRow(g, { label: "Reset to Their Profile", onClick: async () => {
+      await setNickname(ctx, u.id, "");
+      if (customAvatarUrls.has("user:" + u.id)) await clearCustomAvatar(ctx, "user:" + u.id);
+      nickify(u); ctx.showToast("Back to their Ghost profile"); gnChanged(ctx);
+    } });
+    setRow(g, { label: "Disconnect", danger: true, onClick: async () => {
+      if (!(await confirmSheet(ctx, "Disconnect from " + (u.name || "them") + " on Ghost? You both go back to Snapchat names and Bitmojis.", "Disconnect"))) return;
+      await gn.net.disconnect(f.id).catch(() => {});
+      ctx.showToast("Disconnected");
+    } });
   }
 
   // =====================================================================================================

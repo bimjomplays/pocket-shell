@@ -742,6 +742,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "trail":
             trail(body["text"] as? String ?? "")
             replyHandler(true, nil)
+        case "gnet", "gnKeys": // Ghost network: ntfy.sh inbox requests + this Ghost's keys (GhostNet.swift)
+            GhostNet.handle(op, body) { value, error in replyHandler(value, error) }
         case "openURL": // Ghost: tapping a link in a message opens Safari (or the app that owns the link)
             guard let str = body["url"] as? String, let url = URL(string: str), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return replyHandler(nil, "bad url") }
             UIApplication.shared.open(url)
