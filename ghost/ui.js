@@ -1652,6 +1652,7 @@
     conv.unreadBoundaryComputed = false;
     conv.pinUntil = nowMs() + 4000; conv.userTouched = false; conv.atBottom = true;
     conv._olderFails = 0; conv._lastLoadOlderAt = 0; conv._anchor = null; clearTimeout(conv._winCheck); // per-chat, not carried over
+    conv._paintedConv = null; // never reuse bubbles from an earlier visit: closing a chat released their media
     conv.pendingUnreadForDivider = (convData && convData.unreadCount) || 0;
     let entry = ctx.state.messagesByConv.get(conversationId);
     if (!entry) {
@@ -1815,9 +1816,21 @@
   function paintWindow(ctx, conv) {
     const all = conv._all || [];
     const start = conv.windowStart, end = conv.windowEnd, total = all.length;
+    // Away from the bottom, the first message on screen is the anchor: it stays at the same spot. Keeping only the
+    // distance from the bottom moved everything above a bubble that got taller - reacting to a message made the
+    // chat jump up (device 2026-09-28). Measured before anything is built: reused bubbles leave the list below.
+    const mEl = conv.messages, fromBottom = mEl.scrollHeight - mEl.scrollTop, wasBottom = conv.atBottom;
+    const anchor = wasBottom ? null : chatAnchor(mEl);
     const frag = document.createDocumentFragment();
     const groups = groupsFor(all, start, end, conv.unreadBoundaryIndex);
     const meId = ctx.state.me && ctx.state.me.id;
+    // messages that look exactly the same as last paint keep their DOM node (photos stay decoded, so nothing
+    // collapses and regrows for a frame - the "goes up and comes back" flash on a reaction or a receipt)
+    const oldWraps = new Map();
+    // (only within one chat: a swipe-peek paints with no current chat, so key by whatever is actually painted)
+    const paintKey = ctx.state.currentConvId || conv.peekId || null;
+    if (paintKey && conv._paintedConv === paintKey) for (const w of conv.messages.querySelectorAll(".gh-msg-wrap")) if (w._sig && w._sigConv === paintKey) oldWraps.set(w.dataset.messageId, w);
+    conv._paintedConv = paintKey;
     if (!groups.length && total === 0) frag.appendChild(chatEmptyEl());
     for (const g of groups) {
       if (g.unreadDivider) { frag.appendChild(unreadSepEl()); continue; }
@@ -1838,18 +1851,13 @@
       tm.textContent = fmtClock(g.items[0].ts);
       meta.append(nm, tm);
       col.appendChild(meta);
-      for (let i = 0; i < g.items.length; i++) col.appendChild(messageWrapEl(ctx, g.items[i], isMe, i === g.items.length - 1));
+      for (let i = 0; i < g.items.length; i++) col.appendChild(reusedWrapEl(ctx, oldWraps, g.items[i], isMe, i === g.items.length - 1, paintKey));
       groupEl.append(gutter, col);
       frag.appendChild(groupEl);
     }
     if (end === total && total) { const seen = seenRowEl(ctx, all); if (seen) frag.appendChild(seen); }
     // keep what's on screen where it is: swapping every bubble (a new message, a read receipt...) briefly changes
     // the list's height, and the view used to jump up (device 2026-09-27: "sending a message makes me jump up")
-    // Away from the bottom, the first message on screen is the anchor: it stays at the same spot. Keeping only the
-    // distance from the bottom moved everything above a bubble that got taller - reacting to a message made the
-    // chat jump up (device 2026-09-28).
-    const mEl = conv.messages, fromBottom = mEl.scrollHeight - mEl.scrollTop, wasBottom = conv.atBottom;
-    const anchor = wasBottom ? null : chatAnchor(mEl);
     conv.stickUntil = nowMs() + 150; // the scroll events our own repaint causes aren't the user scrolling up
     conv.messages.replaceChildren(conv.topSpacer, frag, conv.bottomSpacer);
     conv._anchor = anchor ? Object.assign(anchor, { until: nowMs() + 1500, top: mEl.scrollTop }) : null;
@@ -1986,6 +1994,24 @@
     return e;
   }
 
+  // everything messageWrapEl's output depends on; the same signature = the old node can be reused as it is
+  function wrapSig(ctx, m, isMe, isLast) {
+    const media = (m.media || []).map((x) => x ? (x.type || "") + (x.url ? x.url.length + x.url.slice(-24) : x.blob ? "b" + x.blob.size : "") : "").join(",");
+    const reacts = (m.reactions || []).map((r) => (r.from && r.from.id) + "=" + (r.emoji || "") + (r.intent || "")).join(",");
+    const reply = m.replyTo ? (m.replyTo.messageId || "") + ":" + (m.replyTo.text || "") + ":" + ((m.replyTo.from && m.replyTo.from.name) || "") : "";
+    const convId = ctx.state.currentConvId;
+    return [m.kind, m.ts, m.text || "", reacts, media, reply, m.saved ? 1 : 0, m.opened ? 1 : 0, m.replayable ? 1 : 0, m.snapSound ? 1 : 0,
+      m.edited ? 1 : 0, m.pending ? 1 : 0, m.failed ? 1 : 0, m.retained ? 1 : 0, m.retainedMedia ? 1 : 0, m.mediaUnavailable ? 1 : 0,
+      m.status || "", isMe ? 1 : 0, isLast ? 1 : 0, (ctx.conv && ctx.conv.searchQ) || "", convId && isBookmarked(convId, m.id) ? 1 : 0].join("\u0001");
+  }
+  function reusedWrapEl(ctx, oldWraps, m, isMe, isLast, paintKey) {
+    const sig = wrapSig(ctx, m, isMe, isLast);
+    const old = oldWraps.get(m.id);
+    if (old && old._sig === sig) { oldWraps.delete(m.id); return old; }
+    const w = messageWrapEl(ctx, m, isMe, isLast);
+    w._sig = sig; w._sigConv = paintKey;
+    return w;
+  }
   function messageWrapEl(ctx, m, isMe, isLast) {
     const wrap = el("div", "gh-msg-wrap");
     wrap.dataset.messageId = m.id;
@@ -2253,20 +2279,45 @@
     }
   }
 
+  // message id -> {w, h}: the size a chat photo/video box had once loaded (local CSS px). A box built again (a
+  // repaint, reopening the chat) starts at that size instead of collapsing to the placeholder and growing back.
+  // (kept across launches too, so the first open of a chat after a restart doesn't flash either)
+  const mediaBoxSizes = new Map();
+  try { for (const [k, w, h] of JSON.parse(localStorage.getItem("ghostMediaBoxes") || "[]")) mediaBoxSizes.set(k, { w, h }); } catch (e) {}
+  let mediaBoxSave = 0;
+  function rememberMediaBox(key, wrap) {
+    requestAnimationFrame(() => {
+      if (!wrap.isConnected || wrap.dataset.loading === "1") return;
+      const w = wrap.offsetWidth, h = wrap.offsetHeight;
+      if (w < 40 || h < 40) return;
+      mediaBoxSizes.delete(key); mediaBoxSizes.set(key, { w, h });
+      if (mediaBoxSizes.size > 1500) mediaBoxSizes.delete(mediaBoxSizes.keys().next().value);
+      clearTimeout(mediaBoxSave);
+      mediaBoxSave = setTimeout(() => { try { localStorage.setItem("ghostMediaBoxes", JSON.stringify([...mediaBoxSizes].map(([k, v]) => [k, v.w, v.h]))); } catch (e) {} }, 2000);
+    });
+  }
   function mediaEl(ref, opts) {
     opts = opts || {};
     const wrap = el("div", "gh-media");
+    // message ids are only unique within a chat (every other cache here keys by chat + id too)
+    const boxConv = opts.message && (opts.message.conversationId || (opts.ctx && opts.ctx.state.currentConvId));
+    const key = opts.message && opts.message.id && boxConv ? boxConv + "|" + opts.message.id : null;
+    const known = key && mediaBoxSizes.get(key);
+    if (known) { wrap.style.width = known.w + "px"; wrap.style.height = known.h + "px"; }
     if (!ref) { wrap.dataset.loading = "1"; return wrap; }
     const src = ref.url || (ref.blob ? blobUrl(ref.blob, opts.message && opts.message.conversationId) : "");
     if (ref.type === "video") {
       const v = el("video");
       v.src = src; v.muted = true; v.playsInline = true; v.loop = !!opts.autoplay;
       if (opts.autoplay) v.autoplay = true; else v.controls = true;
+      if (key && !known) v.addEventListener("loadedmetadata", () => rememberMediaBox(key, wrap), { once: true });
       wrap.appendChild(v);
     } else {
       const img = el("img");
-      img.loading = "lazy";
+      // (not lazy: a photo above the screen that only loads once you scroll to it grows and pushes the chat down)
+      img.decoding = "async";
       img.src = src;
+      if (key && !known) img.addEventListener("load", () => rememberMediaBox(key, wrap), { once: true });
       wrap.appendChild(img);
       // GIFs sent as photos (yours included) stay on their first frame in an <img> on the phone: the GIF player
       // (gif-anim.js) decodes and plays multi-frame GIFs on a canvas over it; stills are left alone
@@ -2800,7 +2851,7 @@
     if (conv._lastLoadOlderAt && Date.now() - conv._lastLoadOlderAt < 600) { scheduleWindowCheck(ctx, 620 - (Date.now() - conv._lastLoadOlderAt)); return; }
     conv._lastLoadOlderAt = Date.now();
     conv._loadingOlder = true;
-    const beforeHeight = conv.messages.scrollHeight;
+    const startTotal = (conv._all || []).length;
     try {
       // a fetch that never answers used to leave _loadingOlder set, and nothing older loaded again in any chat
       const res = await Promise.race([api.loadOlder(convId), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 15000))]);
@@ -2843,7 +2894,9 @@
       renderMessageList(ctx, conv, entry, {}); // (paintWindow keeps the view where it was as the older messages appear above)
       conv._olderFails = 0;
       conv._loadingOlder = false;
-      if (added > 0) scheduleWindowCheck(ctx, 650); // still near the top (a short page): keep going
+      // still near the top (a short page): keep going. (The bridge's own "messages" event often lands before this
+      // answer and has already added the page, so "added" is 0 here - count against what was showing before.)
+      if (added > 0 || newTotal > startTotal) scheduleWindowCheck(ctx, 650);
       return;
     } catch (e) { conv._olderFails = (conv._olderFails || 0) + 1; }
     conv._loadingOlder = false;
@@ -9011,12 +9064,15 @@
       g.scrubLabel.style.transform = `translateY(${frac * track}px)`;
       updateGalVisible(ctx);
     };
+    // not passive: dragging the handle must not also scroll/bounce the whole page (the grid and tab bar slid
+    // with it - device 2026-09-28)
     g.scrubThumb.addEventListener("touchstart", (e) => {
       if (!e.touches || e.touches.length !== 1) return;
+      e.preventDefault();
       g.scrubbing = true; g.scrub.dataset.drag = "1"; clearTimeout(g._scrubHide);
       move(e.touches[0].clientY);
-    }, { passive: true });
-    g.scrubThumb.addEventListener("touchmove", (e) => { if (g.scrubbing && e.touches && e.touches[0]) move(e.touches[0].clientY); }, { passive: true });
+    }, { passive: false });
+    g.scrubThumb.addEventListener("touchmove", (e) => { if (g.scrubbing && e.touches && e.touches[0]) { e.preventDefault(); move(e.touches[0].clientY); } }, { passive: false });
     const end = () => { if (!g.scrubbing) return; g.scrubbing = false; g.scrub.dataset.drag = "0"; showGalScrubber(ctx); };
     g.scrubThumb.addEventListener("touchend", end, { passive: true });
     g.scrubThumb.addEventListener("touchcancel", end, { passive: true });
@@ -9603,8 +9659,8 @@
         <div style="width:44px"></div>
       </div>
       <div class="gh-send-mode" role="tablist">
-        <button data-mode="snap" role="tab">Snap</button>
         <button data-mode="chat" role="tab">Chat</button>
+        <button data-mode="snap" role="tab">Snap</button>
       </div>
       <div class="gh-send-mode-hint"></div>
       <div class="gh-cam-search"><input type="search" placeholder="Search" autocapitalize="off" autocomplete="off" spellcheck="false"></div>
@@ -9620,7 +9676,7 @@
     const sp = {
       el: wrap, list: q(".gh-cam-list"), search: q(".gh-cam-search input"), chosen: q(".gh-cam-chosen"),
       sendBtn: q('[data-gact="send"]'), hint: q(".gh-send-mode-hint"), modeBtns: Array.from(wrap.querySelectorAll("[data-mode]")),
-      mode: "snap", picked: new Set(), opts: null, sending: false,
+      mode: "chat", picked: new Set(), opts: null, sending: false,
     };
     q('[data-gact="back"]').addEventListener("click", () => { haptic("light"); closeSendPage(ctx); });
     for (const b of sp.modeBtns) b.addEventListener("click", () => { haptic("light"); setSendMode(ctx, b.dataset.mode); });
@@ -9634,14 +9690,13 @@
     sp.picked = new Set(sp.opts.preselect ? [sp.opts.preselect] : []);
     sp.search.value = "";
     sp.sending = false; sp.sendBtn.dataset.sending = "0";
-    setSendMode(ctx, sp.opts.mode || (() => { try { return localStorage.getItem("ghost.sendMode") || "snap"; } catch (e) { return "snap"; } })());
+    setSendMode(ctx, sp.opts.mode || "chat"); // Chat first and always the default; Snap is the one you pick (user 2026-09-28)
     sp.el.dataset.open = "1";
   }
   function closeSendPage(ctx) { const sp = ctx.sendPage; sp.el.dataset.open = "0"; sp.opts = null; }
   function setSendMode(ctx, mode) {
     const sp = ctx.sendPage;
-    sp.mode = mode === "chat" ? "chat" : "snap";
-    try { localStorage.setItem("ghost.sendMode", sp.mode); } catch (e) {}
+    sp.mode = mode === "snap" ? "snap" : "chat";
     for (const b of sp.modeBtns) b.dataset.on = b.dataset.mode === sp.mode ? "1" : "0";
     sp.hint.textContent = sp.mode === "snap" ? "Opens once, then it's gone." : "Stays in the chat.";
     if (sp.mode === "chat") sp.picked.delete("__story__");

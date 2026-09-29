@@ -1395,7 +1395,8 @@
   }
   async function withRetention(cid, messages) {
     if (!archive || !archive.enabled) return messages;
-    try { return await archive.merge(cid, messages); }
+    // never let the archive hold up a chat: after 1.5 s show the live messages (the archive copy comes with the next update)
+    try { return await Promise.race([archive.merge(cid, messages), new Promise((res) => setTimeout(() => res(messages), 1500))]); }
     catch (_) { retentionError(); return messages; }
   }
   const archiveEventVersions = new Map();

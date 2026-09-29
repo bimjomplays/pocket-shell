@@ -2226,7 +2226,7 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-gal-scrub { position: absolute; right: 2px; top: calc(var(--gh-safe-t) + 120px); bottom: calc(var(--gh-safe-b) + 70px); width: 44px; z-index: 4; pointer-events: none; opacity: 0; transition: opacity 0.25s ease; }
 .gh-gal-scrub[data-show="1"] { opacity: 1; }
 .gh-gal-scrub[data-show="1"] .gh-gal-scrub-thumb { pointer-events: auto; }
-.gh-gal-scrub-thumb { position: absolute; right: 4px; top: 0; width: 30px; height: 36px; border-radius: 15px; background: var(--gh-bg-panel-2); box-shadow: 0 2px 10px rgba(0,0,0,0.45); }
+.gh-gal-scrub-thumb { touch-action: none; position: absolute; right: 4px; top: 0; width: 30px; height: 36px; border-radius: 15px; background: var(--gh-bg-panel-2); box-shadow: 0 2px 10px rgba(0,0,0,0.45); }
 .gh-gal-scrub-thumb::before, .gh-gal-scrub-thumb::after { content: ""; position: absolute; left: 10px; right: 10px; height: 2px; border-radius: 1px; background: var(--gh-text-secondary); }
 .gh-gal-scrub-thumb::before { top: 14px; } .gh-gal-scrub-thumb::after { top: 20px; }
 .gh-gal-scrub-label { position: absolute; right: 44px; top: 3px; white-space: nowrap; padding: 6px 12px; border-radius: 15px; background: var(--gh-bg-panel); color: var(--gh-text); font-weight: 700; font-size: 14px; box-shadow: 0 2px 10px rgba(0,0,0,0.45); opacity: 0; transition: opacity 0.15s ease; }
@@ -2287,6 +2287,12 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-gv-t1 { font-weight: 700; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-gv-t2 { font-size: 12.5px; opacity: 0.8; margin-top: 1px; }
 .gh-gv-send { height: 40px; padding: 0 22px; border-radius: 20px; background: var(--gh-accent); color: #fff; font-weight: 700; font-size: 16px; flex: none; }
+/* readable over any photo (device 2026-09-28: the date and the bottom icons got lost on bright pictures) */
+.gh-gv-top { background: linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0.35) 65%, transparent); padding-bottom: 22px; }
+.gh-gv-bottom { background: linear-gradient(transparent, rgba(0,0,0,0.4) 35%, rgba(0,0,0,0.75)); padding-top: 24px; }
+.gh-gv-title { text-shadow: 0 1px 2px rgba(0,0,0,0.9), 0 0 10px rgba(0,0,0,0.65); }
+.gh-gv-btn svg { filter: drop-shadow(0 1px 1.5px rgba(0,0,0,0.9)) drop-shadow(0 0 6px rgba(0,0,0,0.55)); }
+.gh-gv-t2 { opacity: 0.92; }
 .gh-gv-dl { position: absolute; left: 50%; top: calc(var(--gh-safe-t) + 64px); transform: translateX(-50%); z-index: 3; padding: 6px 12px; border-radius: 14px; background: rgba(0,0,0,0.65); color: #fff; font-size: 13px; font-weight: 600; white-space: nowrap; }
 
 /* Send To page: the camera picker's look, above the camera, with a Snap / Chat switch */

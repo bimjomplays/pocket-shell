@@ -140,7 +140,9 @@
     }
     merge(cid, live) {
       const account = this.account, gen = this.generation;
-      return this.serial(async () => {
+      // a read, so it doesn't queue behind capture writes (a large media bundle being stored made opening a chat
+      // and loading older messages wait many seconds); the generation check still drops it after a clear/disable
+      return (async () => {
         if (!account || !this.enabled || gen !== this.generation) return live;
         const rows = await this.rows(account, cid);
         if (gen !== this.generation) return live;
@@ -161,7 +163,7 @@
             mediaUnavailable: r.message.kind !== "text" && !r.mediaCount });
         }
         return [...out.values()].sort((a, b) => a.ts - b.ts);
-      });
+      })();
     }
     getMedia(cid, id) {
       const account = this.account, gen = this.generation;
