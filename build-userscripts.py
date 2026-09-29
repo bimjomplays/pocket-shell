@@ -83,6 +83,9 @@ if (ghost / 'ui.js').exists():
     # network.js (Ghost accounts core) defines GhostNetCore at the top of the same script, before ui.js reads it
     net = (ghost / 'network.js').read_text() + '\n' if (ghost / 'network.js').exists() else ''
     (app / 'ghost-ui.js').write_text(gifanim + 'const GHOST_CSS = ' + json.dumps(css) + ';\n' + net + (ghost / 'ui.js').read_text())
+# the TikTok tab's hidden TikTok page script (runs in TikTokFeed.swift's own web view, never in Snapchat's page)
+if (ghost / 'tiktok-page.js').exists():
+    (app / 'ghost-tiktok.js').write_text((ghost / 'tiktok-page.js').read_text())
 
 with zipfile.ZipFile(root / 'Dark-Mobile-Safari.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
     for path in sorted(out.glob('*.user.js')):

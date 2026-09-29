@@ -93,6 +93,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var gallery: GhostGallery?
     private var vault: GhostVault?
     private var notifications: GhostNotifications?
+    private var tiktok: GhostTikTok? // the TikTok tab's hidden TikTok page (TikTokFeed.swift), created on first use
     private lazy var context = GhostContext()
     // The app switcher cover shows Ghost's own logo - the same picture as the Home Screen icon the user picked
     // (Settings > Appearance > App Icon), as a rounded app-icon tile - instead of the ghost emoji.
@@ -255,6 +256,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         gallery?.attach(to: webView)
         vault?.attach(to: webView)
         notifications?.attach(to: webView)
+        if Self.ghostMode { tiktok = GhostTikTok(host: self, ghost: webView) }
         // lets Safari's Web Inspector protocol (ios-webkit-debug-proxy on the PC, phone on USB) attach to the page
         if #available(iOS 16.4, *) { webView.isInspectable = true }
         // Draw the page at 2x instead of the screen's 3x. iOS closes Ghost's web process at ~1.5 GB, Snapchat's own web app
@@ -742,6 +744,9 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "trail":
             trail(body["text"] as? String ?? "")
             replyHandler(true, nil)
+        case "tt": // the TikTok tab: hidden TikTok page, its feed and video bytes (TikTokFeed.swift)
+            guard let tiktok else { return replyHandler(nil, "unavailable") }
+            tiktok.handle(body, reply: replyHandler)
         case "gnet", "gnKeys": // Ghost network: ntfy.sh inbox requests + this Ghost's keys (GhostNet.swift)
             GhostNet.handle(op, body) { value, error in replyHandler(value, error) }
         case "openURL": // Ghost: tapping a link in a message opens Safari (or the app that owns the link)

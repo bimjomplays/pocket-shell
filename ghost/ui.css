@@ -2520,3 +2520,48 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-bday-cake { flex: none; font-size: 0.9em; line-height: 1; }
 .gh-row-top[data-bday="1"] .gh-row-name { flex: 0 1 auto; }
 .gh-row-top[data-bday="1"] .gh-bday-cake { flex: 1 0 auto; text-align: left; }
+
+/* ---------------------------------------------------------------------------------------------------
+   TIKTOK TAB (ui.js section "TikTok tab"): full-screen vertical pager above the home screen, under the tab bar.
+--------------------------------------------------------------------------------------------------- */
+.gh-tt { position: absolute; inset: 0; z-index: 6; background: #000; display: none; overflow: hidden; }
+.gh-tt[data-open="1"] { display: block; }
+.gh-tt-pager { position: absolute; left: 0; right: 0; top: 0; bottom: calc(49px + var(--gh-safe-b)); overflow: hidden; touch-action: none; }
+.gh-tt-slide { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: #000; will-change: transform; contain: strict; }
+.gh-tt-pager[data-anim="1"] .gh-tt-slide { transition: transform 0.3s cubic-bezier(0.22, 0.8, 0.26, 1); }
+/* the video is see-through until it draws, so the cover shows while it loads */
+.gh-tt-cover, .gh-tt-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: transparent; }
+.gh-tt-cover { object-fit: cover; filter: brightness(0.9); }
+.gh-tt-slide[data-ready="1"] .gh-tt-cover { opacity: 0; transition: opacity 0.2s ease 0.15s; }
+.gh-tt-video { pointer-events: none; }
+.gh-tt-shade { position: absolute; left: 0; right: 0; bottom: 0; height: 42%; background: linear-gradient(to top, rgba(0,0,0,0.62), rgba(0,0,0,0)); pointer-events: none; }
+.gh-tt-info { position: absolute; left: 14px; right: 76px; bottom: 16px; color: #fff; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+.gh-tt-author { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.gh-tt-av { width: 30px; height: 30px; border-radius: 50%; overflow: hidden; background: rgba(255,255,255,0.18); flex: none; border: 1px solid rgba(255,255,255,0.7); }
+.gh-tt-av img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gh-tt-name { font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-tt-desc { font-size: 14.5px; line-height: 1.32; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+.gh-tt-music { margin-top: 6px; font-size: 13px; opacity: 0.9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 2px; }
+.gh-tt-music svg { flex: none; }
+.gh-tt-side { position: absolute; right: 10px; bottom: 24px; display: flex; flex-direction: column; align-items: center; gap: 16px; color: #fff; pointer-events: none; }
+.gh-tt-stat { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 12.5px; font-weight: 600; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+.gh-tt-stat svg { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
+.gh-tt-paused-ic { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(1.2); color: rgba(255,255,255,0.85); opacity: 0; transition: opacity 0.15s ease, transform 0.15s ease; pointer-events: none; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.4)); }
+.gh-tt-paused-ic svg { fill: currentColor; stroke: none; }
+.gh-tt-slide[data-paused="1"] .gh-tt-paused-ic { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+.gh-tt-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: rgba(255,255,255,0.18); pointer-events: none; }
+.gh-tt-progress i { display: block; height: 100%; width: 0; background: rgba(255,255,255,0.85); }
+.gh-tt-top { position: absolute; left: 0; right: 0; top: 0; padding-top: calc(var(--gh-safe-t) + 10px); display: flex; justify-content: center; pointer-events: none; }
+.gh-tt-title { color: #fff; font-size: 17px; font-weight: 700; text-shadow: 0 1px 3px rgba(0,0,0,0.5); padding-bottom: 4px; border-bottom: 2px solid #fff; }
+.gh-tt-banner { position: absolute; left: 12px; right: 12px; top: calc(var(--gh-safe-t) + 46px); display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 14px; border-radius: 14px; background: rgba(28,28,32,0.82); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); color: #fff; font-size: 13.5px; }
+.gh-tt-banner span { flex: 1; min-width: 0; }
+.gh-tt-banner-btn { flex: none; background: #fe2c55; color: #fff; font-weight: 600; font-size: 13.5px; padding: 7px 14px; border-radius: 10px; }
+.gh-tt-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 0 36px; text-align: center; color: #fff; }
+.gh-tt-empty-title { font-size: 22px; font-weight: 700; }
+.gh-tt-empty-text { font-size: 14.5px; color: rgba(255,255,255,0.7); line-height: 1.4; }
+.gh-tt-empty-btn { margin-top: 8px; background: #fe2c55; color: #fff; font-weight: 600; font-size: 15px; padding: 11px 22px; border-radius: 12px; }
+.gh-tt-empty-link { color: rgba(255,255,255,0.8); font-size: 14.5px; padding: 6px 12px; }
+.gh-tt-loading { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+.gh-tt-slide[data-failed="1"]::after { content: "Couldn't load this video"; position: absolute; left: 0; right: 0; top: 50%; text-align: center; color: rgba(255,255,255,0.75); font-size: 14px; }
+/* the tab bar stays dark over the video, like TikTok */
+.gh-screen[data-screen="home"]:has(.gh-tt[data-open="1"]) .gh-tab-bar { background: #000; border-top-color: rgba(255,255,255,0.08); }

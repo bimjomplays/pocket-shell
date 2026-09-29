@@ -77,6 +77,8 @@
     emoji: '<circle cx="12" cy="12" r="9"/><path d="M8.5 10.5h.01M15.5 10.5h.01"/><path d="M8.5 14.5s1.2 2 3.5 2 3.5-2 3.5-2"/>',
     mic: '<rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21M9 21h6"/>',
     play: '<path d="M7 5l12 7-12 7z"/>',
+    reels: '<rect x="3" y="3" width="18" height="18" rx="5"/><path d="M3 8.5h18"/><path d="M8.5 3l2.5 5.5"/><path d="M14.5 3l2.5 5.5"/><path d="M10.5 12.2v5.1l4.3-2.55z" fill="currentColor"/>',
+    music: '<path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
     pause: '<path d="M7 5h3v14H7zM14 5h3v14h-3z"/>',
     ghost: '<path d="M12 3a7 7 0 00-7 7v8.5c0 .6.7 1 1.2.6l1.6-1.2 1.7 1.3a1 1 0 001.2 0l1.3-1 1.3 1a1 1 0 001.2 0l1.7-1.3 1.6 1.2c.5.4 1.2 0 1.2-.6V10a7 7 0 00-7-7z"/><path d="M9.3 11h.01M14.7 11h.01" stroke-width="1.8"/>',
     check: '<path d="M5 13l4 4L19 7"/>',
@@ -505,6 +507,7 @@
     ctx.settings = buildSettings(ctx);
     root.appendChild(ctx.settings.el);
     buildGallery(ctx, ctx.home.screen, ctx.home.screen.querySelector(".gh-tab-bar"));
+    buildTikTok(ctx, ctx.home.screen, ctx.home.screen.querySelector(".gh-tab-bar"));
     loadPrefs(ctx);
 
     initNavGesture(ctx);
@@ -769,6 +772,7 @@
         <button class="gh-tab-btn gh-hit" data-tab="stories"></button>
         <button class="gh-tab-btn gh-hit" data-tab="gallery"></button>
         <button class="gh-tab-btn gh-hit" data-tab="settings"></button>
+        <button class="gh-tab-btn gh-hit" data-tab="tiktok"></button>
       </div>
     `;
     const newBtn = screen.querySelector('[data-act="new"].gh-icon-btn');
@@ -784,6 +788,9 @@
     tabGallery.setAttribute("aria-label", "Gallery");
     const tabSettings = screen.querySelector('[data-tab="settings"]');
     tabSettings.append(icon("settingsTab", 25), Object.assign(document.createElement("span"), { textContent: "Settings" }));
+    const tabTikTok = screen.querySelector('[data-tab="tiktok"]');
+    tabTikTok.append(icon("reels", 25), Object.assign(document.createElement("span"), { textContent: "TikTok" }));
+    tabTikTok.setAttribute("aria-label", "TikTok");
     const search = screen.querySelector(".gh-search");
     search.appendChild(icon("search", 16));
     const input = el("input");
@@ -807,9 +814,16 @@
     for (const b of screen.querySelectorAll('[data-act="new"]')) {
       b.addEventListener("click", () => { haptic(); openNewChatSheet(ctx); });
     }
-    const allTabs = [tabChats, tabStories, tabGallery, tabSettings];
-    // the tab that's "under" Settings (a full-screen overlay) and the camera: Chats or Gallery
-    const baseTab = () => (ctx.gallery && ctx.gallery.el.dataset.open === "1" ? tabGallery : tabChats);
+    const allTabs = [tabChats, tabStories, tabGallery, tabSettings, tabTikTok];
+    // the tab that's "under" Settings (a full-screen overlay) and the camera: Chats, Gallery or TikTok
+    const baseTab = () => (ctx.tiktok && ctx.tiktok.el.dataset.open === "1" ? tabTikTok : ctx.gallery && ctx.gallery.el.dataset.open === "1" ? tabGallery : tabChats);
+    tabTikTok.addEventListener("click", () => {
+      haptic();
+      if (ctx.gallery && ctx.gallery.el.dataset.open === "1") closeGallery(ctx);
+      for (const t of allTabs) t.dataset.active = "0";
+      tabTikTok.dataset.active = "1";
+      openTikTok(ctx);
+    });
     tabSettings.addEventListener("click", () => {
       haptic();
       for (const t of allTabs) t.dataset.active = "0";
@@ -820,8 +834,10 @@
     tabChats.addEventListener("click", () => {
       haptic();
       const wasGallery = ctx.gallery && ctx.gallery.el.dataset.open === "1";
+      const wasTikTok = ctx.tiktok && ctx.tiktok.el.dataset.open === "1";
       for (const t of allTabs) t.dataset.active = "0";
       tabChats.dataset.active = "1";
+      if (wasTikTok) { closeTikTok(ctx); if (!wasGallery) return; }
       if (wasGallery) { closeGallery(ctx); return; }
       list.scrollTo({ top: 0, behavior: "smooth" });
     });
@@ -829,6 +845,7 @@
       haptic();
       const g = ctx.gallery;
       if (g.el.dataset.open === "1") { g.scroll.scrollTo({ top: 0, behavior: "smooth" }); return; }
+      if (ctx.tiktok && ctx.tiktok.el.dataset.open === "1") closeTikTok(ctx);
       for (const t of allTabs) t.dataset.active = "0";
       tabGallery.dataset.active = "1";
       openGallery(ctx);
@@ -3969,6 +3986,7 @@
     grid:   { name: "Grid", css: "linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px)", size: "28px 28px, 28px 28px", pos: "0 0, 0 0" },
   };
   const PREF_DEFAULTS = {
+    tiktokTab: true, // Settings > TikTok > TikTok Tab (the far-right tab; off = nothing loads from TikTok)
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true, chatRowStyle: "both",
     doubleTapCamera: true, messageNotifications: true, doubleTapReaction: 1, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
@@ -4032,6 +4050,7 @@
   function applyPrefs(ctx) {
     const host = ctx.host;
     if (!host) return;
+    applyTikTokTab(ctx);
     const t = THEMES[pref("theme")] || THEMES.night;
     const a = ACCENT_SET[pref("accent")] || ACCENT_SET.blue;
     const w = WALLPAPERS[pref("wallpaper")] || WALLPAPERS.aurora;
@@ -4179,7 +4198,7 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile", gnPreview: "How Friends See You", gnVerify: "Verify Connection" };
+  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile", gnPreview: "How Friends See You", gnVerify: "Verify Connection", tiktok: "TikTok" };
   const SETTINGS_PAGES = {
     gnProfile(ctx, body) { return GN_SETTINGS.gnProfile(ctx, body); }, // section "Ghost network"
     gnShare(ctx, body) { return GN_SETTINGS.gnShare(ctx, body); },
@@ -4449,6 +4468,7 @@
       setRow(g, { icon: "newMsg", tint: "#3e88f7", label: "Chats", onClick: () => pushSettingsPage(ctx, "chats") });
       setRow(g, { icon: "lock", tint: "#8e8e93", label: "Privacy", onClick: () => pushSettingsPage(ctx, "privacy") });
       setRow(g, { icon: "emoji", tint: "#f0b232", label: "Stickers & GIFs", onClick: () => pushSettingsPage(ctx, "media") });
+      setRow(g, { icon: "reels", tint: "linear-gradient(135deg,#25c5e8,#f0366a)", label: "TikTok", value: pref("tiktokTab") !== false ? "On" : "Off", onClick: () => pushSettingsPage(ctx, "tiktok") });
       setRow(g, { icon: "database", tint: "#23a55a", label: "Storage & Data", onClick: () => pushSettingsPage(ctx, "storage") });
       g = setGroup(body);
       setRow(g, { icon: "vibrate", tint: "#ff9433", label: "Haptics", toggle: { get: () => nativeSetting("haptics", true) !== false, set: (v) => setNativeSetting("haptics", v) } });
@@ -4456,6 +4476,30 @@
       g = setGroup(body);
       setRow(g, { icon: "settings", tint: "#636366", label: "Advanced", onClick: () => { try { window.dgOpenSettings && window.dgOpenSettings(); } catch (e) {} } });
       setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "About Ghost", onClick: () => pushSettingsPage(ctx, "about") });
+    },
+    tiktok(ctx, body) {
+      const g = setGroup(body, null, "Off removes the TikTok tab and Ghost stops loading TikTok completely. Your TikTok sign-in stays until you sign out.");
+      setRow(g, { icon: "reels", tint: "linear-gradient(135deg,#25c5e8,#f0366a)", label: "TikTok Tab", toggle: { get: () => pref("tiktokTab") !== false, set: (v) => { setPref(ctx, "tiktokTab", v); paintAcct(); } } });
+      const acct = setGroup(body, "TikTok Account", "Sign in on TikTok's own page with your phone number, email or username. Google sign-in doesn't work inside apps (Google blocks it). Ghost never sees your password; your TikTok sign-in stays on this iPhone.");
+      const paintAcct = async () => {
+        acct.innerHTML = "";
+        if (pref("tiktokTab") === false) { setRow(acct, { label: "Turn on the TikTok tab to sign in" }); return; }
+        const st = await ttPost("status").catch(() => null);
+        acct.innerHTML = "";
+        if (st && st.signedIn) {
+          setRow(acct, { label: "Signed In", value: st.user && st.user.uniqueId ? "@" + st.user.uniqueId : "" });
+          setRow(acct, { label: "Sign Out of TikTok", danger: true, onClick: async () => {
+            if (!(await confirmSheet(ctx, "Sign out of TikTok in Ghost?", "Sign Out"))) return;
+            await ttPost("signOut").catch(() => {});
+            if (ctx.tiktok) { ttClear(ctx); ctx.tiktok.started = false; ctx.tiktok.signedIn = null; }
+            ctx.showToast("Signed out of TikTok");
+            paintAcct();
+          } });
+        } else {
+          setRow(acct, { label: "Sign In to TikTok", onClick: () => { ttPost("signIn").catch(() => {}); } });
+        }
+      };
+      paintAcct();
     },
     appearance(ctx, body, page) {
       body.appendChild(previewChat(ctx));
@@ -8668,7 +8712,9 @@
   }
   function paintTextItemFinal(octx, item, t, vw) {
     if (!item.text) return;
-    const fontPx = Math.max(6, (TEXT_STYLE_PX[item.style] || TEXT_BASE_PX) * item.scale * t.scale);
+    // t.scale = screen px per media px (the photo is usually 3x bigger than the screen): sizes DIVIDE by it, like
+    // positions do. Multiplying shrank text by scale^2 - unreadably small on delivered snaps (user report 2026-09-29).
+    const fontPx = Math.max(6, (TEXT_STYLE_PX[item.style] || TEXT_BASE_PX) * item.scale / t.scale);
     const lines = item.text.split("\n");
     octx.save();
     octx.textBaseline = "middle";
@@ -8739,7 +8785,7 @@
     octx.save();
     octx.translate(p.x, p.y);
     octx.rotate(item.rotation);
-    const baseSize = 110 * item.scale * t.scale;
+    const baseSize = 110 * item.scale / t.scale;
     if (item.kind === "emoji") {
       octx.font = `${baseSize * 0.82}px -apple-system, sans-serif`;
       octx.textAlign = "center"; octx.textBaseline = "middle";
@@ -8762,7 +8808,7 @@
     octx.clearRect(0, 0, mediaW, mediaH);
     for (const s of ed.strokes) {
       const pts = s.pts.map((p) => viewportToMedia(t, p.x, p.y));
-      strokePath(octx, { color: s.color, size: Math.max(1, s.size * t.scale), pts });
+      strokePath(octx, Object.assign({}, s, { size: Math.max(1, s.size / t.scale), pts })); // keeps emoji-brush strokes emoji
     }
     for (const item of ed.items) {
       if (item.type === "text") paintTextItemFinal(octx, item, t, vw);
@@ -9000,6 +9046,327 @@
     const g = ctx.gallery;
     if (g.selecting) setGalSelecting(ctx, false);
     g.el.dataset.open = "0";
+  }
+
+  // =====================================================================================================
+  // TikTok tab (plan: ghost/TIKTOK_PLAN.md). The far-right tab: TikTok videos in Ghost's own full-screen swipe player.
+  // Native (TikTokFeed.swift, dg op "tt") keeps a hidden TikTok page signed in with the user's own account; it hands
+  // over the videos TikTok's own For You requests return (window.__ghostTikTok.items) and fetches their bytes
+  // (TikTok's CDN needs TikTok's cookies). Settings > TikTok > "TikTok Tab" off removes the tab, empties the player
+  // and tells native to destroy the hidden page: nothing talks to TikTok until it's switched back on.
+  // Memory: only the current video and its neighbours (-1..+2) hold blobs; everything further away is freed.
+  // =====================================================================================================
+  const TT_KEEP_BEHIND = 1, TT_KEEP_AHEAD = 2;
+  function ttPost(cmd, args) { return dgPost("tt", Object.assign({ cmd }, args || {})); }
+  // live(): false once the slide asking for it is gone - stops a long video's chunk loop so abandoned downloads don't
+  // queue ahead of the video on screen (review 2026-09-29)
+  async function ttBlob(url, video, live) {
+    if (typeof window.__ghostTTBlobMock === "function") return window.__ghostTTBlobMock(url, video);
+    const parts = [];
+    let pos = 0, total = Infinity, type = "";
+    while (pos < total) {
+      if (live && !live()) throw new Error("cancelled");
+      const r = await ttPost("fetch", { url, range: "bytes=" + pos + "-" + (pos + NATIVE_CHUNK - 1) });
+      if (!r || typeof r.body !== "string") throw new Error("no data");
+      type = type || r.type || "";
+      const part = b64ToBlob(r.body, "");
+      if (!part.size) break;
+      parts.push(part);
+      const m = /\/(\d+)\s*$/.exec(r.range || "");
+      // a 206 must say where it is in the file; a 200 without Content-Range is the whole file (native caps it)
+      if (!m && r.status === 206) throw new Error("partial answer without Content-Range");
+      pos += part.size;
+      total = m ? +m[1] : pos;
+      if (!video) break;
+    }
+    return new Blob(parts, { type: type || (video ? "video/mp4" : "image/jpeg") });
+  }
+  function buildTikTok(ctx, screen, tabBar) {
+    const wrap = el("div", "gh-tt");
+    wrap.dataset.open = "0";
+    wrap.innerHTML = `
+      <div class="gh-tt-pager"></div>
+      <div class="gh-tt-top"><span class="gh-tt-title">For You</span></div>
+      <div class="gh-tt-banner" style="display:none"><span>Sign in to TikTok for your own For You feed</span><button class="gh-tt-banner-btn gh-press" data-ttact="signin">Sign In</button></div>
+      <div class="gh-tt-empty" style="display:none">
+        <div class="gh-tt-empty-title">TikTok</div>
+        <div class="gh-tt-empty-text"></div>
+        <button class="gh-tt-empty-btn gh-press" data-ttact="signin">Sign in to TikTok</button>
+        <button class="gh-tt-empty-link gh-press" data-ttact="retry">Try Again</button>
+      </div>
+      <div class="gh-tt-loading"><div class="gh-spinner"></div></div>
+    `;
+    screen.insertBefore(wrap, tabBar);
+    const T = {
+      el: wrap, pager: wrap.querySelector(".gh-tt-pager"), banner: wrap.querySelector(".gh-tt-banner"),
+      empty: wrap.querySelector(".gh-tt-empty"), loading: wrap.querySelector(".gh-tt-loading"),
+      items: [], ids: new Set(), index: 0, slides: new Map(), started: false, signedIn: null,
+      drag: null, anim: false, moreAt: 0, emptyTimer: null, paused: false,
+    };
+    ctx.tiktok = T;
+    for (const b of wrap.querySelectorAll('[data-ttact="signin"]')) b.addEventListener("click", () => { haptic("light"); ttPost("signIn").catch(() => {}); });
+    wrap.querySelector('[data-ttact="retry"]').addEventListener("click", () => { haptic("light"); T.empty.style.display = "none"; T.loading.style.display = ""; ttPost("more").catch(() => {}); armEmptyTimer(ctx); });
+
+    // native -> ui.js (darkmobile world)
+    window.__ghostTikTok = {
+      items: (p) => ttAddItems(ctx, (p && p.items) || []),
+      status: (s) => ttApplyStatus(ctx, s || {}),
+      reset: () => { ttClear(ctx); if (T.el.dataset.open === "1") { T.loading.style.display = ""; armEmptyTimer(ctx); } },
+    };
+
+    // swipe: the finger drags the whole column; let go past 18% of the screen (or a quick flick) = next/previous
+    const H = () => T.pager.clientHeight || window.innerHeight;
+    T.pager.addEventListener("touchstart", (e) => {
+      if (T.anim || e.touches.length !== 1) return;
+      T.drag = { y0: e.touches[0].clientY, t0: nowMs(), dy: 0, moved: false };
+    }, { passive: true });
+    T.pager.addEventListener("touchmove", (e) => {
+      if (!T.drag) return;
+      let dy = (e.touches[0].clientY - T.drag.y0) * pagePxToLocal();
+      if (Math.abs(dy) > 6) T.drag.moved = true;
+      // rubber band at the ends
+      if ((dy > 0 && T.index === 0) || (dy < 0 && T.index >= T.items.length - 1)) dy *= 0.3;
+      T.drag.dy = dy;
+      layoutTikTok(ctx, dy);
+      if (T.drag.moved) e.preventDefault();
+    }, { passive: false });
+    const end = () => {
+      const d = T.drag; T.drag = null;
+      if (!d) return;
+      if (!d.moved) { toggleTikTokPause(ctx); return; }
+      const v = d.dy / Math.max(1, nowMs() - d.t0); // px per ms
+      let to = T.index;
+      if ((d.dy < -H() * 0.18 || v < -0.45) && T.index < T.items.length - 1) to = T.index + 1;
+      else if ((d.dy > H() * 0.18 || v > 0.45) && T.index > 0) to = T.index - 1;
+      goTikTok(ctx, to, d.dy);
+    };
+    T.pager.addEventListener("touchend", end);
+    T.pager.addEventListener("touchcancel", end);
+    // mouse / trackpad (no touch): wheel pages, click pauses
+    let wheelAt = 0;
+    T.pager.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      if (nowMs() - wheelAt < 450 || Math.abs(e.deltaY) < 12) return;
+      wheelAt = nowMs();
+      goTikTok(ctx, clamp(T.index + (e.deltaY > 0 ? 1 : -1), 0, Math.max(0, T.items.length - 1)), 0);
+    }, { passive: false });
+    T.pager.addEventListener("click", () => { if (!("ontouchstart" in window)) toggleTikTokPause(ctx); });
+
+    // pause whenever something covers the tab (Settings, the camera, a chat) or Ghost goes to the background
+    document.addEventListener("visibilitychange", () => syncTikTokPlayback(ctx));
+    T.coverTimer = null;
+    applyTikTokTab(ctx);
+    return T;
+  }
+  function tikTokCovered(ctx) {
+    const T = ctx.tiktok;
+    if (!T || T.el.dataset.open !== "1" || document.hidden) return true;
+    if (ctx.settings && ctx.settings.el.dataset.open === "1") return true;
+    if (ctx.camera && ctx.camera.el.dataset.open === "1") return true;
+    if (ctx.state.currentConvId) return true;
+    if (ctx.viewer && ctx.viewer.el && ctx.viewer.el.dataset.open === "1") return true;
+    return false;
+  }
+  function syncTikTokPlayback(ctx) {
+    const T = ctx.tiktok;
+    if (!T) return;
+    const covered = tikTokCovered(ctx);
+    for (const [i, s] of T.slides) {
+      const v = s.video;
+      if (!v) continue;
+      if (i === T.index && !covered && !T.paused && s.ready) { const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+      else { try { v.pause(); } catch (e) {} }
+    }
+  }
+  function applyTikTokTab(ctx) {
+    const T = ctx.tiktok;
+    if (!T) return;
+    const on = pref("tiktokTab") !== false;
+    const tab = ctx.home && ctx.home.screen.querySelector('[data-tab="tiktok"]');
+    if (tab) tab.style.display = on ? "" : "none";
+    if (!on && (T.started || T.el.dataset.open === "1")) {
+      if (T.el.dataset.open === "1") { closeTikTok(ctx); const chats = ctx.home.screen.querySelector('[data-tab="chats"]'); if (chats) { for (const t of ctx.home.screen.querySelectorAll(".gh-tab-btn")) t.dataset.active = "0"; chats.dataset.active = "1"; } }
+      ttClear(ctx);
+      T.started = false; T.signedIn = null;
+      ttPost("stop").catch(() => {});
+    }
+  }
+  function openTikTok(ctx) {
+    const T = ctx.tiktok;
+    if (!T || pref("tiktokTab") === false) return;
+    T.el.dataset.open = "1";
+    ttPost("active", { on: true }).catch(() => {});
+    if (!T.started) {
+      T.started = true;
+      T.loading.style.display = "";
+      ttPost("start", { fresh: true }).catch(() => {});
+      ttPost("status").then((s) => ttApplyStatus(ctx, s || {}), () => {});
+      armEmptyTimer(ctx);
+    }
+    layoutTikTok(ctx, 0);
+    syncTikTokPlayback(ctx);
+    clearInterval(T.coverTimer);
+    T.coverTimer = setInterval(() => syncTikTokPlayback(ctx), 700);
+  }
+  function closeTikTok(ctx) {
+    const T = ctx.tiktok;
+    if (!T) return;
+    T.el.dataset.open = "0";
+    clearInterval(T.coverTimer); T.coverTimer = null;
+    syncTikTokPlayback(ctx);
+    if (T.started) ttPost("active", { on: false }).catch(() => {});
+  }
+  function armEmptyTimer(ctx) {
+    const T = ctx.tiktok;
+    clearTimeout(T.emptyTimer);
+    T.emptyTimer = setTimeout(() => {
+      if (T.items.length) return;
+      T.loading.style.display = "none";
+      T.empty.style.display = "";
+      T.empty.querySelector(".gh-tt-empty-text").textContent = T.signedIn
+        ? "TikTok didn't send any videos. Check your connection and try again."
+        : "TikTok didn't send any videos. Signing in usually fixes it (use your phone number, email or username - Google sign-in doesn't work inside apps).";
+      T.empty.querySelector('[data-ttact="signin"]').style.display = T.signedIn ? "none" : "";
+    }, 15000);
+  }
+  function ttApplyStatus(ctx, s) {
+    const T = ctx.tiktok;
+    if (!T) return;
+    T.signedIn = !!s.signedIn;
+    T.user = s.user || null;
+    T.banner.style.display = T.signedIn || !T.started ? "none" : "";
+  }
+  function ttAddItems(ctx, list) {
+    const T = ctx.tiktok;
+    if (!T || !T.started || pref("tiktokTab") === false) return;
+    let added = 0;
+    for (const it of list) {
+      if (!it || !it.id || !it.play || T.ids.has(it.id)) continue;
+      T.ids.add(it.id); T.items.push(it); added++;
+    }
+    if (!added) return;
+    T.loading.style.display = "none";
+    T.empty.style.display = "none";
+    clearTimeout(T.emptyTimer);
+    layoutTikTok(ctx, 0);
+    syncTikTokPlayback(ctx);
+  }
+  function ttClear(ctx) {
+    const T = ctx.tiktok;
+    for (const i of Array.from(T.slides.keys())) dropTikTokSlide(ctx, i);
+    T.items = []; T.ids = new Set(); T.index = 0; T.paused = false;
+    clearTimeout(T.emptyTimer);
+    T.loading.style.display = "none"; T.empty.style.display = "none"; T.banner.style.display = "none";
+  }
+  function toggleTikTokPause(ctx) {
+    const T = ctx.tiktok;
+    const s = T.slides.get(T.index);
+    if (!s) return;
+    T.paused = !T.paused;
+    haptic("light");
+    s.el.dataset.paused = T.paused ? "1" : "0";
+    syncTikTokPlayback(ctx);
+  }
+  function goTikTok(ctx, to, fromDy) {
+    const T = ctx.tiktok;
+    const changed = to !== T.index;
+    const H = T.pager.clientHeight || window.innerHeight;
+    // animate from where the finger left the column to the new resting place
+    T.anim = true;
+    const startOffset = fromDy + (changed ? (to > T.index ? H : -H) : 0);
+    if (changed) {
+      const old = T.slides.get(T.index);
+      if (old) { old.el.dataset.paused = "0"; if (old.video) { try { old.video.pause(); old.video.currentTime = 0; } catch (e) {} } }
+      T.index = to; T.paused = false;
+      haptic("light");
+    }
+    layoutTikTok(ctx, startOffset, true);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      T.pager.dataset.anim = "1";
+      layoutTikTok(ctx, 0);
+      setTimeout(() => { T.pager.dataset.anim = "0"; T.anim = false; syncTikTokPlayback(ctx); }, 300);
+    }));
+    if (T.index >= T.items.length - 3 && nowMs() - T.moreAt > 4000) { T.moreAt = nowMs(); ttPost("more").catch(() => {}); }
+  }
+  // Puts slides index-1 .. index+2 in place (offset = the finger's drag), builds missing ones, frees the rest.
+  function layoutTikTok(ctx, offset, noAnim) {
+    const T = ctx.tiktok;
+    if (noAnim) T.pager.dataset.anim = "0";
+    const H = T.pager.clientHeight || window.innerHeight;
+    const lo = Math.max(0, T.index - TT_KEEP_BEHIND), hi = Math.min(T.items.length - 1, T.index + TT_KEEP_AHEAD);
+    for (const i of Array.from(T.slides.keys())) if (i < lo || i > hi) dropTikTokSlide(ctx, i);
+    for (let i = lo; i <= hi; i++) {
+      let s = T.slides.get(i);
+      if (!s) s = buildTikTokSlide(ctx, i);
+      s.el.style.transform = `translate3d(0, ${Math.round((i - T.index) * H + offset)}px, 0)`;
+      s.el.dataset.current = i === T.index ? "1" : "0";
+    }
+  }
+  function fmtCount(n) {
+    const x = Number(n) || 0;
+    if (x >= 1e9) return (x / 1e9).toFixed(x >= 1e10 ? 0 : 1).replace(/\.0$/, "") + "B";
+    if (x >= 1e6) return (x / 1e6).toFixed(x >= 1e7 ? 0 : 1).replace(/\.0$/, "") + "M";
+    if (x >= 1e3) return (x / 1e3).toFixed(x >= 1e4 ? 0 : 1).replace(/\.0$/, "") + "K";
+    return String(x);
+  }
+  function buildTikTokSlide(ctx, i) {
+    const T = ctx.tiktok;
+    const it = T.items[i];
+    const slide = el("div", "gh-tt-slide");
+    slide.dataset.i = String(i);
+    slide.innerHTML = `
+      <img class="gh-tt-cover" alt="">
+      <video class="gh-tt-video" playsinline webkit-playsinline loop preload="auto"></video>
+      <div class="gh-tt-shade"></div>
+      <div class="gh-tt-info">
+        <div class="gh-tt-author"><span class="gh-tt-av"></span><span class="gh-tt-name"></span></div>
+        <div class="gh-tt-desc"></div>
+        <div class="gh-tt-music"></div>
+      </div>
+      <div class="gh-tt-side"><div class="gh-tt-stat"></div></div>
+      <div class="gh-tt-paused-ic"></div>
+      <div class="gh-tt-progress"><i></i></div>
+    `;
+    slide.querySelector(".gh-tt-name").textContent = "@" + (it.author && (it.author.uniqueId || it.author.nickname) || "tiktok");
+    slide.querySelector(".gh-tt-desc").textContent = it.desc || "";
+    const mus = slide.querySelector(".gh-tt-music");
+    if (it.music) { mus.append(icon("music", 13)); mus.append(document.createTextNode(" " + it.music)); } else mus.remove();
+    const stat = slide.querySelector(".gh-tt-stat");
+    stat.append(icon("heartFill", 30), Object.assign(el("span"), { textContent: fmtCount(it.stats && it.stats.likes) }));
+    slide.querySelector(".gh-tt-paused-ic").appendChild(icon("play", 54));
+    const video = slide.querySelector("video");
+    const cover = slide.querySelector(".gh-tt-cover");
+    const bar = slide.querySelector(".gh-tt-progress i");
+    const s = { el: slide, video, cover, bar, ready: false, urls: [], tok: {} };
+    video.addEventListener("timeupdate", () => { if (video.duration > 0) bar.style.width = (100 * video.currentTime / video.duration).toFixed(2) + "%"; });
+    const keep = (u) => { s.urls.push(u); return u; };
+    const tok = s.tok;
+    if (it.cover) ttBlob(it.cover, false).then((b) => { if (s.tok !== tok || !T.slides.has(i)) return; cover.src = keep(URL.createObjectURL(b)); }, () => {});
+    if (it.author && it.author.avatar) ttBlob(it.author.avatar, false).then((b) => {
+      if (s.tok !== tok || !T.slides.has(i)) return;
+      const img = el("img"); img.alt = ""; img.src = keep(URL.createObjectURL(b)); slide.querySelector(".gh-tt-av").appendChild(img);
+    }, () => {});
+    ttBlob(it.play, true, () => s.tok === tok && T.slides.has(i)).then((b) => {
+      if (s.tok !== tok || !T.slides.has(i)) return;
+      video.src = keep(URL.createObjectURL(b));
+      s.ready = true;
+      slide.dataset.ready = "1";
+      syncTikTokPlayback(ctx);
+    }, (e) => { if (s.tok !== tok) return; slide.dataset.failed = "1"; gtrail("tiktok video failed " + (e && e.message || e)); });
+    T.pager.appendChild(slide);
+    T.slides.set(i, s);
+    return s;
+  }
+  function dropTikTokSlide(ctx, i) {
+    const T = ctx.tiktok;
+    const s = T.slides.get(i);
+    if (!s) return;
+    T.slides.delete(i);
+    s.tok = null;
+    try { s.video.pause(); s.video.removeAttribute("src"); s.video.load(); } catch (e) {}
+    for (const u of s.urls) URL.revokeObjectURL(u);
+    s.urls = [];
+    s.el.remove();
   }
 
   async function loadGallery(ctx) {
