@@ -1663,7 +1663,9 @@ input, textarea {
 .gh-snap-time { font-size: 11.5px; font-weight: 400; color: var(--gh-text-secondary); margin-left: 2px; }
 .gh-snap-row[data-loading="1"] .gh-snap-mark { animation: gh-pulse 0.8s ease-in-out infinite; }
 .gh-snap-row.gh-press:active { transform: scale(0.97); }
-.gh-viewer-overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 1; }
+/* background: transparent beats ".gh-viewer-media img { background: #000 }" - that black box covered the whole video, so
+   every video snap with a caption played as black + caption + sound (device 2026-09-28, Nate's/Edward's snaps) */
+.gh-viewer-media .gh-viewer-overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 1; background: transparent; }
 
 /* @mention suggestions, above the message box */
 .gh-mention-box { display: none; flex: none; max-height: 220px; overflow-y: auto; background: var(--gh-bg-header); border-top: 0.5px solid var(--gh-divider); }
