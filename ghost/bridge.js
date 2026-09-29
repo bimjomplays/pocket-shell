@@ -206,6 +206,7 @@
     return store ? safe("state", () => store.getState(), null) : null;
   }
 
+  let voiceSendBusy = false; // bridge sendVoiceNote: one Audio swap at a time
   function messaging() {
     return (state() || {}).messaging || {};
   }
@@ -2246,12 +2247,45 @@
 
     // Voice note: Snapchat's own voice-note sender (main.js 66836, the "$case:\"note\"...audio" encoder): it measures
     // the clip, uploads it and sends the note - messaging.sendVoiceNote(destinations, blob, locale).
-    async sendVoiceNote(conversationId, blob) {
+    // Snapchat measures the clip first with `new Audio()` + onloadeddata (main.js 73796 "$i", 5 s timeout, onstalled =
+    // failure). In the iPhone web view an Audio element that was never played often doesn't load its data (no preload
+    // without a tap) or reports a recorder clip's duration as Infinity/NaN, so the send failed with "Couldn't send"
+    // (user report 2026-09-29). Ghost knows how long it recorded: while Snapchat's sender runs, `Audio` is swapped for a
+    // stand-in that reports that duration (anything else constructing Audio in that moment gets the real one).
+    async sendVoiceNote(conversationId, blob, durationMs) {
       requireStore();
       const m = messaging();
       if (typeof m.sendVoiceNote !== "function") throw new Error("voice notes aren't available");
       const file = blob instanceof File ? blob : new File([blob], "voice.m4a", { type: blob.type || "audio/mp4" });
-      await m.sendVoiceNote({ phoneNumbers: [], conversations: [convIdObj(conversationId)], stories: [], massSnaps: [] }, file, navigator.language || "en-US");
+      let secs = Number(durationMs) > 0 ? Number(durationMs) / 1000 : 0;
+      if (!secs) {
+        try {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          const ac = new AC(); const buf = await ac.decodeAudioData(await file.arrayBuffer()); secs = buf.duration; ac.close && ac.close();
+        } catch (e) { secs = 1; }
+      }
+      secs = Math.max(0.5, Math.round(secs * 10) / 10);
+      // one voice send at a time (a second overlapping swap would save the stand-in as "the real Audio")
+      if (voiceSendBusy) throw new Error("still sending the last voice message");
+      voiceSendBusy = true;
+      const RealAudio = window.Audio;
+      let used = false;
+      // only Snapchat's measurer builds `new Audio()` with no source; call ring sounds pass one and get the real thing
+      function MeasuredAudio(src) {
+        if (used || arguments.length) return arguments.length ? new RealAudio(src) : new RealAudio();
+        used = true;
+        const a = { duration: secs, onloadeddata: null, onerror: null, onabort: null, onstalled: null };
+        Object.defineProperty(a, "src", { set(v) { setTimeout(() => { if (typeof a.onloadeddata === "function") a.onloadeddata(); }, 0); }, get() { return ""; } });
+        return a;
+      }
+      MeasuredAudio.prototype = RealAudio.prototype;
+      window.Audio = MeasuredAudio;
+      // Snapchat measures before it uploads (main.js 64xxx "Ee": await $i(url) first), so 30 s is plenty; never leave it swapped
+      const restore = () => { if (window.Audio === MeasuredAudio) window.Audio = RealAudio; };
+      const guard = setTimeout(restore, 30000);
+      try {
+        await m.sendVoiceNote({ phoneNumbers: [], conversations: [convIdObj(conversationId)], stories: [], massSnaps: [] }, file, navigator.language || "en-US");
+      } finally { clearTimeout(guard); restore(); voiceSendBusy = false; }
       return true;
     },
 

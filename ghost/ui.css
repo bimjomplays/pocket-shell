@@ -1052,6 +1052,9 @@ input, textarea {
   transform: scale(0.4) rotate(-45deg);
   opacity: 0;
 }
+/* hidden send button sits on top of the mic: without this it took the touches (and .gh-press:active faded it in at
+   0.8), so holding the mic showed a send button and rarely started recording (user report 2026-09-29) */
+.gh-composer-send:not([data-show="1"]) { pointer-events: none; }
 .gh-composer-send[data-show="1"] { transform: scale(1) rotate(0deg); opacity: 1; }
 .gh-composer-mic[data-hide="1"] { transform: scale(0.4) rotate(45deg); opacity: 0; pointer-events: none; }
 .gh-composer-mic svg, .gh-composer-send svg { width: 19px; height: 19px; }

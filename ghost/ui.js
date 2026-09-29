@@ -221,7 +221,7 @@
     sendSticker: (id, sticker) => bridge.call("sendSticker", [id, sticker], 30000),
     stickerContent: (id, msgId) => bridge.call("stickerContent", [id, msgId]),
     sendStickerRaw: (id, content, type) => bridge.call("sendStickerRaw", [id, content, type], 30000),
-    sendVoiceNote: (id, blob) => bridge.call("sendVoiceNote", [id, blob], 120000),
+    sendVoiceNote: (id, blob, ms) => bridge.call("sendVoiceNote", [id, blob, ms], 120000),
     sendMedia: (id, blob, opts) => bridge.call("sendMedia", [id, blob, opts || {}], 120000), // uploads can be slow on cellular
     sendSnap: (ids, blob, opts) => bridge.call("sendSnap", [ids, blob, opts || {}], 120000),
     react: (id, messageId, emoji) => bridge.call("react", [id, messageId, emoji]),
@@ -5645,60 +5645,74 @@
     const bar = el("div", "gh-rec-bar");
     bar.innerHTML = '<span class="gh-rec-dot"></span><span class="gh-rec-time">0:00</span><span class="gh-rec-hint">‹ Slide to cancel</span>';
     screen.querySelector(".gh-composer").appendChild(bar);
-    const r = { rec: null, stream: null, chunks: [], t0: 0, timer: null, x0: 0, cancelled: false, starting: false };
-    const stopAll = () => {
-      clearInterval(r.timer);
+    // One recording "session" per press, so a quick second press can't take over the first one's stream/chunks while
+    // its recorder is still flushing (review 2026-09-29). r.cur = the press in progress (finger down) or null.
+    const r = { cur: null, timer: null };
+    const resetLook = () => {
+      clearInterval(r.timer); r.timer = null;
       bar.dataset.on = "0"; mic.dataset.recording = "0"; bar.style.setProperty("--rec-x", "0px");
-      if (r.stream) { r.stream.getTracks().forEach((t) => t.stop()); r.stream = null; }
     };
+    const stopStream = (ss) => { if (ss.stream) { ss.stream.getTracks().forEach((t) => t.stop()); ss.stream = null; } };
     const start = async (x) => {
-      if (r.rec || r.starting) return;
-      r.starting = true; r.cancelled = false; r.x0 = x; r.chunks = [];
+      if (r.cur) return;
+      const ss = { rec: null, stream: null, chunks: [], t0: 0, down: nowMs(), x0: x, done: false };
+      r.cur = ss;
+      // react on the touch itself: the mic can take a moment to open, the finger shouldn't wait for it
+      haptic("medium");
+      bar.dataset.on = "1"; mic.dataset.recording = "1";
+      bar.querySelector(".gh-rec-time").textContent = "0:00";
       try {
-        r.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-        if (r.cancelled) { stopAll(); r.starting = false; return; }
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        ss.stream = stream;
+        if (ss.done) { stopStream(ss); return; } // let go / slid away before the mic opened
         const type = ["audio/mp4", "audio/mp4;codecs=mp4a.40.2", "audio/webm"].find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t));
-        r.rec = type ? new MediaRecorder(r.stream, { mimeType: type, audioBitsPerSecond: 64000 }) : new MediaRecorder(r.stream);
-        r.rec.ondataavailable = (e) => { if (e.data && e.data.size) r.chunks.push(e.data); };
-        r.rec.start(200);
-        r.t0 = nowMs();
-        haptic("medium");
-        bar.dataset.on = "1"; mic.dataset.recording = "1";
-        const tick = () => { const s2 = Math.floor((nowMs() - r.t0) / 1000); bar.querySelector(".gh-rec-time").textContent = Math.floor(s2 / 60) + ":" + String(s2 % 60).padStart(2, "0"); if (s2 >= 300) finish(false); };
+        ss.rec = type ? new MediaRecorder(stream, { mimeType: type, audioBitsPerSecond: 64000 }) : new MediaRecorder(stream);
+        ss.rec.ondataavailable = (e) => { if (e.data && e.data.size) ss.chunks.push(e.data); };
+        ss.rec.start(200);
+        ss.t0 = nowMs();
+        const tick = () => { if (r.cur !== ss) return; const s2 = Math.floor((nowMs() - ss.t0) / 1000); bar.querySelector(".gh-rec-time").textContent = Math.floor(s2 / 60) + ":" + String(s2 % 60).padStart(2, "0"); if (s2 >= 300) finish(false); };
         tick(); r.timer = setInterval(tick, 250);
       } catch (e) {
         gtrail("mic failed " + (e && (e.name || e.message)));
-        ctx.showToast("Microphone isn't available - allow it for Ghost in Settings");
-        stopAll();
+        stopStream(ss);
+        if (r.cur === ss) { r.cur = null; resetLook(); }
+        if (!ss.done) ctx.showToast("Microphone isn't available - allow it for Ghost in Settings");
+        ss.done = true;
       }
-      r.starting = false;
     };
     const finish = (cancel) => {
-      const rec = r.rec;
-      if (!rec) { r.cancelled = true; return; }
-      r.rec = null;
-      const long = nowMs() - r.t0 > 700;
+      const ss = r.cur;
+      if (!ss || ss.done) return;
+      ss.done = true; r.cur = null; resetLook();
+      const rec = ss.rec;
+      if (!rec) {
+        // let go before the mic opened (start() stops the stream when it arrives)
+        if (!cancel) ctx.showToast(nowMs() - ss.down > 700 ? "The microphone took too long - hold again" : "Hold to record, let go to send");
+        return;
+      }
+      const durMs = nowMs() - ss.t0;
+      const long = durMs > 700;
       rec.onstop = async () => {
-        const blob = new Blob(r.chunks, { type: (rec.mimeType || "audio/mp4").split(";")[0] });
-        stopAll();
+        const blob = new Blob(ss.chunks, { type: (rec.mimeType || "audio/mp4").split(";")[0] });
+        stopStream(ss);
         if (cancel || !long || !blob.size) { if (!cancel && !long) ctx.showToast("Hold to record, let go to send"); return; }
         haptic("light");
         const convId = ctx.state.currentConvId;
-        try { await api.sendVoiceNote(convId, blob); }
+        try { await api.sendVoiceNote(convId, blob, durMs); }
         catch (e) { gtrail("voice send failed " + (e && e.message || e)); ctx.showToast("Couldn't send the voice message"); }
       };
-      try { rec.stop(); } catch (e) { stopAll(); }
+      try { rec.stop(); } catch (e) { stopStream(ss); }
     };
     mic.addEventListener("touchstart", (e) => { e.preventDefault(); start(e.touches[0].clientX); }, { passive: false });
     mic.addEventListener("touchmove", (e) => {
-      if (!r.rec) return;
-      const dx = Math.min(0, e.touches[0].clientX - r.x0);
+      if (!r.cur) return;
+      const dx = Math.min(0, e.touches[0].clientX - r.cur.x0);
       bar.style.setProperty("--rec-x", dx * pagePxToLocal() + "px");
       if (dx < -110) { haptic("light"); finish(true); }
     }, { passive: true });
     mic.addEventListener("touchend", () => finish(false));
     mic.addEventListener("touchcancel", () => finish(true));
-    mic.addEventListener("click", (e) => { if (!("ontouchstart" in window)) { if (r.rec) finish(false); else start(e.clientX); } });
+    mic.addEventListener("click", (e) => { if (!("ontouchstart" in window)) { if (r.cur) finish(false); else start(e.clientX); } });
   }
 
   // ---- Save to Photos (the app writes to the camera roll; nothing is sent to Snapchat) ------------------
