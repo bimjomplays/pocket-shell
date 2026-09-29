@@ -200,7 +200,7 @@ input, textarea {
      didn't repaint changed rows until it was scrolled (device report 2026-09-26) - layers only while moving */
 }
 .gh-screen.gh-anim, .gh-screen[data-dragging] { will-change: transform; }
-.gh-screen[data-side="right"] { transform: translate3d(100%, 0, 0); }
+.gh-screen[data-side="right"] { transform: translateX(100%); visibility: hidden; } /* at rest: no layer (see wakeScreens) */
 .gh-screen.gh-anim { transition: transform 0.38s var(--gh-spring); }
 .gh-shade {
   position: absolute;

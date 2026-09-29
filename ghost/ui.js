@@ -411,7 +411,9 @@
     // purpose (body is outside it); this is the only light-DOM CSS this file ever writes.
     const lightStyle = document.createElement("style");
     lightStyle.id = "ghost-light-style";
-    lightStyle.textContent = 'html[data-ghost-on] body { visibility: hidden !important; }';
+    // content-visibility: Snapchat's hidden page was still laid out and given full-screen GPU layers under Ghost
+    // (~24 MB on the phone, LayerTree 2026-09-28); now its contents aren't rendered at all while Ghost is up
+    lightStyle.textContent = 'html[data-ghost-on] body { visibility: hidden !important; content-visibility: hidden !important; }';
     document.documentElement.appendChild(lightStyle);
     const host = document.createElement("ghost-app");
     host.id = "ghost-app-root";
@@ -1539,7 +1541,7 @@
     // add a fresh document-level listener (closed over that call's canvas/loop) every time the wallpaper kind
     // changed (switching chats, switching the wallpaper in Settings), and never removed the old ones, which
     // piled up forever (the exact "grew until iOS killed the page" problem this file already fights elsewhere).
-    document.addEventListener("visibilitychange", () => { if (!document.hidden && conv.liveWall) conv.liveWall.start(); });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden && conv.liveWall && ctx.state.currentConvId) conv.liveWall.start(); });
     return conv;
   }
 
@@ -1734,6 +1736,7 @@
     for (const im of conv.messages.querySelectorAll("img")) im.removeAttribute("src");
     conv.messages.replaceChildren(conv.topSpacer, conv.bottomSpacer);
     conv._paintedConv = null;
+    if (conv.liveWall) conv.liveWall.free();
   }
   function scheduleMediaRelease(ctx, convId) {
     if (!convId) return;
@@ -1747,15 +1750,22 @@
       api.releaseMedia(convId).catch(() => {});
     }, 4000);
   }
-  function closeConversationScreen(ctx) {
+  // Everything that leaving a chat means, however you leave it. The swipe-back gesture used to do only part of
+  // this (no media release, no DOM unload, last chat not forgotten): every chat you swiped out of kept its photos
+  // and videos in memory for the rest of the page's life, so iOS reloaded Ghost after a few chats (device 2026-09-28).
+  function leaveConversation(ctx) {
     closeChatSearch(ctx);
     scheduleMediaRelease(ctx, ctx.state.currentConvId);
     storage.set("ghostLastConv", "");
     const id = ctx.state.currentConvId;
     if (id) api.closeConversation(id).catch(() => {});
     ctx.state.currentConvId = null;
+    if (ctx.conv.liveWall) ctx.conv.liveWall.stop();
     stopVoice();
     syncPresence(ctx);
+  }
+  function closeConversationScreen(ctx) {
+    leaveConversation(ctx);
     navigateTo(ctx, "home", true);
   }
 
@@ -4722,7 +4732,8 @@
     const size = () => {
       const r = cv.getBoundingClientRect();
       const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
-      const k = spec.lowRes ? 60 / w : Math.min(2, window.devicePixelRatio || 1);
+      // stars: 1.5x at most - at 2x the canvas alone was 10.7 MB of pixels (heap snapshot 2026-09-28)
+      const k = spec.lowRes ? 60 / w : Math.min(1.5, window.devicePixelRatio || 1);
       const nw = Math.round(w * k), nh = Math.round(h * k);
       if (nw !== W || nh !== H) { W = cv.width = nw; H = cv.height = nh; stars = null; }
     };
@@ -4762,7 +4773,9 @@
       if (t - last > 33 || !last) { last = t; draw(t); }
       if (!still && !document.hidden && ctx.state.currentConvId) raf = requestAnimationFrame(loop);
     };
-    const lw = { kind, el: cv, start: () => { if (!raf) raf = requestAnimationFrame(loop); }, stop: () => { if (raf) cancelAnimationFrame(raf); raf = 0; } };
+    const lw = { kind, el: cv, start: () => { if (!raf) raf = requestAnimationFrame(loop); }, stop: () => { if (raf) cancelAnimationFrame(raf); raf = 0; },
+      // a left chat's canvas gives its pixels back (unloadConvDom); the next draw sizes it again
+      free: () => { lw.stop(); W = H = 0; cv.width = cv.height = 0; stars = null; } };
     // (resume-on-visible is one page-lifetime listener set up once in buildConversation, not per-call here)
     conv.liveWall = lw;
     lw.start();
@@ -6573,7 +6586,11 @@
     const m = q.msgs[idx];
     const convId = m.conversationId || q.convId || ctx.state.currentConvId;
     const p = resolveSnapPart(ctx, m, q.mode, convId).then((media) => {
-      const ref = (media && media[0]) || null;
+      // only the first item used to be shown. A snap with music can come back as several items, and when the first
+      // is the music (an audio-only mp4, which sniffs as "video") the snap played black with just the sound and the
+      // caption (device 2026-09-28). The rest ride along as `parts`; showSnapVideo finds the picture among them.
+      const ref = media && media[0] ? Object.assign({}, media[0], media.length > 1 ? { parts: media.slice(1) } : {}) : null;
+      if (media && media.length) gtrail("snap media " + media.map((x) => x.type + (x.width ? " " + x.width + "x" + x.height : "") + (x.overlay ? " +overlay" : "")).join(", "));
       if (ref) {
         m.opened = true;
         if (q.mode === "unopened" || q.mode === "replay") {
@@ -6636,16 +6653,50 @@
     v.media.appendChild(img);
     if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); }
     v.currentRef = ref;
+    // photo first, music second: play the part with no picture for its sound (a part WITH a picture is left alone)
+    const tune = (ref.parts || []).find((x) => x.type === "video" && x.url);
+    if (tune) {
+      const a = el("video", "gh-viewer-still"); a.playsInline = true; a.src = tune.url; a.style.opacity = "0"; a.loop = q.mode === "saved";
+      v.media.insertBefore(a, img);
+      a.addEventListener("loadedmetadata", () => { if (a.isConnected && a.videoWidth === 0) { a.play().catch(() => {}); gtrail("snap: photo with a music part"); } }, { once: true });
+    }
     // a saved snap stays up until you tap or close it, like Snapchat (it used to close itself after 5 s -
     // device 2026-09-28); new/replayed snaps still move on by themselves
     if (q.mode === "saved") { startSnapSegmentTimer(ctx, idx, 0, null); clearTimeout(v.timer); return; }
     startSnapSegmentTimer(ctx, idx, 5000, () => advanceSnapQueue(ctx, q, idx));
+  }
+  // A "video" with no picture (videoWidth 0 once its metadata is in) is a snap's music track: show the snap's picture
+  // from its other parts behind it (a photo, or a silent video played muted alongside) and keep the track playing
+  // for the sound. Nothing to show -> the video stays as it was (black, as before) and the trail says so.
+  function snapPictureFor(ctx, ref, video) {
+    const parts = ref.parts || [];
+    const pic = parts.find((x) => x.type === "image" && x.url) || parts.find((x) => x.type === "video" && x.url);
+    const apply = () => {
+      if (!video.isConnected || video.videoWidth > 0 || video._ghostPic) return;
+      if (!pic) { gtrail("snap video has no picture and no other part (" + parts.length + " parts)"); return; }
+      video._ghostPic = true;
+      let back;
+      if (pic.type === "image") { back = el("img", "gh-viewer-still"); back.src = pic.url; back.alt = ""; }
+      else {
+        back = el("video", "gh-viewer-still"); back.muted = true; back.loop = true; back.playsInline = true; back.src = pic.url;
+        video.addEventListener("pause", () => { try { back.pause(); } catch (e) {} });
+        video.addEventListener("play", () => { back.play().catch(() => {}); });
+      }
+      video.parentNode.insertBefore(back, video);
+      if (back.tagName === "VIDEO") back.play().catch(() => {});
+      video.style.opacity = "0";
+      if (pic.overlay && !ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = pic.overlay; ov.alt = ""; video.parentNode.appendChild(ov); }
+      gtrail("snap: music track shown over its " + pic.type + " part");
+    };
+    if (video.readyState >= 1) apply(); else video.addEventListener("loadedmetadata", apply, { once: true });
   }
   function showSnapVideo(ctx, q, idx, ref, video) {
     const v = ctx.viewer;
     v.media.innerHTML = "";
     v.media.appendChild(video);
     if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); }
+    video.style.opacity = ""; video._ghostPic = false;
+    if (ref.parts) snapPictureFor(ctx, ref, video);
     v.currentRef = ref;
     video.currentTime = 0;
     video.play().catch(() => {});
@@ -10520,15 +10571,37 @@
   // =====================================================================================================
   // Navigation: push/pop + interactive drag between home <-> conversation (like the native apps)
   // =====================================================================================================
+  // Screens only become GPU layers while they move. At rest, the inline translate3d (and a gh-anim that a swipe never
+  // took off again) kept both full-screen screens composited for good, ~50 MB each, and the chat parked off to the
+  // side kept its wallpaper canvas and message-list layers as well (LayerTree on the phone 2026-09-28: 251 MB of
+  // layers on the chat list). So once still: plain 2D transforms, and the covered screen is visibility:hidden
+  // (not display:none, which would lose its scroll position and layout).
+  function wakeScreens(ctx) {
+    ctx.state.navSeq = (ctx.state.navSeq || 0) + 1;
+    ctx.home.screen.style.visibility = "visible"; ctx.conv.screen.style.visibility = "visible"; // (beats the CSS start state)
+  }
+  function restScreens(ctx, dir) {
+    const home = ctx.home.screen, conv = ctx.conv.screen, p = ctx.state.navProgress;
+    if (p !== 0 && p !== 1) return;
+    for (const e of [conv, home, ctx.shade]) e.classList.remove("gh-anim");
+    // (the open chat keeps its layer: flattening it made scrolling repaint the whole screen in the scroll-perf rig)
+    if (p === 1) { conv.style.transform = "translate3d(0,0,0)"; home.style.transform = "translateX(-30%)"; home.style.visibility = "hidden"; }
+    else { home.style.transform = "none"; conv.style.transform = `translateX(${(dir || 1) * 100}%)`; conv.style.visibility = "hidden"; }
+  }
+  function restScreensLater(ctx, dir, ms) {
+    const seq = ctx.state.navSeq;
+    setTimeout(() => { if (ctx.state.navSeq === seq) restScreens(ctx, dir); }, ms);
+  }
   function navigateTo(ctx, screenName, animate) {
     const home = ctx.home.screen, conv = ctx.conv.screen, shade = ctx.shade;
     const showConv = screenName === "conv";
+    wakeScreens(ctx);
     if (animate) { conv.classList.add("gh-anim"); home.classList.add("gh-anim"); shade.classList.add("gh-anim"); }
     conv.style.transform = showConv ? "translate3d(0,0,0)" : "translate3d(100%,0,0)";
     home.style.transform = showConv ? "translate3d(-30%,0,0)" : "translate3d(0,0,0)";
     shade.style.opacity = showConv ? "0.15" : "0";
     ctx.state.navProgress = showConv ? 1 : 0;
-    if (animate) setTimeout(() => { conv.classList.remove("gh-anim"); home.classList.remove("gh-anim"); shade.classList.remove("gh-anim"); }, 340);
+    if (animate) restScreensLater(ctx, 1, 400); else restScreens(ctx, 1);
   }
 
   function initNavGesture(ctx) {
@@ -10542,12 +10615,15 @@
     let dir = 1;
     function setProgress(p, animate) {
       p = clamp(p, 0, 1);
+      wakeScreens(ctx);
       if (animate) { conv.classList.add("gh-anim"); home.classList.add("gh-anim"); shade.classList.add("gh-anim"); }
       else { conv.classList.remove("gh-anim"); home.classList.remove("gh-anim"); shade.classList.remove("gh-anim"); }
       conv.style.transform = `translate3d(${dir * (1 - p) * 100}%,0,0)`;
       home.style.transform = `translate3d(${-dir * 30 * p}%,0,0)`;
       shade.style.opacity = String(0.15 * p);
       ctx.state.navProgress = p;
+      // settled (not mid-drag): drop the layers once the spring has finished
+      if (animate) restScreensLater(ctx, dir, 420); else if (!g) restScreens(ctx, dir);
     }
 
     function begin(kind, e, wrapRowId) {
@@ -10611,12 +10687,8 @@
           setProgress(0, true);
           // after a leftward exit the chat sits off to the LEFT; put it back on the right (off screen, no animation)
           // so the next chat slides in from the right as usual
-          if (dir < 0) setTimeout(() => { if (ctx.state.navProgress === 0) { dir = 1; setProgress(0, false); } }, 380);
-          const id = ctx.state.currentConvId;
-          if (id) api.closeConversation(id).catch(() => {});
-          ctx.state.currentConvId = null;
-          stopVoice();
-          syncPresence(ctx);
+          if (dir < 0) { const seq = ctx.state.navSeq; setTimeout(() => { if (ctx.state.navProgress === 0 && ctx.state.navSeq === seq) { dir = 1; setProgress(0, false); } }, 380); }
+          leaveConversation(ctx);
         } else {
           setProgress(1, true); // spring back to the conversation, still open
         }
