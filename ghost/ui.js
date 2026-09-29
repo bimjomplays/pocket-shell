@@ -1629,7 +1629,6 @@
     }
     loadChatColors(ctx, conversationId);
     ctx.conv.openedAt = nowMs();
-    setTimeout(() => { if (ctx.conv.liveWall) ctx.conv.liveWall.start(); }, 0);
     ctx.conv.peekId = null;
     applyChatWallpaper(ctx, conversationId);
     ctx.state.currentConvId = conversationId;
@@ -2611,7 +2610,14 @@
   // back empty, the empty result was cached, and your sent GIFs never appeared). So an empty answer is retried a few
   // times with backoff, and is never cached - the next repaint asks again.
   const MEDIA_RETRY_MS = [1500, 3500, 7000, 15000];
+  let mediaHoldTimer = 0;
   function pumpMedia() {
+    // not while a chat is sliding in or out: decoding photos/videos on top of the slide's own layers is what pushed the
+    // page over iOS's limit (it waits for restScreens, with a timer in case nothing settles)
+    if (mediaCtxRef && mediaCtxRef.state.screensMoving) {
+      if (!mediaHoldTimer) mediaHoldTimer = setTimeout(() => { mediaHoldTimer = 0; if (mediaCtxRef) mediaCtxRef.state.screensMoving = false; pumpMedia(); }, 900);
+      return;
+    }
     while (mediaActive < 3 && mediaWaiting.length) {
       const job = mediaWaiting.shift();
       const { m, resolve } = job;
@@ -4732,8 +4738,9 @@
     const size = () => {
       const r = cv.getBoundingClientRect();
       const w = Math.max(1, Math.round(r.width)), h = Math.max(1, Math.round(r.height));
-      // stars: 1.5x at most - at 2x the canvas alone was 10.7 MB of pixels (heap snapshot 2026-09-28)
-      const k = spec.lowRes ? 60 / w : Math.min(1.5, window.devicePixelRatio || 1);
+      // stars: 1x. A running canvas in the chat cost ~115 MB of graphics memory at 1.5x (phone 2026-09-29; at 2x it
+      // was 10.7 MB of pixels alone), and the stars are soft dots anyway
+      const k = spec.lowRes ? 60 / w : 1;
       const nw = Math.round(w * k), nh = Math.round(h * k);
       if (nw !== W || nh !== H) { W = cv.width = nw; H = cv.height = nh; stars = null; }
     };
@@ -4773,7 +4780,8 @@
       if (t - last > 33 || !last) { last = t; draw(t); }
       if (!still && !document.hidden && ctx.state.currentConvId) raf = requestAnimationFrame(loop);
     };
-    const lw = { kind, el: cv, start: () => { if (!raf) raf = requestAnimationFrame(loop); }, stop: () => { if (raf) cancelAnimationFrame(raf); raf = 0; },
+    // while the screens move: one still frame (so the chat doesn't slide in blank), the animation starts once it settles
+    const lw = { kind, el: cv, start: () => { if (raf) return; if (ctx.state.screensMoving) { if (!W) draw(performance.now()); return; } raf = requestAnimationFrame(loop); }, stop: () => { if (raf) cancelAnimationFrame(raf); raf = 0; },
       // a left chat's canvas gives its pixels back (unloadConvDom); the next draw sizes it again
       free: () => { lw.stop(); W = H = 0; cv.width = cv.height = 0; stars = null; } };
     // (resume-on-visible is one page-lifetime listener set up once in buildConversation, not per-call here)
@@ -10576,14 +10584,22 @@
   // side kept its wallpaper canvas and message-list layers as well (LayerTree on the phone 2026-09-28: 251 MB of
   // layers on the chat list). So once still: plain 2D transforms, and the covered screen is visibility:hidden
   // (not display:none, which would lose its scroll position and layout).
+  // (graphics memory, not JS, is what spikes when a chat opens - measured on the phone 2026-09-29: ordinary memory
+  // stayed flat while graphics went 220 -> 660 MB. So nothing heavy starts while the screens are moving: the live
+  // wallpaper waits for the chat to settle, and chat media waits too - see pumpMedia)
   function wakeScreens(ctx) {
     ctx.state.navSeq = (ctx.state.navSeq || 0) + 1;
+    ctx.state.screensMoving = true;
+    if (ctx.conv && ctx.conv.liveWall && ctx.conv.liveWall.el.isConnected) { ctx.conv.liveWall.stop(); if (ctx.state.currentConvId) ctx.conv.liveWall.start(); } // (start = one still frame now)
     ctx.home.screen.style.visibility = "visible"; ctx.conv.screen.style.visibility = "visible"; // (beats the CSS start state)
   }
   function restScreens(ctx, dir) {
     const home = ctx.home.screen, conv = ctx.conv.screen, p = ctx.state.navProgress;
     if (p !== 0 && p !== 1) return;
+    ctx.state.screensMoving = false;
     for (const e of [conv, home, ctx.shade]) e.classList.remove("gh-anim");
+    if (p === 1 && ctx.conv.liveWall && ctx.state.currentConvId) ctx.conv.liveWall.start();
+    if (mediaWaiting.length) pumpMedia();
     // (the open chat keeps its layer: flattening it made scrolling repaint the whole screen in the scroll-perf rig)
     if (p === 1) { conv.style.transform = "translate3d(0,0,0)"; home.style.transform = "translateX(-30%)"; home.style.visibility = "hidden"; }
     else { home.style.transform = "none"; conv.style.transform = `translateX(${(dir || 1) * 100}%)`; conv.style.visibility = "hidden"; }

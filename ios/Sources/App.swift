@@ -257,6 +257,13 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         notifications?.attach(to: webView)
         // lets Safari's Web Inspector protocol (ios-webkit-debug-proxy on the PC, phone on USB) attach to the page
         if #available(iOS 16.4, *) { webView.isInspectable = true }
+        // Draw the page at 2x instead of the screen's 3x. iOS closes Ghost's web process at ~1.5 GB, Snapchat's own web app
+        // already takes ~0.95 GB, and opening a chat briefly added 300-450 MB - all of it graphics memory (layer and
+        // canvas backing stores), which scales with pixels: 2x needs 4/9 of it (measured on the phone 2026-09-29).
+        // WKWebView SPI (WKWebViewPrivate.h, ios 16.4+): KVC reaches -_setOverrideDeviceScaleFactor:.
+        if webView.responds(to: NSSelectorFromString("_setOverrideDeviceScaleFactor:")) {
+            webView.setValue(NSNumber(value: 2.0), forKey: "overrideDeviceScaleFactor")
+        }
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = false
@@ -1026,6 +1033,17 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             if Self.isSnapchat(url) { webView.load(action.request) } else { UIApplication.shared.open(url) }
         }
         return nil
+    }
+
+    /// WKNavigationDelegatePrivate: same event with WebKit's reason (0 memory limit, 1 CPU limit, 2 requested, 3 crash).
+    /// When this exists WebKit calls ONLY this one, so it forwards to the public handler below.
+    @objc(_webView:webContentProcessDidTerminateWithReason:)
+    func webViewContentProcessDidTerminate(_ webView: WKWebView, reason: Int) {
+        let names = ["memory limit", "CPU limit", "requested by app", "crash", "shared process crash limit"]
+        let name = reason >= 0 && reason < names.count ? names[reason] : "reason \(reason)"
+        urlLog.append("REASON: \(name)")
+        trail("NATIVE web process ended: \(name)")
+        webViewWebContentProcessDidTerminate(webView)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
