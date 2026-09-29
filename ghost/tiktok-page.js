@@ -125,6 +125,26 @@
     if (!ui || !ui.user || !ui.user.uniqueId) return { user: null };
     return { user: compactUser(ui.user, ui.statsV2 || ui.stats) };
   }
+  function parseEmbedPage(html) {
+    const m = String(html).match(/<script[^>]*id="__FRONTITY_CONNECT_STATE__"[^>]*>([\s\S]*?)<\/script>/);
+    let st = null; try { st = m && JSON.parse(m[1]); } catch (e) {}
+    const data = (st && st.source && st.source.data) || {};
+    const key = Object.keys(data).find((k) => k.indexOf("/embed/v2/") === 0);
+    const vd = key && data[key] && data[key].videoData;
+    const ii = vd && vd.itemInfos, ai = (vd && vd.authorInfos) || {}, mi = vd && vd.musicInfos, as = vd && vd.authorStats;
+    if (!ii || !ii.video) return { items: [] };
+    const meta = ii.video.videoMeta || {};
+    const it = {
+      id: ii.id, desc: ii.text, createTime: ii.createTime,
+      video: { playAddr: ii.video.urls, cover: ii.covers, originCover: ii.coversOrigin, duration: meta.duration, width: meta.width, height: meta.height },
+      author: { id: ai.userId, uniqueId: ai.uniqueId, nickname: ai.nickName, avatarThumb: ai.covers, avatarMedium: ai.coversMedium, verified: ai.verified, secUid: ai.secUid, signature: ai.signature },
+      authorStats: as || null,
+      music: mi && mi.musicId ? { id: mi.musicId, title: mi.musicName, authorName: mi.authorName, coverMedium: mi.coversMedium, original: mi.original } : null,
+      stats: { diggCount: ii.diggCount, commentCount: ii.commentCount, shareCount: ii.shareCount, playCount: ii.playCount },
+    };
+    const c = compact(it);
+    return { items: c ? [c] : [] };
+  }
   function parseTagPage(html) {
     const sc = rehydrate(html), cd = sc && sc["webapp.challenge-detail"], ci = cd && cd.challengeInfo;
     if (!ci || !ci.challenge) return { tag: null };
@@ -287,7 +307,9 @@
     tagVideos: (p) => idOk(p.id) ? ["/api/challenge/item_list/?" + enc(Object.assign(withCommon(), { challengeID: p.id, count: 30, cursor: clean(p.cursor || 0, 40), coverFormat: 2 })), "json", parseItemList] : null,
     sound: (p) => idOk(p.id) ? ["/music/" + (clean(p.slug, 80).replace(/[^A-Za-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "original-sound") + "-" + p.id, "html", parseMusicPage] : null,
     // one video by id (a TikTok shared in a message): /api/item/detail/ -> itemInfo.itemStruct
-    item: (p) => idOk(p.id) ? ["/api/item/detail/?" + enc(Object.assign(withCommon(), { itemId: p.id })), "json", (d) => { const c = compact(d && d.itemInfo && d.itemInfo.itemStruct); return { items: c ? [c] : [] }; }] : null,
+    // /api/item/detail/ answers an empty body on the website now (checked on the phone 2026-09-29), so a single video
+    // (a TikTok shared in a DM) comes from TikTok's own embed page, whose state carries the play URL
+    item: (p) => idOk(p.id) ? ["/embed/v2/" + p.id, "html", parseEmbedPage] : null,
     soundVideos: (p) => idOk(p.id) ? ["/api/music/item_list/?" + enc(Object.assign(withCommon(), { musicID: p.id, count: 30, cursor: clean(p.cursor || 0, 40), coverFormat: 2 })), "json", parseItemList] : null,
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

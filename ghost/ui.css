@@ -2562,6 +2562,9 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 /* ---- TikTok search (ui.js "TikTok search"): pages stack over the feed, above the tab bar ---- */
 .gh-tts { position: absolute; left: 0; right: 0; top: 0; bottom: calc(49px + var(--gh-safe-b)); display: none; z-index: 3; }
 .gh-tts[data-open="1"] { display: block; }
+/* a field in a TikTok page has focus (keyboard up): no tab bar above the keyboard, the page takes its place */
+.gh-screen[data-tt-typing="1"] > .gh-tab-bar { display: none; }
+.gh-screen[data-tt-typing="1"] .gh-tts { bottom: 0; }
 .gh-tts-page { position: absolute; inset: 0; background: var(--gh-bg-list); color: var(--gh-text); display: flex; flex-direction: column; transform: translate3d(100%, 0, 0); }
 .gh-tts-page[data-anim="1"] { transition: transform 0.26s cubic-bezier(0.22, 0.8, 0.26, 1); }
 .gh-tts-page[data-in="1"] { transform: none; }

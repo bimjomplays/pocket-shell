@@ -9123,6 +9123,12 @@
     };
     ctx.tiktok = T;
     ttCtx = ctx;
+    // typing in a TikTok page (search field, message box): the keyboard shrinks the web view, and the tab bar would sit
+    // between the keyboard and the field (phone report 2026-09-29). Hide it while a field there has focus, like a chat.
+    const ttTyping = (on) => { const scr = wrap.closest(".gh-screen"); if (scr) { if (on) scr.dataset.ttTyping = "1"; else delete scr.dataset.ttTyping; } };
+    const isField = (e) => !!(e && e.matches && e.matches("input, textarea, [contenteditable='true']"));
+    T.search.el.addEventListener("focusin", (e) => { if (isField(e.target)) ttTyping(true); });
+    T.search.el.addEventListener("focusout", () => setTimeout(() => { const a = ctx.shadow && ctx.shadow.activeElement; if (!isField(a) || !T.search.el.contains(a)) ttTyping(false); }, 0));
     for (const b of wrap.querySelectorAll('[data-ttact="signin"]')) b.addEventListener("click", () => { haptic("light"); ttPost("signIn").catch(() => {}); });
     wrap.querySelector('[data-ttact="retry"]').addEventListener("click", () => { haptic("light"); T.empty.style.display = "none"; T.loading.style.display = ""; ttPost("more").catch(() => {}); armEmptyTimer(ctx); });
     wrap.querySelector('[data-ttact="search"]').addEventListener("click", () => { haptic("light"); openTTSearch(ctx); });
