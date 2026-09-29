@@ -251,6 +251,7 @@
     configureRetention: (on) => bridge.call("configureRetention", [on]),
     clearRetainedMessages: () => bridge.call("clearRetainedMessages"),
     searchFriends: (q) => bridge.call("searchFriends", [q]),
+    birthdays: () => bridge.call("birthdays"),
     findUsers: (q) => bridge.call("findUsers", [q]),
     friendRequests: () => bridge.call("friendRequests"),
     addFriend: (id) => bridge.call("addFriend", [id]),
@@ -548,6 +549,7 @@
       startStreakKeeper(ctx);
       initMessageNotifications(ctx);
       gnStart(ctx).catch((e) => gnTrail("start " + (e && e.message)));
+      bdayStart(ctx);
       api.friendRequests().then((r) => { ctx.friendReqCount = (r || []).length; }).catch(() => {});
       ctx.revealHome = () => { boot.classList.add("gh-boot-fade"); markReady(true); };
       if (state.listShown) ctx.revealHome();
@@ -1300,6 +1302,7 @@
     }
     rowEl.dataset.unread = conv.unreadCount > 0 || conv.hasUnreadSnap ? "1" : "0";
     rowEl.querySelector(".gh-row-name").textContent = conv.title || "Unknown";
+    bdaySyncCake(rowEl.querySelector(".gh-row-top"), rowEl.querySelector(".gh-row-name"), !conv.isGroup && conv.participants && conv.participants[0]);
     rowEl.querySelector(".gh-row-time").textContent = fmtRowTime(conv.lastActivityTs || Date.now());
     const previewEl = rowEl.querySelector(".gh-row-preview");
     const typing = row.typing;
@@ -1564,26 +1567,38 @@
   function updateConvHeader(ctx, convData) {
     const conv = ctx.conv;
     conv.nameEl.textContent = convData.title || "Unknown";
+    const other1 = !convData.isGroup && convData.participants && convData.participants[0];
+    bdaySyncCake(conv.nameEl.parentElement, conv.nameEl, other1);
+    // a connected Ghost friend's accent colour tints their name (mixed toward the text colour so it stays readable)
+    const gf = other1 && gnFriend(other1.id), gacc = gf && gf.profile && ACCENT_SET[gf.profile.accent || ""];
+    conv.nameEl.style.color = gacc ? `color-mix(in srgb, ${gacc[0]} 72%, var(--gh-text))` : "";
+    const gstatus = gf && gn.net.friendStatus(gf.id);
     const typingSet = ctx.state.typingByConv.get(convData.id);
     if ((typingSet && typingSet.size) || hereUsers(ctx, convData.id).some((u) => u.typing)) {
       conv.subEl.innerHTML = "";
       conv.subEl.append(document.createTextNode("typing"), (() => { const d = el("span", "gh-row-dots"); d.innerHTML = "<span></span><span></span><span></span>"; return d; })());
-      conv.subEl.dataset.typing = "1"; conv.subEl.dataset.here = "0";
+      conv.subEl.dataset.typing = "1"; conv.subEl.dataset.here = "0"; conv.subEl.dataset.gnstatus = "0";
       conv.subEl.style.display = "";
     } else if (hereUsers(ctx, convData.id).length) {
       const here = hereUsers(ctx, convData.id);
       conv.subEl.dataset.typing = "0";
       conv.subEl.dataset.here = "1";
+      conv.subEl.dataset.gnstatus = "0";
       conv.subEl.textContent = convData.isGroup ? here.map((u) => (u.name || "").split(" ")[0]).join(", ") + " in chat" : "in chat";
       conv.subEl.style.display = "";
     } else {
       conv.subEl.dataset.typing = "0";
       conv.subEl.dataset.here = "0";
+      conv.subEl.dataset.gnstatus = "0";
       // The bridge has no presence/"last seen" data (API.md) — showing one would be fabricated, so a 1:1
       // chat's subtitle is simply omitted (matches Telegram's own behaviour when it has nothing to say).
       // A group's member count IS real data (conv.participants, already part of the contract).
       if (convData.isGroup) {
         conv.subEl.textContent = `${(convData.participants || []).length} members`;
+        conv.subEl.style.display = "";
+      } else if (gstatus) { // their Ghost status line, while it lasts
+        conv.subEl.textContent = gstatus.text;
+        conv.subEl.dataset.gnstatus = "1";
         conv.subEl.style.display = "";
       } else {
         conv.subEl.textContent = "";
@@ -4164,10 +4179,12 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile" };
+  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile", gnPreview: "How Friends See You", gnVerify: "Verify Connection" };
   const SETTINGS_PAGES = {
     gnProfile(ctx, body) { return GN_SETTINGS.gnProfile(ctx, body); }, // section "Ghost network"
     gnShare(ctx, body) { return GN_SETTINGS.gnShare(ctx, body); },
+    gnPreview(ctx, body) { return GN_SETTINGS.gnPreview(ctx, body); },
+    gnVerify(ctx, body) { return GN_SETTINGS.gnVerify(ctx, body); },
     // Every photo/video (and saved snap) and every link in the open chat, newest first. Older history loads on
     // demand. Only what Snapchat Web can still fetch shows up (media that has expired on Snapchat's side can't).
     gallery(ctx, body) {
@@ -4329,9 +4346,27 @@
       };
       const friendsCache = { list: null };
       const paintMine = async (q) => {
-        if (!friendsCache.list) friendsCache.list = await api.searchFriends("").catch(() => []);
+        if (!friendsCache.list) { friendsCache.list = await api.searchFriends("").catch(() => []); await bdayRefresh(ctx, true); }
         mineBox.innerHTML = "";
         const ql = (q || "").toLowerCase();
+        // Upcoming Birthdays (next 30 days, soonest first) above My Friends, when Snapchat has any
+        if (!ql) {
+          const known = new Map();
+          for (const c of ctx.state.convById.values()) if (!c.isGroup && c.participants && c.participants[0]) known.set(c.participants[0].id, c.participants[0]);
+          for (const u of friendsCache.list || []) known.set(u.id, u);
+          const soon = Object.keys(bday.map).map((id) => ({ u: known.get(id), b: bdayOf(id) })).filter((x) => x.u && x.b && bdayDaysAway(x.b) <= 30)
+            .sort((a, b) => bdayDaysAway(a.b) - bdayDaysAway(b.b));
+          if (soon.length) {
+            const bg = setGroup(mineBox, "Upcoming Birthdays");
+            bg.classList.add("gh-bday-group");
+            for (const { u, b } of soon) {
+              const row = personRow(bg, u, []);
+              row.querySelector(".gh-friend-user").textContent = bdayWhen(b);
+              row.classList.add("gh-press"); row.appendChild(icon("back", 16, "gh-set-chev"));
+              row.addEventListener("click", () => { haptic("light"); ctx.settings.friendTarget = u; pushSettingsPage(ctx, "friend"); });
+            }
+          }
+        }
         const list = (friendsCache.list || []).filter((u) => !ql || (u.name || "").toLowerCase().includes(ql) || (u.username || "").toLowerCase().includes(ql)).slice(0, 80);
         if (!list.length) return;
         const g = setGroup(mineBox, "My Friends");
@@ -4379,6 +4414,8 @@
       const nm = el("div", "gh-set-profile-name"); nm.textContent = u.name || "Friend";
       const un = el("div", "gh-set-profile-user"); un.textContent = u.username ? "@" + u.username : "";
       prof.append(nm, un); body.appendChild(prof);
+      const bd = bdayOf(u.id); // Snapchat's own birthday for them (only if they share it)
+      if (bd) { const bg = setGroup(body); const r = setRow(bg, { label: "Birthday", value: fmtBday(bd) + (bdayDaysAway(bd) === 0 ? " · Today 🎂" : "") }); r.dataset.bday = "1"; }
       let g = setGroup(body, null, "Nicknames show in Ghost only (Snapchat Web can't change names on Snapchat). Leave it empty to use their own name.");
       setRow(g, { icon: "edit", tint: "#3e88f7", label: "Edit Nickname", onClick: async () => {
         const v = await promptSheet(ctx, "Nickname for " + (u.username ? "@" + u.username : (u._realName || u.name)), (pref("nicknames") || {})[u.id] || "");
@@ -10613,6 +10650,50 @@
   }
 
   // =====================================================================================================
+  // Birthdays: Snapchat's own (bridge birthdays(): { userId: "MM-DD" }), so they work for every friend whose
+  // "Birthday Party" setting in Snapchat shares one - not only Ghost friends. 🎂 next to the name on the day (chat
+  // list, chat header), "Birthday" on their page, "Upcoming Birthdays" in Settings > Friends.
+  // =====================================================================================================
+  const bday = { map: {}, at: 0, day: 0 };
+  function bdayParts(v) { const m = /^(\d{2})-(\d{2})$/.exec(v || ""); return m ? { m: +m[1], d: +m[2] } : null; }
+  function bdayOf(userId) { return userId ? bdayParts(bday.map[userId]) : null; }
+  // days until the next birthday (0 = today); Feb 29 counts as Mar 1 in other years
+  function bdayDaysAway(b) {
+    const t0 = startOfDay(Date.now()), y = new Date(t0).getFullYear();
+    let next = +new Date(y, b.m - 1, b.d);
+    if (next < t0) next = +new Date(y + 1, b.m - 1, b.d);
+    return Math.round((next - t0) / DAY_MS);
+  }
+  const bdayToday = (userId) => { const b = bdayOf(userId); return !!(b && bdayDaysAway(b) === 0); };
+  const fmtBday = (b) => MONTHS[b.m - 1] + " " + b.d;
+  function bdayWhen(b) { const n = bdayDaysAway(b); return n === 0 ? "Today 🎂" : n === 1 ? "Tomorrow" : fmtBday(b) + " · in " + n + " days"; }
+  function bdaySyncCake(box, nameEl, user) {
+    if (!box || !nameEl) return;
+    let cake = box.querySelector(":scope > .gh-bday-cake");
+    const want = !!(user && !user.members && bdayToday(user.id));
+    if (want && !cake) { cake = el("span", "gh-bday-cake"); cake.textContent = "🎂"; cake.setAttribute("aria-label", "Birthday today"); nameEl.after(cake); }
+    else if (!want && cake) cake.remove();
+    box.dataset.bday = want ? "1" : "0";
+  }
+  async function bdayRefresh(ctx, force) {
+    const today = startOfDay(Date.now());
+    if (!force && Date.now() - bday.at < 10 * 60e3 && bday.day === today) return;
+    bday.at = Date.now();
+    let m = null;
+    try { m = await api.birthdays(); } catch (e) { return; }
+    if (!m || typeof m !== "object") return;
+    const clean = {};
+    for (const [id, v] of Object.entries(m)) if (bdayParts(v)) clean[id] = v;
+    const changed = JSON.stringify(clean) !== JSON.stringify(bday.map) || bday.day !== today;
+    bday.map = clean; bday.day = today;
+    if (changed) refreshAvatars(ctx);
+  }
+  function bdayStart(ctx) {
+    setTimeout(() => bdayRefresh(ctx, true), window.__ghostMockFast ? 30 : 4000);
+    setInterval(() => { if (!document.hidden) bdayRefresh(ctx, false); }, 60e3); // (also rolls the 🎂 over at midnight)
+  }
+
+  // =====================================================================================================
   // Ghost network: Ghost accounts between two Ghost apps (plan: ghost/ACCOUNTS_PLAN.md; protocol: ghost/network.js).
   // A friend is connected only after a VISIBLE invite ("ghost:connect XXXX-XXXX-XXXX" in the chat, drawn here as a
   // Connect card) is accepted; then their Ghost profile (name, picture, banner, bio, accent) replaces their Snapchat
@@ -10682,9 +10763,26 @@
     gn.ctx = ctx; ctx.gn = gn;
     gn.net = GhostNetCore.create({
       gnet: (a) => dgPost("gnet", a).catch((e) => { gnTrail("gnet " + (e && e.message || e)); return null; }),
-      keysGet: async () => { const r = await dgPost("gnKeys", {}).catch(() => null); return typeof r === "string" && r ? r : storage.get("ghostNetKeys", null); },
-      keysSet: async (t) => { const r = await dgPost("gnKeys", { set: t }).catch(() => null); if (r !== true) await storage.set("ghostNetKeys", t); }, // no native side (test rig)
+      // keys live in the Keychain ({keys}); a Keychain error rejects (network.js then refuses to make new keys). Ghost
+      // storage is only used where there is no native side at all (a plain browser / old rig: no {keys} reply).
+      keysGet: async () => {
+        let r;
+        try { r = await dgPost("gnKeys", {}); } catch (e) { if (!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.dg)) return storage.get("ghostNetKeys", null); throw e; }
+        if (r && typeof r === "object" && "keys" in r) return typeof r.keys === "string" && r.keys ? r.keys : null;
+        return storage.get("ghostNetKeys", null);
+      },
+      keysSet: async (t) => {
+        let r;
+        try { r = await dgPost("gnKeys", { set: t }); } catch (e) { if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.dg) throw e; }
+        if (r !== true) await storage.set("ghostNetKeys", t);
+      },
       keysDelete: async () => { await dgPost("gnKeys", { delete: true }).catch(() => {}); await storage.set("ghostNetKeys", null); },
+      // after Leave, only while goodbyes are still owed: the old keys in a second Keychain slot (never in Ghost storage)
+      farewellKeys: {
+        get: async () => { const r = await dgPost("gnKeys", { slot: "farewell" }); return r && typeof r === "object" && typeof r.keys === "string" ? r.keys : null; },
+        set: async (t) => { const r = await dgPost("gnKeys", { slot: "farewell", set: t }); if (r !== true) throw new Error("no Keychain"); },
+        del: async () => { await dgPost("gnKeys", { slot: "farewell", delete: true }).catch(() => {}); },
+      },
       load: () => storage.get("ghostNet", null),
       save: (s) => storage.set("ghostNet", s),
       picGet: (k) => wallDB.get("gn:" + k), picPut: (k, b) => wallDB.put("gn:" + k, b), picDel: (k) => wallDB.del("gn:" + k),
@@ -10702,6 +10800,9 @@
       try { await gn.net.poll(); if (withSync) await gn.net.sync(withSync === "force"); }
       catch (e) { gnTrail("poll " + (e && e.message)); }
       finally { gn.polling = false; }
+      // a status that just ran out disappears from headers and profiles without waiting for a message
+      const sig = gn.net.friends().map((f) => f.id + ":" + !!gn.net.friendStatus(f.id)).join(",") + "|" + !!gn.net.status();
+      if (sig !== gn.statusSig) { if (gn.statusSig !== undefined) gnChanged(ctx); gn.statusSig = sig; }
     };
     gn.round = round;
     setTimeout(() => round("force"), window.__ghostMockFast ? 50 : 3000);
@@ -10722,8 +10823,8 @@
     return code ? gn.rev + ":" + gn.net.inviteState(code, isMe, m.from && m.from.id, m.ts) : "";
   }
   const GN_CARD_TEXT = {
-    mine: { waiting: "Invite sent · waiting for them", connected: "Connected on Ghost", expired: "Invite expired", unknown: "Sent from another phone", ended: "Disconnected" },
-    theirs: { connect: null, ended: "Disconnected · ask for a new invite", connecting: "Connecting… waiting for their Ghost", connected: "Connected on Ghost", expired: "This invite expired · ask for a new one", failed: "Didn't connect · ask for a new invite" },
+    mine: { waiting: "Invite sent · waiting for them", connected: "Connected on Ghost", expired: "Invite expired", unknown: "Sent from another phone", ended: "Disconnected", cancelled: "Invite cancelled" },
+    theirs: { connect: null, ended: "Disconnected · ask for a new invite", connecting: "Connecting… waiting for their Ghost", connected: "Connected on Ghost", expired: "This invite expired · ask for a new one", failed: "Didn't connect · ask for a new invite", cancelled: "They cancelled this invite · ask for a new one" },
   };
   function gnCardBubble(ctx, m, isMe, isLast, code) {
     const b = el("div", "gh-bubble gh-gn-card");
@@ -10761,6 +10862,15 @@
       const st = el("div", "gh-gn-card-state"); st.textContent = text;
       if (state === "connected") st.prepend(icon("check", 14));
       b.appendChild(st);
+      // the safety code is the real check that nobody else answered the invite: offer it right here
+      const peer = isMe ? other : (m.from || other);
+      const pf = state === "connected" && peer && gnFriend(peer.id);
+      if (pf) {
+        const v = el("button", "gh-gn-card-link gh-press"); v.dataset.gnact = "verify";
+        v.textContent = pf.verified ? "Verified ✓" : "Verify Connection";
+        v.addEventListener("click", (e) => { e.stopPropagation(); haptic("light"); ctx.settings.friendTarget = peer; openSettingsAt(ctx, "gnVerify"); });
+        b.appendChild(v);
+      }
     }
     b.appendChild(tickMetaEl(m, isMe));
     if (m.failed) b.dataset.failed = "1";
@@ -10776,7 +10886,11 @@
     }
     const pending = gn.net.inviteFor(cd.id);
     if (pending) {
-      setRow(group, { icon: "ghost", tint: "#8e8e93", label: "Ghost Invite Sent", value: "Waiting", onClick: () => ctx.showToast("They connect by tapping Connect on the invite in Ghost") });
+      setRow(group, { icon: "ghost", tint: "#8e8e93", label: "Ghost Invite Sent", value: "Waiting", onClick: async () => {
+        if (!(await confirmSheet(ctx, "They connect by tapping Connect on the invite in Ghost. Cancel it instead? The code stops working.", "Cancel Invite"))) return;
+        await gn.net.cancelInvite(pending.code).catch(() => {});
+        done(); ctx.showToast("Invite cancelled"); gnChanged(ctx);
+      } });
       return;
     }
     setRow(group, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Connect on Ghost", onClick: async () => {
@@ -10784,7 +10898,8 @@
       if (!ok) return;
       try {
         const text = await gn.net.createInvite(cd.id, other.id);
-        await api.sendText(cd.id, text, {});
+        try { await api.sendText(cd.id, text, {}); }
+        catch (e) { await gn.net.forgetInvite(GhostNetCore.parseInvite(text)).catch(() => {}); throw new Error("Couldn't send the invite"); }
         done(); ctx.showToast("Invite sent");
       } catch (e) { ctx.showToast(String(e && e.message || "Couldn't send the invite")); }
     } });
@@ -10802,8 +10917,36 @@
       return blob;
     } finally { if (d.url) URL.revokeObjectURL(d.url); if (d.src && d.src.close) d.src.close(); }
   }
+  function gnVerifiedEl() {
+    const v = el("span", "gh-gn-verified"); v.setAttribute("aria-label", "Verified"); v.appendChild(icon("check", 11));
+    return v;
+  }
+  function gnStatusEl(text) { const d = el("div", "gh-gn-status"); d.textContent = text; return d; }
+  function gnAgo(ts) {
+    const d = Date.now() - ts;
+    if (d < 90e3) return "just now";
+    if (d < 3600e3) return Math.round(d / 60e3) + " min ago";
+    if (d < 24 * 3600e3 && startOfDay(ts) === startOfDay(Date.now())) return Math.round(d / 3600e3) + " h ago";
+    return fmtDaySeparator(ts) + ", " + fmtClock(ts);
+  }
+  // "Clear after" choices for the status line
+  function gnStatusUntil(key) {
+    const now = Date.now();
+    if (key === "1h") return now + 3600e3;
+    if (key === "4h") return now + 4 * 3600e3;
+    if (key === "today") return startOfDay(now) + DAY_MS - 1000;
+    return 0;
+  }
+  function gnUntilLabel(until) {
+    if (!until) return "";
+    const d = until - Date.now();
+    if (Math.round(d / 60e3) < 60) return "clears in " + Math.max(1, Math.round(d / 60e3)) + " min";
+    if (startOfDay(until) === startOfDay(Date.now()) && d > 4 * 3600e3 + 60e3) return "clears tonight";
+    return "clears in " + Math.round(d / 3600e3) + " h";
+  }
   // a profile header with banner, picture, name, badge and bio (yours or a connected friend's)
-  function gnProfileHead(user, prof, banner, pic, connected) {
+  function gnProfileHead(user, prof, banner, pic, connected, extra) {
+    extra = extra || {};
     const box = el("div", "gh-gn-prof");
     const bn = el("div", "gh-gn-prof-banner");
     const acc = ACCENT_SET[(prof && prof.accent) || ""];
@@ -10815,9 +10958,11 @@
     const nm = el("span"); nm.textContent = (prof && prof.name) || user.name || "You";
     nmRow.appendChild(nm);
     if (connected) nmRow.appendChild(gnBadgeEl(13));
+    if (extra.verified) nmRow.appendChild(gnVerifiedEl());
     if (acc) nm.style.color = acc[0];
     const un = el("div", "gh-set-profile-user"); un.textContent = user.username ? "@" + user.username : "";
     box.append(bn, av, nmRow, un);
+    if (extra.status) box.appendChild(gnStatusEl(extra.status));
     if (prof && prof.bio) { const bio = el("div", "gh-gn-prof-bio"); bio.textContent = prof.bio; box.appendChild(bio); }
     return box;
   }
@@ -10826,14 +10971,31 @@
     gnProfile(ctx, body) {
       const me = ctx.state.me || {};
       const p = gn.net ? gn.net.profile() : { name: "", bio: "", accent: "" };
-      body.appendChild(gnProfileHead(me, p, gn.picUrls.get("me:banner"), gn.picUrls.get("me:pic"), true));
+      const myStatus = gn.net ? gn.net.status() : null;
+      body.appendChild(gnProfileHead(me, p, gn.picUrls.get("me:banner"), gn.picUrls.get("me:pic"), true, { status: myStatus && myStatus.text }));
       if (!gnOn()) { const g0 = setGroup(body, null, "Ghost Network is off. Turn it on in Settings > Privacy to connect with friends' Ghosts."); setRow(g0, { label: "Privacy Settings", onClick: () => pushSettingsPage(ctx, "privacy") }); }
       const save = async (patch, msg) => {
         try { await gn.net.setProfile(patch); ctx.showToast(msg || "Saved"); }
         catch (e) { gnTrail("profile save " + (e && e.message)); ctx.showToast(/reachable|ntfy/.test(e && e.message || "") ? "Saved · friends get it when Ghost is online" : "Couldn't save that"); }
         await gnLoadPics(); gnChanged(ctx);
       };
-      let g = setGroup(body, null, "Your name and bio on Ghost, for connected Ghost friends only.");
+      // the status line: its own message, so changing it never re-sends your pictures
+      let g = setGroup(body, "Status", "Connected Ghost friends see it under your name and at the top of your chat. It clears itself when you choose.");
+      const setStatus = async (text, until, msg) => {
+        try { await gn.net.setStatus(text, until); ctx.showToast(msg); }
+        catch (e) { gnTrail("status " + (e && e.message)); ctx.showToast(/reachable|ntfy/.test(e && e.message || "") ? "Saved · friends get it when Ghost is online" : "Couldn't save that"); }
+        gnChanged(ctx);
+      };
+      setRow(g, { icon: "newMsg", tint: "#9b59f6", label: myStatus ? myStatus.text : "Set a Status", value: myStatus ? gnUntilLabel(myStatus.until) : "", onClick: async () => {
+        const v = await promptSheet(ctx, "Your status (an emoji and a few words)", myStatus ? myStatus.text : "", 60);
+        if (v == null) return;
+        if (!v) { setStatus("", 0, "Status cleared"); return; }
+        const when = await choiceSheet(ctx, "Clear after", [{ key: "1h", label: "1 hour" }, { key: "4h", label: "4 hours" }, { key: "today", label: "Today" }, { key: "never", label: "Never" }]);
+        if (!when) return;
+        setStatus(v, gnStatusUntil(when), "Status set");
+      } }).classList.add("gh-gn-status-row");
+      if (myStatus) setRow(g, { label: "Clear Status", danger: true, onClick: () => setStatus("", 0, "Status cleared") });
+      g = setGroup(body, null, "Your name and bio on Ghost, for connected Ghost friends only.");
       setRow(g, { icon: "edit", tint: "#3e88f7", label: "Name", value: p.name || me.name || "", onClick: async () => {
         const v = await promptSheet(ctx, "Your Ghost name", p.name || me.name || "", 40);
         if (v != null) save({ name: v });
@@ -10866,8 +11028,57 @@
         row.addEventListener("click", () => { haptic("light"); ctx.settings.friendTarget = u; pushSettingsPage(ctx, "friend"); });
         g.appendChild(row);
       }
+      // invites you sent that nobody has accepted yet
+      const pend = gn.net ? gn.net.pendingInvites() : [];
+      if (pend.length) {
+        g = setGroup(body, "Invites", "Waiting for them to tap Connect. Cancel makes the code stop working.");
+        for (const inv of pend) {
+          const c = ctx.state.convById.get(inv.conv);
+          const who = (c && c.title) || "Someone";
+          const left = Math.max(1, Math.round((inv.expires - Date.now()) / 3600e3));
+          const row = setRow(g, { icon: "ghost", tint: "#8e8e93", label: who, value: "sent " + gnAgo(inv.created) + " · " + left + " h left", onClick: async () => {
+            if (!(await confirmSheet(ctx, "Cancel the invite to " + who + "? The code stops working.", "Cancel Invite"))) return;
+            await gn.net.cancelInvite(inv.code).catch(() => {});
+            ctx.showToast("Invite cancelled"); gnChanged(ctx);
+          } });
+          row.dataset.gninvite = inv.code;
+        }
+      }
+      g = setGroup(body);
+      setRow(g, { icon: "info", tint: "#3e88f7", label: "See How Friends See You", onClick: () => pushSettingsPage(ctx, "gnPreview") });
       const id = gn.net && gn.net.myId();
       if (id) { const foot = el("div", "gh-set-group-foot gh-gn-id"); foot.textContent = "Ghost ID " + id.replace(/(.{5})/g, "$1 ").trim(); body.appendChild(foot); }
+    },
+    // your own Ghost profile the way a connected friend sees it
+    gnPreview(ctx, body) {
+      const me = ctx.state.me || {};
+      const p = gn.net.profile(), shared = gn.net.share();
+      const st = gn.net.status();
+      body.appendChild(gnProfileHead(me, p, gn.picUrls.get("me:banner"), gn.picUrls.get("me:pic"), true, { status: st && st.text }));
+      if (p.bio) { /* (in the header) */ }
+      const note = shared.mode === "chosen"
+        ? "Friends you chose see this. Other connected Ghost friends see your Snapchat name and Bitmoji."
+        : "This is what your connected Ghost friends see: your Ghost name, picture, banner, bio and status.";
+      setGroup(body, null, note);
+    },
+    // Verify Connection: the same 12 digits on both phones = nobody else is in the middle
+    gnVerify(ctx, body) {
+      const u = ctx.settings.friendTarget;
+      const f = u && gnFriend(u.id);
+      if (!f) { setGroup(body, null, "Not connected on Ghost."); return; }
+      const box = el("div", "gh-gn-safety");
+      const code = el("div", "gh-gn-safety-code"); code.textContent = "···· ···· ····";
+      const who = el("div", "gh-gn-safety-who"); who.textContent = "You and " + (u.name || "them");
+      box.append(who, code); body.appendChild(box);
+      gn.net.safetyCode(f.id).then((c) => { if (c) code.textContent = c; }).catch(() => {});
+      let g = setGroup(body, null, "Compare this code with " + (u.name || "them") + " in person or on a call (not in a chat). If it's the same on both phones, your Ghost connection goes straight to their phone and nobody else answered your invite. It changes if either of you reinstalls Ghost.");
+      if (f.verified) {
+        const r = setRow(g, { label: "Verified", value: fmtDaySeparator(f.verified) }); r.prepend(gnVerifiedEl());
+        g = setGroup(body);
+        setRow(g, { label: "Mark as Not Verified", danger: true, onClick: async () => { await gn.net.setVerified(f.id, false); gnChanged(ctx); } });
+      } else {
+        setRow(g, { icon: "check", tint: "#23a55a", label: "Codes Match", onClick: async () => { await gn.net.setVerified(f.id, true); ctx.showToast("Verified"); gnChanged(ctx); } });
+      }
     },
     // Privacy > Share My Profile With
     gnShare(ctx, body) {
@@ -10921,8 +11132,20 @@
       prof.prepend(bn);
       const img = prof.querySelector(".gh-avatar");
       if (img) { const w = el("div", "gh-gn-avwrap"); img.replaceWith(w); w.append(img, gnBadgeEl(14)); }
+      const nmEl = prof.querySelector(".gh-set-profile-name");
+      if (nmEl && f.verified) nmEl.appendChild(gnVerifiedEl());
+      const facc = ACCENT_SET[(f.profile && f.profile.accent) || ""];
+      if (nmEl && facc) nmEl.style.color = `color-mix(in srgb, ${facc[0]} 72%, var(--gh-text))`;
+      const fst = gn.net.friendStatus(f.id);
+      if (fst) prof.appendChild(gnStatusEl(fst.text));
       if (f.profile && f.profile.bio) { const bio = el("div", "gh-gn-prof-bio"); bio.textContent = f.profile.bio; prof.appendChild(bio); }
     }
+    const ig = setGroup(body, "Ghost Connection");
+    ig.classList.add("gh-gn-info");
+    if (f.since) setRow(ig, { label: "Connected Since", value: fmtDaySeparator(f.since).replace(/^\w+, /, "") + (new Date(f.since).getFullYear() !== new Date().getFullYear() ? " " + new Date(f.since).getFullYear() : "") });
+    setRow(ig, { label: "Last Heard From", value: f.heard ? gnAgo(f.heard) : "Not yet" });
+    const vr = setRow(ig, { icon: "lock", tint: f.verified ? "#23a55a" : "#8e8e93", label: "Verify Connection", value: f.verified ? "Verified" : "", onClick: () => pushSettingsPage(ctx, "gnVerify") });
+    vr.dataset.gnverify = "1";
     if (f.keyChanged) {
       const kg = setGroup(body, null, "Their Ghost reconnected with new keys on " + fmtDaySeparator(f.keyChanged) + " - usually a reinstall or a new phone. If you didn't expect that, ask them in person.");
       setRow(kg, { icon: "lock", tint: "#ff9433", label: "New Ghost Keys", value: "OK", onClick: async () => { await gn.net.ackKeyChange(f.id); gnChanged(ctx); } });

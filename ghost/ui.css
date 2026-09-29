@@ -2501,3 +2501,19 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-gn-friend-prof { padding-top: 0; }
 .gh-gn-friend-prof .gh-gn-prof-banner { margin-bottom: -46px; }
 .gh-gn-id { font-family: ui-monospace, Menlo, monospace; font-size: 12px; text-align: center; }
+/* Ghost accounts, build 81: status line, verified check, Verify link on the card, safety code, connection info */
+.gh-gn-status { max-width: 300px; margin-top: 2px; padding: 4px 11px; border-radius: 13px; background: var(--gh-bg-panel); font-size: 14px; line-height: 1.3; text-align: center; color: var(--gh-text); overflow-wrap: anywhere; }
+.gh-gn-verified { display: inline-grid; place-items: center; width: 18px; height: 18px; margin-left: 6px; border-radius: 50%; background: #23a55a; color: #fff; vertical-align: 2px; flex: none; }
+.gh-gn-verified svg { width: 11px; height: 11px; }
+.gh-set-row .gh-gn-verified { margin: 0 10px 0 0; }
+.gh-gn-card-link { display: block; margin-top: 6px; padding: 0; border: 0; background: none; color: var(--gh-accent); font: inherit; font-size: calc(13.5px * var(--gh-text-scale, 1)); font-weight: 600; }
+.gh-group[data-me="1"] .gh-gn-card-link { color: #fff; text-decoration: underline; text-underline-offset: 2px; }
+.gh-gn-safety { display: flex; flex-direction: column; align-items: center; gap: 10px; margin: 18px 16px 6px; padding: 22px 12px; border-radius: 16px; background: var(--gh-bg-list); }
+.gh-gn-safety-who { font-size: 14px; color: var(--gh-text-secondary); }
+.gh-gn-safety-code { font-family: ui-monospace, Menlo, monospace; font-size: 30px; font-weight: 600; letter-spacing: 1px; word-spacing: 8px; color: var(--gh-text); }
+.gh-conv-sub[data-gnstatus="1"] { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.gh-set-row.gh-gn-status-row .gh-set-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Birthdays (Snapchat's own): the cake sits right after the name */
+.gh-bday-cake { flex: none; font-size: 0.9em; line-height: 1; }
+.gh-row-top[data-bday="1"] .gh-row-name { flex: 0 1 auto; }
+.gh-row-top[data-bday="1"] .gh-bday-cake { flex: 1 0 auto; text-align: left; }

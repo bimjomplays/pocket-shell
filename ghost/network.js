@@ -9,6 +9,10 @@
 //   - Ghost ID  = base32(SHA-256(ECDH public || ECDSA public))[0..26]; inbox topic = "gh-in-" + base32(SHA-256("ghost-inbox|" + id)).
 //   - Envelope  = {g:1, f:fromId, t:toId, e:ephemeral ECDH key, i:iv, c:AES-GCM ciphertext, s:ECDSA signature}; the key is
 //     HKDF-SHA256(ECDH(ephemeral, recipient)); the signature covers "ghost-net-v1|f>t|" + e + i + c. Inside: {type, ts, n, ...}.
+//   - v2 (build 81): {g:2, e, i, c, s} with {f, t, o:{type, ...}} INSIDE the ciphertext, posted to the recipient's private
+//     inbox ("gh-pi-" + random, told only to connected friends in accept/welcome/profile/sync as `pi`). ntfy then sees
+//     neither who sends nor who receives. The public inbox (derived from the Ghost ID) only carries accept/welcome/declined
+//     and messages to/from builds 79-80, which don't know `pi` (they ignore unknown fields and message types).
 //   - Invite    = the visible chat text "ghost:connect XXXX-XXXX-XXXX" (60 random bits). The inviter posts its signed card
 //     (Ghost ID + public keys + Snapchat user id), AES-GCM encrypted with a key from the code, to a rendezvous topic derived
 //     from the code. The friend's Ghost reads it, checks the card belongs to whoever sent the chat message, and sends an
@@ -27,8 +31,11 @@ const GhostNetCore = (() => {
   const PIC_REUPLOAD = 150 * 60e3; // ntfy.sh keeps attachments 3 h
   const SYNC_EVERY = 6 * 3600e3;
   const MAX_ENVELOPE = 3900; // ntfy turns messages over 4096 bytes into attachments
+  const SYNC_FORCED = 3600e3; // a forced sync (every time Ghost comes to the front) still only runs hourly per friend: ntfy.sh allows 250 messages a day
+  const GONE_KEEP = 7 * 24 * 3600e3; // how long a disconnected friend is remembered, to answer their Ghost with "bye"
+  const PI_RE = /^gh-pi-[a-z2-9]{26}$/;
   const MAX_PIC = 3 * 1024 * 1024;
-  const LIMITS = { name: 40, bio: 300 };
+  const LIMITS = { name: 40, bio: 300, status: 60 };
   const ACCENTS = ["blue", "purple", "pink", "red", "orange", "yellow", "green", "teal"];
   const INVITE_RE = /^\s*ghost:connect\s+([2-9A-HJ-NP-Z]{4})-([2-9A-HJ-NP-Z]{4})-([2-9A-HJ-NP-Z]{4})\s*$/i;
 
@@ -136,6 +143,35 @@ const GhostNetCore = (() => {
     if (!(await subtle.verify(SIG, await importDsaPub(sKey), unb64(env.s), concat("ghost-net-v1|" + route + "|", e, iv, c)))) return null;
     return { from: env.f, obj, card };
   }
+  // v2: sender and recipient inside the ciphertext
+  async function seal2(me, peer, obj) {
+    const eph = await subtle.generateKey(EC, true, ["deriveBits"]);
+    const e = await rawOf(eph.publicKey);
+    const shared = u8(await subtle.deriveBits({ name: "ECDH", public: await importEcdhPub(peer.x) }, eph.privateKey, 256));
+    const key = await hkdfKey(shared, e, "ghost-net-v2|" + peer.id);
+    const iv = rand(12);
+    const c = u8(await subtle.encrypt({ name: "AES-GCM", iv, additionalData: te.encode("ghost-net-v2") }, key, te.encode(JSON.stringify({ f: me.id, t: peer.id, o: obj }))));
+    const s = u8(await subtle.sign(SIG, me.sPriv, concat("ghost-net-v2|", e, iv, c)));
+    const text = JSON.stringify({ g: 2, e: b64(e), i: b64(iv), c: b64(c), s: b64(s) });
+    if (text.length > MAX_ENVELOPE) throw new Error("message too big");
+    return text;
+  }
+  async function unseal2(me, text, senderKey) {
+    const env = JSON.parse(text);
+    // junk is dropped before any key work
+    if (!env || env.g !== 2 || typeof env.e !== "string" || env.e.length > 100 || typeof env.i !== "string" || env.i.length > 24 || typeof env.c !== "string" || typeof env.s !== "string" || env.s.length > 120) return null;
+    const e = unb64(env.e), iv = unb64(env.i), c = unb64(env.c);
+    const shared = u8(await subtle.deriveBits({ name: "ECDH", public: await subtle.importKey("raw", e, EC, true, []) }, me.xPriv, 256));
+    const key = await hkdfKey(shared, e, "ghost-net-v2|" + me.id);
+    const inner = JSON.parse(td.decode(await subtle.decrypt({ name: "AES-GCM", iv, additionalData: te.encode("ghost-net-v2") }, key, c)));
+    if (!inner || inner.t !== me.id || typeof inner.f !== "string" || !inner.o || typeof inner.o.type !== "string") return null;
+    const obj = inner.o;
+    let sKey = senderKey(inner.f), card = null;
+    if (obj.type === "accept") { card = await readCard(obj.card); if (card.id !== inner.f) return null; sKey = sKey || card.s; }
+    if (!sKey) return null;
+    if (!(await subtle.verify(SIG, await importDsaPub(sKey), unb64(env.s), concat("ghost-net-v2|", e, iv, c)))) return null;
+    return { from: inner.f, obj, card };
+  }
 
   // ---- invite codes -------------------------------------------------------------------------------------
   function newCode() {
@@ -158,19 +194,22 @@ const GhostNetCore = (() => {
   // ---- the network --------------------------------------------------------------------------------------
   // deps: gnet(args) -> {status, body(base64)} | null   (native "gnet": ntfy.sh only)
   //       keysGet() -> string|null, keysSet(string), keysDelete()
+  //       farewellKeys: {get, set, del} - a second Keychain slot for the old keys, only while "bye"s owed after Leave
   //       load() -> state|null, save(state)
   //       picGet(key) -> Blob|null, picPut(key, Blob), picDel(key)
   //       me() -> {id, name} (the Snapchat account), now() -> ms, onChange(what, detail), log(text)
   function create(deps) {
     const now = () => (deps.now ? deps.now() : Date.now());
     const log = (t) => { try { deps.log && deps.log(t); } catch (e) {} };
-    let st = null, ident = null, identP = null, busy = null;
+    let st = null, ident = null, identP = null, busy = null, leaving = false, slowUntil = 0;
     const blank = () => ({ v: 1, on: true, friends: {}, invites: {}, joined: {}, since: {}, seen: [], share: "all", shareWith: [],
-      profile: { v: 0, name: "", bio: "", accent: "", pic: false, banner: false }, uploads: {} });
+      profile: { v: 0, name: "", bio: "", accent: "", pic: false, banner: false }, uploads: {},
+      status: { v: 0, text: "", until: 0 }, gone: {}, pi: "" });
     async function state() {
       if (st) return st;
       let s = null; try { s = await deps.load(); } catch (e) {}
       st = Object.assign(blank(), s && s.v === 1 ? s : {});
+      if (!PI_RE.test(st.pi || "")) { st.pi = "gh-pi-" + b32(rand(17)).slice(0, 26); await save(); } // my private inbox
       return st;
     }
     const save = () => deps.save(JSON.parse(JSON.stringify(st)));
@@ -180,8 +219,9 @@ const GhostNetCore = (() => {
       if (ident) return ident;
       if (identP) return identP;
       identP = (async () => {
-        let text = null; try { text = await deps.keysGet(); } catch (e) {}
-        if (text) { try { ident = await loadIdentity(text); return ident; } catch (e) { log("keys unreadable: " + e.message); } }
+        // a Keychain error is not "no keys": making new ones would silently replace your Ghost ID
+        let text = null; try { text = await deps.keysGet(); } catch (e) { log("keys: " + (e && e.message || e)); throw new Error("Couldn't read your Ghost keys. Try again in a moment."); }
+        if (text) { try { ident = await loadIdentity(text); return ident; } catch (e) { log("keys unreadable: " + e.message); throw new Error("Your Ghost keys are unreadable"); } }
         if (!create) return null;
         text = await newKeyFile(now());
         await deps.keysSet(text);
@@ -194,8 +234,10 @@ const GhostNetCore = (() => {
 
     // ---- ntfy.sh ----
     async function net(args) {
+      if (now() < slowUntil) throw new Error("ntfy busy");
       const r = await deps.gnet(args);
       if (!r || typeof r.status !== "number") throw new Error("Ghost network isn't reachable");
+      if (r.status === 429) { slowUntil = now() + 10 * 60e3; throw new Error("ntfy 429"); } // over ntfy.sh's limits: wait
       if (r.status < 200 || r.status >= 300) throw new Error("ntfy " + r.status);
       return unb64(r.body || "");
     }
@@ -221,7 +263,7 @@ const GhostNetCore = (() => {
     // ---- pictures: encrypted once per profile version with a fresh key, sent inside each friend's sealed profile ----
     async function uploadPic(kind) {
       const up = st.uploads[kind];
-      if (up && up.v === st.profile.v && now() - up.at < PIC_REUPLOAD) return up.ref;
+      if (up && now() - up.at < PIC_REUPLOAD) return up.ref; // (dropped whenever the picture itself changes)
       const blob = await deps.picGet("me:" + kind);
       if (!blob) return null;
       const bytes = u8(await blob.arrayBuffer());
@@ -229,7 +271,7 @@ const GhostNetCore = (() => {
       const key = await subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt"]);
       const ct = u8(await subtle.encrypt({ name: "AES-GCM", iv }, key, bytes));
       const ref = { u: await upload(ct), k: b64(keyBytes), i: b64(iv), t: blob.type || "image/jpeg" };
-      st.uploads[kind] = { v: st.profile.v, at: now(), ref };
+      st.uploads[kind] = { at: now(), ref };
       await save();
       return ref;
     }
@@ -247,17 +289,47 @@ const GhostNetCore = (() => {
     async function send(friend, obj) {
       const me = await identity(false);
       if (!me) throw new Error("no Ghost identity");
-      const text = await seal(me, friend, Object.assign({ ts: now(), n: nonce() }, obj));
-      await post(friend.inbox, text);
+      await sendAs(me, friend, obj);
     }
+    async function sendAs(me, friend, obj) {
+      const body = Object.assign({ ts: now(), n: nonce() }, obj);
+      if (friend.cap >= 2 && PI_RE.test(friend.pi || "")) await post(friend.pi, await seal2(me, friend, body));
+      else await post(friend.inbox, await seal(me, friend, body));
+    }
+    // what every message that sets up or keeps a connection carries: where to reach me privately
+    const piInfo = () => ({ pi: st.pi, cap: 2 });
+    function learnPi(f, obj) { if (f && obj && obj.cap >= 2 && PI_RE.test(obj.pi || "") && (f.pi !== obj.pi || f.cap !== 2)) { f.pi = obj.pi; f.cap = 2; return true; } return false; }
     const canShare = (f) => st.share === "all" || (st.shareWith || []).includes(f.id);
     async function sendProfile(f) {
-      if (!canShare(f)) { await send(f, { type: "profile", v: st.profile.v, private: true }); f.sentV = st.profile.v; return; }
+      if (!canShare(f)) { await send(f, Object.assign({ type: "profile", v: st.profile.v, private: true }, piInfo())); f.sentV = st.profile.v; return; }
       const p = st.profile;
-      const [pic, banner] = await Promise.all([p.pic ? uploadPic("pic").catch((e) => { log("pic upload " + e.message); return null; }) : null,
-        p.banner ? uploadPic("banner").catch((e) => { log("banner upload " + e.message); return null; }) : null]);
-      await send(f, { type: "profile", v: p.v, name: p.name, bio: p.bio, accent: p.accent, pic, banner });
+      // a picture that didn't upload is NOT sent as "no picture" (their Ghost would delete yours): the whole profile
+      // waits and goes again at the next sync
+      const [pic, banner] = await Promise.all([p.pic ? uploadPic("pic") : null, p.banner ? uploadPic("banner") : null]);
+      if ((p.pic && !pic) || (p.banner && !banner)) throw new Error("picture missing");
+      await send(f, Object.assign({ type: "profile", v: p.v, name: p.name, bio: p.bio, accent: p.accent, pic, banner }, piInfo()));
       f.sentV = p.v;
+    }
+    // the status line travels on its own (a new status never re-sends pictures). Friends you don't share with get an
+    // empty one, so a status they saw earlier goes away.
+    const statusLive = () => !!(st.status && st.status.text && (!st.status.until || st.status.until > now()));
+    async function sendStatus(f) {
+      const s = st.status || blank().status;
+      const show = canShare(f) && statusLive();
+      await send(f, { type: "status", sv: s.v, text: show ? s.text : "", until: show ? s.until : 0 });
+      f.sentSV = s.v;
+    }
+    async function pushStatusToAll() {
+      for (const f of Object.values(st.friends)) {
+        if (f.state !== "connected" || f.sentSV === st.status.v || !(f.cap >= 2)) continue; // (builds 79-80 ignore it anyway: save ntfy's daily budget)
+        try { await sendStatus(f); } catch (e) { log("status to " + f.id + ": " + e.message); }
+      }
+      await save();
+    }
+    // after connecting: the profile, and the status if there is one
+    async function sendAll(f) {
+      await sendProfile(f);
+      if (st.status && st.status.v && statusLive() && f.cap >= 2) { try { await sendStatus(f); } catch (e) { log("status: " + e.message); } }
     }
     async function pushProfileToAll() {
       for (const f of Object.values(st.friends)) {
@@ -268,9 +340,15 @@ const GhostNetCore = (() => {
     }
 
     // ---- receiving ----
-    function remember(n) {
-      if (typeof n !== "string" || st.seen.includes(n)) return false;
-      st.seen.push(n); if (st.seen.length > 500) st.seen.splice(0, st.seen.length - 500);
+    // every message nonce is kept for as long as its timestamp is accepted (48 h + drift), not a fixed count: busy
+    // friends used to push old nonces out of a 500-entry list while their messages could still be replayed
+    function remember(n, ts) {
+      if (typeof n !== "string" || n.length > 40) return false;
+      if (!st.seenAt || typeof st.seenAt !== "object") st.seenAt = {};
+      if (st.seenAt[n] || (st.seen || []).includes(n)) return false;
+      st.seenAt[n] = ts;
+      const keys = Object.keys(st.seenAt);
+      if (keys.length > 3000) { const cut = now() - 50 * 3600e3; for (const k of keys) if (st.seenAt[k] < cut) delete st.seenAt[k]; }
       return true;
     }
     async function dropFriend(id) {
@@ -280,39 +358,100 @@ const GhostNetCore = (() => {
       await Promise.all([deps.picDel(id + ":pic"), deps.picDel(id + ":banner")].map((p) => Promise.resolve(p).catch(() => {})));
       return f;
     }
+    // a friend you disconnected from is remembered for a week (keys + inboxes only), so a "bye" that didn't get through
+    // is sent again, and anything their Ghost still sends is answered with another "bye"
+    function tombstone(f, sent) { st.gone[f.id] = { id: f.id, x: f.x, s: f.s, inbox: f.inbox, pi: f.pi, cap: f.cap, snap: f.snap, at: now(), sent: !!sent }; }
+    async function sayBye(g) {
+      g.lastBye = now();
+      try { await send(g, { type: "bye" }); g.sent = true; } catch (e) { log("bye: " + e.message); }
+    }
+    async function farewells() {
+      const fw = st.farewell;
+      if (!fw) return;
+      const done = async () => { delete st.farewell; await save(); try { await deps.farewellKeys.del(); } catch (e) {} };
+      if (now() > fw.until || !fw.to || !fw.to.length || !deps.farewellKeys) return done();
+      let me = null;
+      try { const t = await deps.farewellKeys.get(); if (!t) return done(); me = await loadIdentity(t); } catch (e) { log("farewell keys: " + e.message); return; }
+      for (const f of fw.to.slice()) {
+        try { await sendAs(me, f, { type: "bye" }); fw.to = fw.to.filter((x) => x !== f); } catch (e) { log("farewell: " + e.message); break; }
+      }
+      if (!fw.to.length) return done();
+      await save();
+    }
     function friendBySnap(snap) { return Object.values(st.friends).find((f) => f.snap === snap) || null; }
+    const senderKey = (id) => (st.friends[id] && st.friends[id].s) || (st.gone[id] && st.gone[id].s) || null;
     async function handle(msg) {
       const me = await identity(false);
-      if (!me || typeof msg.message !== "string" || msg.message[0] !== "{") return;
+      if (!me || typeof msg.message !== "string" || msg.message[0] !== "{" || msg.message.length > 6000) return;
       let got = null;
-      try { got = await unseal(me, msg.message, (id) => st.friends[id] && st.friends[id].s); } catch (e) { log("unreadable message: " + e.message); return; }
+      try { got = msg.message.startsWith('{"g":2') ? await unseal2(me, msg.message, senderKey) : await unseal(me, msg.message, senderKey); }
+      catch (e) { log("unreadable message: " + e.message); return; }
       if (!got) return;
       const { from, obj } = got;
-      if (typeof obj.ts !== "number" || obj.ts < now() - 48 * 3600e3 || obj.ts > now() + 3600e3 || !remember(obj.n)) return;
+      if (typeof obj.ts !== "number" || obj.ts < now() - 48 * 3600e3 || obj.ts > now() + 3600e3 || !remember(obj.n, obj.ts)) return;
       const f = st.friends[from];
+      if (!f && st.gone[from] && obj.type !== "accept") { // someone you disconnected from: they didn't get the bye
+        const g = st.gone[from];
+        if (obj.type === "bye") { delete st.gone[from]; await save(); return; }
+        if (now() - (g.lastBye || 0) > 10 * 60e3) { await sayBye(g); await save(); }
+        return;
+      }
       if (f && f.since && obj.ts < f.since - 10 * 60e3 && obj.type !== "welcome") return; // older than this connection (replayed; 10 min for clock drift)
+      if (f && f.state === "connected") f.heard = now(); // "Last heard from" on their profile
+      if (f && learnPi(f, obj)) await save();
       switch (obj.type) {
         case "accept": return onAccept(got);
         case "welcome": {
           if (!f || f.state !== "connecting" || !f.code || obj.p !== await proof(f.code, "welcome", from)) return;
-          f.state = "connected"; f.since = now(); delete f.code;
+          f.state = "connected"; f.since = now(); f.heard = now(); delete f.code;
+          delete st.gone[from];
           for (const j of Object.values(st.joined)) if (j.id === from && j.state === "connecting") j.state = "connected";
           await save(); changed("friends", { id: from, snap: f.snap });
-          try { await sendProfile(f); await save(); } catch (e) { log("profile after welcome: " + e.message); }
+          try { await sendAll(f); await save(); } catch (e) { log("profile after welcome: " + e.message); }
           return;
         }
         case "profile": return f ? onProfile(f, obj) : undefined;
         case "sync": {
           if (!f || f.state !== "connected") return;
           if (obj.have !== st.profile.v) { try { await sendProfile(f); } catch (e) { log("sync reply: " + e.message); } }
-          if (typeof obj.mine === "number" && obj.mine > (f.haveV || 0) && !obj.reply) { try { await send(f, { type: "sync", have: f.haveV || 0, mine: st.profile.v, reply: true }); } catch (e) {} }
+          // (builds before 81 send no status numbers: they get no status)
+          if (typeof obj.shave === "number" && obj.shave !== st.status.v) { try { await sendStatus(f); } catch (e) { log("sync status: " + e.message); } }
+          const behind = (typeof obj.mine === "number" && obj.mine > (f.haveV || 0)) || (typeof obj.sv === "number" && obj.sv > (f.statusV || 0));
+          if (behind && !obj.reply) { try { await send(f, Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v, reply: true }, piInfo())); } catch (e) {} }
           await save();
+          return;
+        }
+        case "status": {
+          if (!f || f.state !== "connected" || typeof obj.sv !== "number" || obj.sv <= (f.statusV || 0)) return;
+          const text = String(obj.text == null ? "" : obj.text).replace(/[\u0000-\u001f‪-‮⁦-⁩]/g, " ").trim().slice(0, LIMITS.status);
+          const until = Number(obj.until) || 0;
+          f.status = text ? { text, until } : null; f.statusV = obj.sv;
+          await save(); changed("profile", { id: f.id, snap: f.snap });
+          return;
+        }
+        // their Ghost couldn't download my pictures (ntfy.sh keeps files 3 h): upload fresh ones and send again
+        case "needpics": {
+          if (!f || f.state !== "connected" || now() - (f.picsAsked || 0) < 20 * 60e3) return;
+          f.picsAsked = now();
+          delete st.uploads.pic; delete st.uploads.banner;
+          try { await sendProfile(f); } catch (e) { log("needpics: " + e.message); f.sentV = -1; }
+          await save();
+          return;
+        }
+        // you accepted an invite they had already cancelled
+        case "declined": {
+          if (!f || f.state !== "connecting" || !f.code || obj.p !== await proof(f.code, "declined", from)) return;
+          const code = f.code;
+          await dropFriend(from);
+          if (st.joined[code]) st.joined[code].state = "cancelled";
+          await save(); changed("friends", { id: from, snap: f.snap, removed: true });
           return;
         }
         case "bye": {
           if (!f) return;
           await dropFriend(from);
           for (const j of Object.values(st.joined)) if (j.id === from) j.state = "ended";
+          st.shareWith = (st.shareWith || []).filter((x) => x !== from);
           await save(); changed("friends", { id: from, snap: f.snap, removed: true });
           return;
         }
@@ -326,26 +465,44 @@ const GhostNetCore = (() => {
         if (obj.p === await proof(inv.code, "accept", from)) { hit = inv; break; }
       }
       if (!hit) { log("accept without a live invite from " + from); return; }
+      const welcome = async (fr) => send(fr, Object.assign({ type: "welcome", p: await proof(hit.code, "welcome", (await identity(false)).id) }, piInfo()));
+      if (hit.cancelled) { // tell their Ghost, so it stops saying "Connecting…" (only if it's the person it was for)
+        if (card.snap === hit.to && !hit.declined) {
+          hit.declined = true; await save();
+          try { await send({ id: from, x: card.x, inbox: await inboxOf(from) }, { type: "declined", p: await proof(hit.code, "declined", (await identity(false)).id) }); } catch (e) { log("declined: " + e.message); }
+        }
+        return;
+      }
       if (hit.used) { // codes work once; the same Ghost asking again only means our welcome never reached it
         const again = hit.id === from && st.friends[from];
-        if (again) { try { await send(again, { type: "welcome", p: await proof(hit.code, "welcome", (await identity(false)).id) }); again.sentV = -1; await sendProfile(again); await save(); } catch (e) { log("welcome again: " + e.message); } }
+        if (again) { learnPi(again, obj); try { await welcome(again); again.sentV = -1; await sendAll(again); await save(); } catch (e) { log("welcome again: " + e.message); } }
         return;
       }
       if (card.snap !== hit.to) { hit.wrong = (hit.wrong || 0) + 1; await save(); log("invite " + hit.code + " accepted by the wrong person"); changed("invites", { code: hit.code }); return; }
+      const cur = st.friends[from];
+      if (cur && cur.state === "connected" && cur.snap === card.snap) {
+        // already connected (you both sent invites): keep what you have, just answer
+        hit.used = true; hit.id = from; learnPi(cur, obj); await save();
+        try { await welcome(cur); } catch (e) { log("welcome (already connected): " + e.message); }
+        return;
+      }
       const old = friendBySnap(card.snap);
       if (old && old.id !== from) await dropFriend(old.id); // they reinstalled: new keys
-      st.friends[from] = { id: from, x: card.x, s: card.s, snap: card.snap, inbox: await inboxOf(from), state: "connected", since: now(), haveV: 0, sentV: -1, keyChanged: old && old.id !== from ? now() : 0 };
+      delete st.gone[from];
+      st.friends[from] = { id: from, x: card.x, s: card.s, snap: card.snap, inbox: await inboxOf(from), state: "connected", since: now(), heard: now(), haveV: 0, sentV: -1, keyChanged: old && old.id !== from ? now() : 0 };
+      learnPi(st.friends[from], obj);
       hit.used = true; hit.id = from;
       await save();
       changed("friends", { id: from, snap: card.snap, keyChanged: !!(old && old.id !== from) });
       const fr = st.friends[from];
-      try { await send(fr, { type: "welcome", p: await proof(hit.code, "welcome", (await identity(false)).id) }); await sendProfile(fr); await save(); }
+      try { await welcome(fr); await sendAll(fr); await save(); }
       catch (e) { log("welcome: " + e.message); }
     }
     async function onProfile(f, obj) {
       if (typeof obj.v !== "number" || obj.v <= (f.haveV || 0)) return;
+      const live = () => st.friends[f.id] === f; // (disconnected or left while a picture was downloading)
       if (obj.private) {
-        f.profile = null; f.haveV = obj.v;
+        f.profile = null; f.haveV = obj.v; f.picRefs = {};
         await Promise.all([deps.picDel(f.id + ":pic"), deps.picDel(f.id + ":banner")].map((p) => Promise.resolve(p).catch(() => {})));
         await save(); changed("profile", { id: f.id, snap: f.snap });
         return;
@@ -353,13 +510,26 @@ const GhostNetCore = (() => {
       const clean = (s, n) => String(s == null ? "" : s).replace(/[\u0000-\u001f‪-‮⁦-⁩]/g, " ").trim().slice(0, n);
       let complete = true;
       const pics = {};
+      f.picRefs = f.picRefs || {};
       for (const kind of ["pic", "banner"]) {
-        if (!obj[kind]) { pics[kind] = false; await Promise.resolve(deps.picDel(f.id + ":" + kind)).catch(() => {}); continue; }
-        try { await deps.picPut(f.id + ":" + kind, await fetchPic(obj[kind])); pics[kind] = true; }
+        if (!obj[kind]) { pics[kind] = false; delete f.picRefs[kind]; await Promise.resolve(deps.picDel(f.id + ":" + kind)).catch(() => {}); continue; }
+        // same upload as last time (only their name/bio changed): keep the copy we have
+        if (f.profile && f.profile[kind] && obj[kind].u && f.picRefs[kind] === obj[kind].u) { pics[kind] = true; continue; }
+        try {
+          const blob = await fetchPic(obj[kind]);
+          if (!live()) return;
+          await deps.picPut(f.id + ":" + kind, blob); pics[kind] = true; f.picRefs[kind] = obj[kind].u;
+          if (!live()) { await Promise.resolve(deps.picDel(f.id + ":" + kind)).catch(() => {}); return; }
+        }
         catch (e) { complete = false; pics[kind] = !!(f.profile && f.profile[kind]); log(kind + " from " + f.id + ": " + e.message); }
       }
+      if (!live()) return;
       f.profile = { name: clean(obj.name, LIMITS.name), bio: clean(obj.bio, LIMITS.bio), accent: ACCENTS.includes(obj.accent) ? obj.accent : "", pic: pics.pic, banner: pics.banner };
       if (complete) f.haveV = obj.v; // a picture that expired on ntfy.sh is asked for again at the next sync
+      else if (f.cap >= 2 && now() - (f.needAsked || 0) > 30 * 60e3) { // ...and right away, from builds that understand it
+        f.needAsked = now();
+        try { await send(f, { type: "needpics" }); } catch (e) { log("needpics ask: " + e.message); }
+      }
       await save(); changed("profile", { id: f.id, snap: f.snap });
     }
 
@@ -377,14 +547,14 @@ const GhostNetCore = (() => {
       // anything to check the inbox for: friends, or an invite still in play
       hasWork() {
         if (!st || !st.on) return false;
-        if (Object.keys(st.friends).length) return true;
-        return Object.values(st.invites).some((i) => !i.used && now() - i.created < INVITE_TTL);
+        if (Object.keys(st.friends).length || st.farewell || Object.values(st.gone).some((g) => !g.sent)) return true;
+        return Object.values(st.invites).some((i) => !i.used && !i.cancelled && now() - i.created < INVITE_TTL);
       },
       profile() { return st ? Object.assign({}, st.profile) : blank().profile; },
       share() { return { mode: st.share, with: (st.shareWith || []).slice() }; },
       inviteFor(convId) { // the newest live invite you sent in this chat
         if (!st) return null;
-        return Object.values(st.invites).filter((i) => i.conv === convId && !i.used && now() - i.created < INVITE_TTL).sort((a, b) => b.created - a.created)[0] || null;
+        return Object.values(st.invites).filter((i) => i.conv === convId && !i.used && !i.cancelled && now() - i.created < INVITE_TTL).sort((a, b) => b.created - a.created)[0] || null;
       },
       // what a "ghost:connect" message should show. fromMe: your own invite. sender: the Snapchat id who sent it.
       inviteState(code, fromMe, sender, ts) {
@@ -393,11 +563,13 @@ const GhostNetCore = (() => {
         if (fromMe) {
           const inv = st.invites[code];
           if (!inv) return "unknown"; // sent from another device / an older install
+          if (inv.cancelled) return "cancelled";
           if (inv.used) return st.friends[inv.id] && st.friends[inv.id].state === "connected" ? "connected" : "ended";
           return now() - inv.created > INVITE_TTL ? "expired" : "waiting";
         }
         const j = st.joined[code];
         if (j && j.state === "ended") return "ended"; // you were connected through this invite, then disconnected
+        if (j && j.state === "cancelled") return "cancelled"; // they cancelled it before your Ghost reached theirs
         if (j && j.state === "connected" && st.friends[j.id]) return "connected";
         const known = friendBySnap(sender);
         if (known && known.state === "connected" && (!j || j.id === known.id)) return "connected";
@@ -435,15 +607,18 @@ const GhostNetCore = (() => {
         const me = await identity(true);
         const key = await rvKey(code);
         let card = null;
+        const ids = new Set();
         for (const m of await poll(await rvTopic(code), "all")) {
           try {
             const o = JSON.parse(m.message);
             if (!o || o.rv !== 1) continue;
             const c = await readCard(JSON.parse(td.decode(await subtle.decrypt({ name: "AES-GCM", iv: unb64(o.i) }, key, unb64(o.c)))));
             if (c.snap !== sender) { log("rendezvous card isn't from the sender"); continue; }
-            card = c; break;
+            ids.add(c.id); card = card || c; // (the inviter reposts its card every 10 h: same Ghost, same id)
           } catch (e) {}
         }
+        // two different Ghosts both claiming to be the sender: someone else has the code. Don't guess.
+        if (ids.size > 1) { log("invite " + code + ": " + ids.size + " different Ghosts answered"); throw new Error("Two different Ghosts answered this invite, so it isn't safe. Ask them to send a new one."); }
         if (!card) throw new Error("Couldn't find their Ghost. Ask them to open Ghost, or to send a new invite.");
         if (card.id === me.id) throw new Error("That's your own invite");
         const old = friendBySnap(card.snap);
@@ -453,23 +628,32 @@ const GhostNetCore = (() => {
         st.friends[card.id] = f;
         st.joined[code] = { id: card.id, state: f.state, at: now(), conv: convId };
         const myCard = await makeCard(me, deps.me() && deps.me().id, now());
-        await send(f, { type: "accept", p: await proof(code, "accept", me.id), card: myCard });
+        await send(f, Object.assign({ type: "accept", p: await proof(code, "accept", me.id), card: myCard }, piInfo()));
         await save(); changed("friends", { id: card.id, snap: card.snap });
         return f.state;
       },
       // one round: read the inbox, repost rendezvous cards about to expire, resend accepts that are still waiting
       async poll() {
         await state();
-        if (!st.on) return 0;
+        if (!st.on || leaving) return 0;
         if (busy) return busy;
         busy = (async () => {
+          await farewells();
           const me = await identity(false);
           if (!me) return 0;
           let n = 0;
-          const msgs = await poll(me.inbox, st.since[me.inbox]);
-          for (const m of msgs) { st.since[me.inbox] = m.id; n++; try { await handle(m); } catch (e) { log("handle: " + e.message); } }
+          // the private inbox (connected friends on build 81+) and the public one (invites, older builds)
+          for (const topic of [st.pi, me.inbox]) {
+            let msgs = [];
+            try { msgs = await poll(topic, st.since[topic]); } catch (e) { if (topic === me.inbox) throw e; log("poll pi: " + e.message); continue; }
+            for (const m of msgs.slice(0, 300)) {
+              if (leaving) return n;
+              st.since[topic] = m.id; n++;
+              try { await handle(m); } catch (e) { log("handle: " + e.message); }
+            }
+          }
           for (const inv of Object.values(st.invites)) {
-            if (inv.used || now() - inv.created > INVITE_TTL) { if (now() - inv.created > 3 * INVITE_TTL) delete st.invites[inv.code]; continue; }
+            if (inv.used || inv.cancelled || now() - inv.created > INVITE_TTL) { if (now() - inv.created > 3 * INVITE_TTL) delete st.invites[inv.code]; continue; }
             if (now() - (inv.posted || 0) > RV_REPOST) {
               try {
                 const card = await makeCard(me, deps.me() && deps.me().id, now());
@@ -493,17 +677,25 @@ const GhostNetCore = (() => {
           try {
             if (f.state === "connecting") {
               const j = Object.entries(st.joined).find(([, x]) => x.id === f.id && x.state === "connecting");
-              if (j && f.code && now() - j[1].at < INVITE_TTL && (force || now() - (f.lastSync || 0) > 3600e3)) {
+              if (j && f.code && now() - j[1].at < INVITE_TTL && now() - (f.lastSync || 0) > SYNC_FORCED) {
                 const me = await identity(false);
-                await send(f, { type: "accept", p: await proof(f.code, "accept", me.id), card: await makeCard(me, deps.me() && deps.me().id, now()) });
+                await send(f, Object.assign({ type: "accept", p: await proof(f.code, "accept", me.id), card: await makeCard(me, deps.me() && deps.me().id, now()) }, piInfo()));
                 f.lastSync = now();
               }
               continue;
             }
-            if (!force && now() - (f.lastSync || 0) < SYNC_EVERY) continue;
-            await send(f, { type: "sync", have: f.haveV || 0, mine: st.profile.v });
+            // a profile or status that didn't get out earlier (network down, a picture upload failed)
+            if (f.sentV !== st.profile.v && now() - (f.retryAt || 0) > 10 * 60e3) { f.retryAt = now(); try { await sendProfile(f); } catch (e) { log("profile retry " + f.id + ": " + e.message); } }
+            if (st.status.v && f.sentSV !== st.status.v && f.cap >= 2) { try { await sendStatus(f); } catch (e) { log("status retry: " + e.message); } }
+            if (now() - (f.lastSync || 0) < (force ? SYNC_FORCED : SYNC_EVERY)) continue;
+            await send(f, Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v }, piInfo()));
             f.lastSync = now();
           } catch (e) { log("sync " + f.id + ": " + e.message); }
+        }
+        // goodbyes that didn't get through; forget disconnected friends after a week
+        for (const g of Object.values(st.gone)) {
+          if (now() - g.at > GONE_KEEP) { delete st.gone[g.id]; continue; }
+          if (!g.sent && now() - (g.lastBye || 0) > SYNC_FORCED) await sayBye(g);
         }
         await save();
       },
@@ -530,34 +722,97 @@ const GhostNetCore = (() => {
         st.share = mode === "chosen" ? "chosen" : "all";
         if (Array.isArray(list)) st.shareWith = list.filter((id) => st.friends[id]);
         st.profile.v = (st.profile.v || 0) + 1; // everyone re-checks what they may see
+        st.status.v = (st.status.v || 0) + 1;
         await save(); changed("me", {});
         await pushProfileToAll();
+        await pushStatusToAll();
       },
+      // the status line: text ("" clears it) and when it clears itself (0 = never)
+      status() { const s = st ? st.status : null; return s && s.text && (!s.until || s.until > now()) ? { text: s.text, until: s.until || 0 } : null; },
+      async setStatus(text, until) {
+        await state();
+        await identity(true);
+        text = String(text || "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, LIMITS.status);
+        st.status = { v: (st.status.v || 0) + 1, text, until: text ? Math.max(0, Number(until) || 0) : 0 };
+        await save(); changed("me", {});
+        await pushStatusToAll();
+      },
+      // a connected friend's status, while it lasts
+      friendStatus(id) { const f = st && st.friends[id]; return f && f.status && f.status.text && (!f.status.until || f.status.until > now()) ? f.status : null; },
+      // invites you sent that are still waiting
+      pendingInvites() {
+        if (!st) return [];
+        return Object.values(st.invites).filter((i) => !i.used && !i.cancelled && now() - i.created < INVITE_TTL)
+          .sort((a, b) => b.created - a.created).map((i) => ({ code: i.code, conv: i.conv, to: i.to, created: i.created, expires: i.created + INVITE_TTL }));
+      },
+      // the invite message never made it into the chat: forget it (no "Invite sent · waiting" for 24 h)
+      async forgetInvite(code) { await state(); if (st.invites[code] && !st.invites[code].used) { delete st.invites[code]; await save(); changed("invites", { code }); } },
+      async cancelInvite(code) {
+        await state();
+        const inv = st.invites[code];
+        if (!inv || inv.used) return false;
+        inv.cancelled = true;
+        await save(); changed("invites", { code });
+        return true;
+      },
+      // the safety code for a connected friend: the same 12 digits on both phones as long as both keys are the ones
+      // you connected with (compare in person or on a call)
+      async safetyCode(id) {
+        await state();
+        const f = st.friends[id], me = await identity(false);
+        if (!f || !me) return null;
+        const [a, b] = [me.id, f.id].sort();
+        const h = await sha256("ghost-safety-v1|" + a + "|" + b);
+        let n = 0n; for (let i = 0; i < 8; i++) n = (n << 8n) | BigInt(h[i]);
+        const digits = String(n % 1000000000000n).padStart(12, "0");
+        return digits.slice(0, 4) + " " + digits.slice(4, 8) + " " + digits.slice(8);
+      },
+      async setVerified(id, on) { await state(); const f = st.friends[id]; if (!f) return; f.verified = on ? now() : 0; await save(); changed("profile", { id, snap: f.snap }); },
       async disconnect(id) {
         await state();
         const f = st.friends[id];
         if (!f) return;
-        try { await send(f, { type: "bye" }); } catch (e) { log("bye: " + e.message); }
+        tombstone(f, false);
+        await sayBye(st.gone[id]);
         await dropFriend(id);
         for (const j of Object.values(st.joined)) if (j.id === id) j.state = "ended";
         st.shareWith = (st.shareWith || []).filter((x) => x !== id);
         await save(); changed("friends", { id, snap: f.snap, removed: true });
       },
       // Leave Ghost Network: tell every connected Ghost, then delete the keys and everything received
+      // (a "bye" that fails is retried for 3 days with the old keys, kept only for that)
       async leave() {
         await state();
-        for (const f of Object.values(st.friends)) { try { await send(f, { type: "bye" }); } catch (e) {} await dropFriend(f.id); }
-        await Promise.all([deps.picDel("me:pic"), deps.picDel("me:banner")].map((p) => Promise.resolve(p).catch(() => {})));
-        try { await deps.keysDelete(); } catch (e) {}
-        ident = null;
-        const on = st.on;
-        st = blank(); st.on = on;
-        await save(); changed("left", {});
+        leaving = true;
+        try {
+          if (busy) await busy.catch(() => {});
+          const keyText = await Promise.resolve(deps.keysGet()).catch(() => null);
+          let parked = false; // the old keys stay only in the Keychain's "farewell" slot, only while byes are owed
+          const unsent = [];
+          const all = Object.values(st.friends).concat(Object.values(st.gone).filter((g) => !g.sent));
+          for (const f of all) {
+            let ok = false;
+            try { await send(f, { type: "bye" }); ok = true; } catch (e) { log("bye: " + e.message); }
+            if (!ok) unsent.push({ id: f.id, x: f.x, inbox: f.inbox, pi: f.pi, cap: f.cap });
+            if (st.friends[f.id]) await dropFriend(f.id);
+          }
+          await Promise.all([deps.picDel("me:pic"), deps.picDel("me:banner")].map((p) => Promise.resolve(p).catch(() => {})));
+          if (unsent.length && keyText && deps.farewellKeys) { try { await deps.farewellKeys.set(keyText); parked = true; } catch (e) { log("farewell keys: " + e.message); } }
+          try { await deps.keysDelete(); } catch (e) {}
+          ident = null;
+          const on = st.on, joined = st.joined;
+          st = blank(); st.on = on;
+          st.pi = "gh-pi-" + b32(rand(17)).slice(0, 26);
+          // invites you accepted stay "ended" (they can't work any more: the other Ghost knew your old keys)
+          for (const [code, j] of Object.entries(joined || {})) st.joined[code] = Object.assign({}, j, { state: "ended" });
+          if (unsent.length && parked) st.farewell = { to: unsent, until: now() + 3 * 24 * 3600e3 };
+          await save(); changed("left", {});
+        } finally { leaving = false; }
       },
     };
     return api;
   }
 
-  return { create, parseInvite, inviteText, _test: { seal, unseal, loadIdentity, newKeyFile, makeCard, readCard, proof, newCode, rvTopic, b32 } };
+  return { create, parseInvite, inviteText, _test: { seal, unseal, seal2, unseal2, loadIdentity, newKeyFile, makeCard, readCard, proof, newCode, rvTopic, b32 } };
 })();
 if (typeof module !== "undefined" && module.exports) module.exports = GhostNetCore;

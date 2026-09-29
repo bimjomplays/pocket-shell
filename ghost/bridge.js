@@ -1012,6 +1012,51 @@
     if (best && keys.length >= 3 && bestN >= keys.length * 0.8) meIdCache = best; // you're in every chat of yours
     return best;
   }
+  // Birthdays (Snapchat's own; each friend's "Birthday Party" setting decides whether they share it). Friend sync
+  // records carry `birthday` as "MM-DD" (main.js: outgoingSync.friends[].birthday; Snapchat's own check splits it on
+  // "-"), a profile proto has `birthdate`. Where the live store keeps them isn't device-verified yet (probe:
+  // .claude/work/ghost-debug/birthday-probe.js), so every friend record we can reach is read by shape: whichever
+  // birthday field holds a date. The year is dropped; never throws; cached for a minute.
+  const fmtBday = (m, d) => (m >= 1 && m <= 12 && d >= 1 && d <= 31 ? String(m).padStart(2, "0") + "-" + String(d).padStart(2, "0") : null);
+  function bdayOf(r) {
+    if (!r || typeof r !== "object") return null;
+    for (const k of ["birthday", "birthdate", "birthDate", "birth_date"]) {
+      const v = r[k];
+      if (typeof v === "string") { const m = /^(?:\d{4}-)?(\d{1,2})-(\d{1,2})$/.exec(v.trim()); if (m) return fmtBday(+m[1], +m[2]); }
+      else if (v && typeof v === "object" && (v.month || v.day)) { const b = fmtBday(+v.month, +(v.day || v.date)); if (b) return b; }
+    }
+    return null;
+  }
+  let bdayCache = null, bdayAt = 0;
+  function birthdayMap() {
+    if (bdayCache && Date.now() - bdayAt < 60e3) return bdayCache;
+    const out = {};
+    safe("birthdays", () => {
+      const s = state(), u = s && s.user;
+      if (!u || typeof u !== "object") return;
+      const keyId = (k) => (typeof k === "string" ? (/^[0-9a-f-]{36}$/i.test(k) ? k : null) : idOf(k));
+      const add = (r, key) => { const b = bdayOf(r); if (!b) return; const id = keyId(key) || idOf(r.user_id || r.userId || r.id); if (id && !out[id]) out[id] = b; };
+      // every Map / array / keyed object of records hanging off state.user (friends, public users, requests...)
+      for (const k of Object.keys(u)) {
+        const v = u[k];
+        if (!v || typeof v !== "object" || k === "me") continue;
+        const entries = v instanceof Map ? v.entries() : Array.isArray(v) ? v.map((x) => [null, x]) : Object.entries(v);
+        let n = 0;
+        for (const [key, r] of entries) { if (++n > 5000) break; if (r && typeof r === "object") add(r, key); }
+      }
+      for (const [id, r] of extraUsers) add(r, id);
+      // Snapchat's own user lookup reaches friends that aren't in publicUsers
+      const sel = meId() ? snapUserSelector() : null;
+      if (sel) for (const idObj of u.mutuallyConfirmedFriendIds || []) {
+        const id = idOf(idObj);
+        if (!id || out[id]) continue;
+        const r = safe("bday-sel", () => sel(idObj)(s), null) || safe("bday-sel-str", () => sel(id)(s), null);
+        if (r) add(r, id);
+      }
+    });
+    bdayCache = out; bdayAt = Date.now();
+    return out;
+  }
   function personFor(id) { return publicUser(id) || (id ? { id, name: "Unknown", username: undefined } : null); }
   function newestTimestamp(obj, depth) {
     let best = 0;
@@ -2487,6 +2532,8 @@
       requireStore();
       return friendAction("ChangeDisplayNameForFriends", friendParams(1, [userId], (p) => pbString(p, 2, String(name || "").trim())));
     },
+    // { userId: "MM-DD" } for every friend whose birthday Snapchat has (see birthdayMap)
+    birthdays() { return store ? birthdayMap() : {}; },
     searchFriends(query) {
       // state.user.mutuallyConfirmedFriendIds (Array<{id,str}>) - device-verified 2026-09-27 (debugShape showed
       // it directly; BRIDGE_NOTES.md's earlier pass hadn't located it offline). Resolved through the same
