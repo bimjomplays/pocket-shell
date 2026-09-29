@@ -782,6 +782,21 @@
     return { kind: "system", text: "Chat update" };
   }
 
+  // One message Ghost can't read must never cost the whole list: before, a throw here dropped every "messages"
+  // update for that chat and made loadOlder fail, so history stopped at that message (device 2026-09-28).
+  const badMessages = new Set();
+  function toMessageSafe(conversationId, id, raw) {
+    try { return toMessage(conversationId, id, raw); }
+    catch (e) {
+      const key = conversationId + "|" + String(id);
+      if (!badMessages.has(key)) {
+        badMessages.add(key);
+        const mc = (raw && raw.messageContent) || {};
+        trail("message-unreadable", (e && e.message || String(e)) + " | case " + safeJson({ ct: mc.contentType, keys: Object.keys(mc).slice(0, 12) }), "error");
+      }
+      return null;
+    }
+  }
   function toMessage(conversationId, id, raw) {
     if (!raw) return null;
     const mc = raw.messageContent || {};
@@ -1410,11 +1425,29 @@
   }
   setInterval(() => { if (store) { safe("retention-observe", observeRetention); safe("peeks-observe", observePeeks); } }, 5000);
 
+  // Snapchat's store changes several times a second (presence, typing, receipts in any chat), and every change used
+  // to rebuild every conversation, post the whole list and make the UI walk every row - most of Ghost's idle CPU and a
+  // steady stream of garbage (profiled on the phone 2026-09-28, with the page near its memory limit). Each
+  // conversation is rebuilt only when its own inputs change (the store's objects are replaced, never mutated), and
+  // nothing is posted when nothing changed.
+  const convMemo = new Map(); // id -> { feed, entry, peek, users, out }
+  let lastConvList = null;
+  function toConversationMemo(k, entry) {
+    const feed = (messaging().feed || {})[k], peek = peeks.get(k);
+    const st = state(), users = st && st.user && st.user.publicUsers;
+    const c = convMemo.get(k);
+    if (c && c.feed === feed && c.entry === entry && c.peek === peek && c.users === users) return c.out;
+    const out = toConversation(k, entry);
+    convMemo.set(k, { feed, entry, peek, users, out });
+    return out;
+  }
   const emitConversations = throttle(() => {
     const convs = safe("conversations", () => {
       const map = messaging().conversations || {};
-      return allConversationIds().map((k) => toConversation(k, map[k])).filter(Boolean).sort((a, b) => b.lastActivityTs - a.lastActivityTs);
+      return allConversationIds().map((k) => toConversationMemo(k, map[k])).filter(Boolean).sort((a, b) => b.lastActivityTs - a.lastActivityTs);
     }, []);
+    if (lastConvList && lastConvList.length === convs.length && convs.every((c, i) => c === lastConvList[i])) return;
+    lastConvList = convs;
     post({ ghost: "event", type: "conversations", data: { conversations: convs } });
   }, 150);
 
@@ -1451,7 +1484,7 @@
       const msgs = entry.messages;
       const list = [];
       if (msgs && typeof msgs.entries === "function") {
-        for (const [id, m] of msgs.entries()) { const n = toMessage(conversationId, id, m); if (n) list.push(n); }
+        for (const [id, m] of msgs.entries()) { const n = toMessageSafe(conversationId, id, m); if (n) list.push(n); }
       }
       list.sort((a, b) => a.ts - b.ts);
       postRetainedMessages(conversationId, list, !!entry.hasMoreMessages);
@@ -1820,7 +1853,7 @@
       safe("displayed", () => markDisplayed(conversationId));
       const list = [];
       if (entry && entry.messages && typeof entry.messages.entries === "function") {
-        for (const [id, msg] of entry.messages.entries()) { const n = toMessage(conversationId, id, msg); if (n) list.push(n); }
+        for (const [id, msg] of entry.messages.entries()) { const n = toMessageSafe(conversationId, id, msg); if (n) list.push(n); }
       }
       list.sort((a, b) => a.ts - b.ts);
       return { messages: await withRetention(conversationId, list), hasMore: !!(entry && entry.hasMoreMessages) };
@@ -1837,11 +1870,14 @@
     async loadOlder(conversationId) {
       requireStore();
       const m = messaging();
+      const before = conversationEntry(conversationId);
+      const n0 = before && before.messages ? before.messages.size : 0;
       if (typeof m.paginateMessages === "function") await m.paginateMessages(convIdObj(conversationId));
       const entry = conversationEntry(conversationId);
+      trail("loadOlder", n0 + " -> " + (entry && entry.messages ? entry.messages.size : 0) + " hasMore " + !!(entry && entry.hasMoreMessages) + (entry && entry.error ? " error " + (entry.error.message || entry.error) : ""));
       const list = [];
       if (entry && entry.messages && typeof entry.messages.entries === "function") {
-        for (const [id, msg] of entry.messages.entries()) { const n = toMessage(conversationId, id, msg); if (n) list.push(n); }
+        for (const [id, msg] of entry.messages.entries()) { const n = toMessageSafe(conversationId, id, msg); if (n) list.push(n); }
       }
       list.sort((a, b) => a.ts - b.ts);
       return { messages: await withRetention(conversationId, list), hasMore: !!(entry && entry.hasMoreMessages) };

@@ -469,6 +469,7 @@
     const ctx = { host, shadow, root, stack, state };
     ctx.home = buildHome(ctx);
     ctx.conv = buildConversation(ctx);
+    mediaCtxRef = ctx;
     stack.appendChild(ctx.home.screen);
     stack.appendChild(ctx.conv.screen);
     ctx.shade = el("div", "gh-shade");
@@ -1713,10 +1714,34 @@
   // Photos/videos/voice notes of a chat you've left are freed a little later (bridge releaseMedia + our cache),
   // unless you went back into it. Keeping every chat's media forever made iOS kill the page after a few chats
   // (trail.txt 2026-09-27: "WEB PROCESS CRASHED" -> Ghost reloaded with its loading screen).
+  // A chat you left stops costing memory: its queued downloads are dropped at once (they used to keep downloading and
+  // decrypting in the background, and anything that finished after the release below was never freed - every chat
+  // you visited left some behind until the page ran out of memory on the 4th or 5th chat, device 2026-09-28), and
+  // after the slide-out its bubbles, photos and playing videos are taken out of the page.
+  function dropQueuedMedia(convId) {
+    for (let k = mediaWaiting.length - 1; k >= 0; k--) {
+      const job = mediaWaiting[k];
+      if (job.m.conversationId !== convId) continue;
+      mediaWaiting.splice(k, 1);
+      mediaCache.delete(job.m.conversationId + "|" + job.m.id + (job.m.retained ? "|retained" : ""));
+      job.resolve([]);
+    }
+  }
+  function unloadConvDom(ctx) {
+    const conv = ctx.conv;
+    forgetChatVideos(conv.messages);
+    for (const v of conv.messages.querySelectorAll("video")) { try { v.pause(); } catch (e) {} v.removeAttribute("src"); try { v.load(); } catch (e) {} }
+    for (const im of conv.messages.querySelectorAll("img")) im.removeAttribute("src");
+    conv.messages.replaceChildren(conv.topSpacer, conv.bottomSpacer);
+    conv._paintedConv = null;
+  }
   function scheduleMediaRelease(ctx, convId) {
     if (!convId) return;
+    dropQueuedMedia(convId);
     setTimeout(() => {
       if (ctx.state.currentConvId === convId) return;
+      dropQueuedMedia(convId);
+      if (!ctx.state.currentConvId && !ctx.conv.peekId) unloadConvDom(ctx); // (another chat or a swipe-peek owns the list now: leave it)
       for (const k of Array.from(mediaCache.keys())) if (k.startsWith(convId + "|")) mediaCache.delete(k);
       revokeBlobUrls(convId);
       api.releaseMedia(convId).catch(() => {});
@@ -1746,9 +1771,21 @@
     if (opts.initial || conv.windowEnd === 0) {
       start = Math.max(0, total - (CHUNK * 2));
       end = total;
-    } else {
+    } else if (opts.keepIndices) { // (loadOlderMessages already shifted/extended the window itself)
       start = clamp(conv.windowStart, 0, total);
-      end = clamp(Math.max(conv.windowEnd, total - 1), start, total);
+      end = clamp(conv.windowEnd, start, total);
+      if (opts.stick || conv.windowEnd >= (conv._lastTotal || 0)) end = total;
+    } else {
+      // The same messages stay drawn, found by id: an update that prepended older history (Snapchat's own
+      // pagination event) shifted every index, and the old code also stretched the window to the newest message
+      // on every update - after scrolling up a long way that drew hundreds of bubbles and photos at once.
+      const fi = conv._winFirstId ? all.findIndex((m) => m.id === conv._winFirstId) : -1;
+      const li = conv._winLastId ? all.findIndex((m) => m.id === conv._winLastId) : -1;
+      start = fi >= 0 ? fi : clamp(conv.windowStart, 0, total);
+      // the oldest loaded message was drawn and older ones just arrived above it: draw up to a chunk of them too
+      // (you're at the top, that's what you're waiting for)
+      if (fi > 0 && conv.windowStart === 0) start = Math.max(0, fi - CHUNK);
+      end = clamp(li >= 0 ? li + 1 : conv.windowEnd, start, total);
       // If the newest message was on screen, the newest message stays on screen - whatever else changed (a
       // re-sent slice, a read receipt...). Before, an update that wasn't counted as "new message arrived" kept the
       // old end, so your newest message wasn't drawn until you scrolled (device screenshots 2026-09-27).
@@ -1816,6 +1853,8 @@
   function paintWindow(ctx, conv) {
     const all = conv._all || [];
     const start = conv.windowStart, end = conv.windowEnd, total = all.length;
+    conv._winFirstId = all[start] ? all[start].id : null;
+    conv._winLastId = end > start && all[end - 1] ? all[end - 1].id : null;
     // Away from the bottom, the first message on screen is the anchor: it stays at the same spot. Keeping only the
     // distance from the bottom moved everything above a bubble that got taller - reacting to a message made the
     // chat jump up (device 2026-09-28). Measured before anything is built: reused bubbles leave the list below.
@@ -1830,6 +1869,7 @@
     // (only within one chat: a swipe-peek paints with no current chat, so key by whatever is actually painted)
     const paintKey = ctx.state.currentConvId || conv.peekId || null;
     if (paintKey && conv._paintedConv === paintKey) for (const w of conv.messages.querySelectorAll(".gh-msg-wrap")) if (w._sig && w._sigConv === paintKey) oldWraps.set(w.dataset.messageId, w);
+    if (!(paintKey && conv._paintedConv === paintKey)) forgetChatVideos(conv.messages); // another chat's bubbles: all going
     conv._paintedConv = paintKey;
     if (!groups.length && total === 0) frag.appendChild(chatEmptyEl());
     for (const g of groups) {
@@ -1859,6 +1899,7 @@
     // keep what's on screen where it is: swapping every bubble (a new message, a read receipt...) briefly changes
     // the list's height, and the view used to jump up (device 2026-09-27: "sending a message makes me jump up")
     conv.stickUntil = nowMs() + 150; // the scroll events our own repaint causes aren't the user scrolling up
+    for (const w of oldWraps.values()) forgetChatVideos(w); // (bubbles that weren't reused are gone for good)
     conv.messages.replaceChildren(conv.topSpacer, frag, conv.bottomSpacer);
     conv._anchor = anchor ? Object.assign(anchor, { until: nowMs() + 1500, top: mEl.scrollTop }) : null;
     const restore = () => {
@@ -2296,6 +2337,22 @@
       mediaBoxSave = setTimeout(() => { try { localStorage.setItem("ghostMediaBoxes", JSON.stringify([...mediaBoxSizes].map(([k, v]) => [k, v.w, v.h]))); } catch (e) {} }, 2000);
     });
   }
+  // looping chat videos (saved snaps, GIF-like clips) only play while they're on screen: a chat with a dozen of
+  // them kept every one decoding at once, including after you'd scrolled far away or left the chat
+  let chatVideoIO = null;
+  function watchChatVideo(v) {
+    if (typeof IntersectionObserver !== "function") return;
+    if (!chatVideoIO) chatVideoIO = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const vid = e.target;
+        if (!vid.isConnected) { chatVideoIO.unobserve(vid); continue; }
+        if (e.isIntersecting) { const p = vid.play && vid.play(); if (p && p.catch) p.catch(() => {}); }
+        else { try { vid.pause(); } catch (err) {} }
+      }
+    }, { rootMargin: "200px 0px" });
+    chatVideoIO.observe(v);
+  }
+  function forgetChatVideos(root) { if (chatVideoIO && root) for (const v of root.querySelectorAll("video")) chatVideoIO.unobserve(v); }
   function mediaEl(ref, opts) {
     opts = opts || {};
     const wrap = el("div", "gh-media");
@@ -2309,7 +2366,7 @@
     if (ref.type === "video") {
       const v = el("video");
       v.src = src; v.muted = true; v.playsInline = true; v.loop = !!opts.autoplay;
-      if (opts.autoplay) v.autoplay = true; else v.controls = true;
+      if (opts.autoplay) { v.autoplay = true; watchChatVideo(v); } else v.controls = true;
       if (key && !known) v.addEventListener("loadedmetadata", () => rememberMediaBox(key, wrap), { once: true });
       wrap.appendChild(v);
     } else {
@@ -2511,6 +2568,7 @@
   // Photos, videos and voice notes arrive without their file (Snapchat downloads + decrypts on demand): ask the
   // bridge for it (loadMedia -> Snapchat's own media resolver), 3 at a time, remembered per message.
   const mediaCache = new Map(), mediaWaiting = [];
+  let mediaCtxRef = null; // set once the UI exists (fetchMediaFor has no ctx argument)
   let mediaActive = 0;
   // One blob: URL per Blob, reused on every repaint and revoked when its chat's media is released (bug hunt
   // 2026-09-28: every repaint of a photo/sticker/voice bubble minted a new URL and none were ever revoked).
@@ -2534,7 +2592,7 @@
     if (m.retained && !m.retainedMedia) return Promise.resolve([]);
     const key = m.conversationId + "|" + m.id + (m.retained ? "|retained" : "");
     if (mediaCache.has(key)) return mediaCache.get(key);
-    const p = new Promise((resolve) => mediaWaiting.push({ m, resolve }));
+    const p = new Promise((resolve) => mediaWaiting.push({ m, resolve, ctx: mediaCtxRef }));
     mediaCache.set(key, p);
     pumpMedia();
     return p;
@@ -2550,6 +2608,10 @@
       mediaActive++;
       api.loadMedia(m.conversationId, m.id).then((r) => (r && r.media) || [], (e) => { gtrail("media load failed " + (e && e.message || e)); return []; })
         .then((list) => {
+          if (list.length && job.ctx && job.ctx.state.currentConvId !== m.conversationId && !(job.ctx.conv && job.ctx.conv.peekId === m.conversationId)) {
+            // finished after you left that chat: nothing shows it, so don't keep it (see dropQueuedMedia)
+            mediaCache.delete(m.conversationId + "|" + m.id + (m.retained ? "|retained" : "")); resolve([]); return;
+          }
           if (list.length) { resolve(list); return; }
           const tries = job.tries || 0;
           if (tries < MEDIA_RETRY_MS.length) setTimeout(() => { job.tries = tries + 1; mediaWaiting.push(job); pumpMedia(); }, MEDIA_RETRY_MS[tries]);
@@ -2818,7 +2880,12 @@
     // (a repaint, not the user scrolling) - look again once it's over: a flick that ends at the very top fires no
     // more scroll events, and older messages then never loaded until you scrolled again (device 2026-09-28)
     if (nowMs() < (conv.stickUntil || 0)) { scheduleWindowCheck(ctx, conv.stickUntil - nowMs() + 30); return; }
-    if (m.scrollTop < 240) {
+    // Near the first/last DRAWN message, not near the ends of the list: the spacers above/below the drawn window are
+    // blank estimates, and waiting for scrollTop < 240 meant scrolling through thousands of px of nothing before
+    // older messages appeared - it looked like the chat just stopped (device 2026-09-28, a long chat).
+    const topGap = conv.topSpacer.offsetHeight, bottomGap = conv.bottomSpacer.offsetHeight;
+    const NEAR = Math.max(600, m.clientHeight);
+    if (m.scrollTop < topGap + NEAR && (conv.windowStart > 0 || m.scrollTop < NEAR)) {
       // Sliding the LOCAL window back (more already-fetched messages to reveal) and fetching MORE history
       // from the bridge (loadOlder) are two different things that both happen "near the top" - a freshly
       // opened conversation's first page often already satisfies windowStart === 0 with nothing local left to
@@ -2826,10 +2893,13 @@
       // `windowStart > 0` (as this used to) meant that common case never fetched anything at all.
       if (conv.windowStart > 0) {
         conv.windowStart = Math.max(0, conv.windowStart - CHUNK);
+        // drop the far end as the window grows upward, like the downward branch does (the list kept every bubble
+        // you ever scrolled past, and a long scroll up in a photo-heavy chat grew memory until iOS killed the page)
+        if (conv.windowEnd - conv.windowStart > CHUNK * 4) conv.windowEnd = conv.windowStart + CHUNK * 4;
         paintWindow(ctx, conv);
       }
       if (conv.windowStart === 0 && conv._hasMore && !conv._loadingOlder) loadOlderMessages(ctx);
-    } else if (m.scrollHeight - m.scrollTop - m.clientHeight < 240 && conv.windowEnd < total) {
+    } else if (m.scrollHeight - m.scrollTop - m.clientHeight < bottomGap + NEAR && conv.windowEnd < total) {
       conv.windowEnd = Math.min(total, conv.windowEnd + CHUNK);
       if (conv.windowEnd - conv.windowStart > CHUNK * 4) conv.windowStart = Math.min(conv.windowStart + CHUNK, conv.windowEnd - CHUNK * 2);
       paintWindow(ctx, conv);
@@ -2891,7 +2961,7 @@
         conv.windowStart = Math.max(0, conv.windowStart - OVERSCAN);
         if (conv.windowEnd - conv.windowStart > CHUNK * 4) conv.windowEnd = conv.windowStart + CHUNK * 4; // backstop
       }
-      renderMessageList(ctx, conv, entry, {}); // (paintWindow keeps the view where it was as the older messages appear above)
+      renderMessageList(ctx, conv, entry, { keepIndices: true }); // (paintWindow keeps the view where it was as the older messages appear above)
       conv._olderFails = 0;
       conv._loadingOlder = false;
       // still near the top (a short page): keep going. (The bridge's own "messages" event often lands before this
@@ -6590,12 +6660,24 @@
       }
       else advanceSnapQueue(ctx, q, idx);
     }, { once: true });
-    // 'ended' is the real advance signal; the timer here only drives the visual bar fill (no onExpire - see the
-    // pauseViewer resume-branch note for why a competing advance timer would double-fire for a queue video).
-    if (ref.durationSec) startSnapSegmentTimer(ctx, idx, ref.durationSec * 1000, null);
-    else video.addEventListener("loadedmetadata", () => {
-      if (isFinite(video.duration) && video.duration > 0 && ctx.viewer.snapQ === q && v.idx === idx) startSnapSegmentTimer(ctx, idx, video.duration * 1000 + 200, null);
-    }, { once: true });
+    // 'ended' is the real advance signal; the bar follows the video's own playback position every frame. (It used to
+    // start a timed fill on 'loadedmetadata' - a preloaded next part had already fired that, so its bar never
+    // moved: multi-part snaps showed a full first bar and empty ones after it - device 2026-09-28.)
+    clearTimeout(v.timer);
+    v.startedAt = nowMs(); v.dur = 0; v.paused = false;
+    const fills = v.bars.querySelectorAll(".gh-viewer-bar-fill");
+    fills.forEach((f, i) => { if (i !== idx) { f.classList.remove("gh-anim"); f.style.transition = "none"; f.style.width = i < idx ? "100%" : "0%"; } });
+    const fill = fills[idx];
+    if (fill) {
+      fill.classList.remove("gh-anim"); fill.style.transition = "none"; fill.style.transitionDuration = "0ms"; fill.style.width = "0%";
+      const follow = () => {
+        if (ctx.viewer.snapQ !== q || v.idx !== idx || !video.isConnected) return;
+        const d = isFinite(video.duration) && video.duration > 0 ? video.duration : (ref.durationSec || 0);
+        if (d > 0) fill.style.width = Math.min(100, (100 * video.currentTime) / d).toFixed(2) + "%";
+        requestAnimationFrame(follow);
+      };
+      requestAnimationFrame(follow);
+    }
     maybePrefetchNext(ctx, q, idx);
   }
   async function paintSnapQueueItem(ctx, idx) {

@@ -1035,7 +1035,14 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             try? text.write(to: dir.appendingPathComponent("crash-\(Int(Date().timeIntervalSince1970)).txt"), atomically: true, encoding: .utf8)
         }
         // Ghost reopens the chat you were in after this reload (ui.js reads gm.ghostResume)
-        if Self.ghostMode { UserDefaults.standard.set("1", forKey: "gm.ghostResume") }
+        // ...unless it's crashing again right after that (reopening the same heavy chat just crashed it a second time,
+        // 19 s later - device 2026-09-28): then it starts on the chat list
+        if Self.ghostMode {
+            let now = Date().timeIntervalSince1970
+            let last = UserDefaults.standard.double(forKey: "ghostLastCrash")
+            UserDefaults.standard.set(now, forKey: "ghostLastCrash")
+            UserDefaults.standard.set(now - last > 90 ? "1" : "", forKey: "gm.ghostResume")
+        }
         webView.load(URLRequest(url: Self.home))
     }
 
