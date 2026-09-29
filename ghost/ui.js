@@ -1465,13 +1465,10 @@
     conv.textarea.addEventListener("input", () => {
       conv.textarea.style.height = "auto";
       conv.textarea.style.height = Math.min(100, conv.textarea.scrollHeight) + "px";
-      const hasText = !!conv.textarea.value.trim();
-      conv.sendBtn.dataset.show = hasText ? "1" : "0";
-      conv.micBtn.dataset.hide = hasText ? "1" : "0";
-      // Like iMessage collapsing its app drawer button once you start typing: the camera/gallery pair steps
-      // out of the way instead of squeezing the text field, then comes back the moment the field is empty.
-      conv.mediaBtns.dataset.hide = hasText ? "1" : "0";
+      syncComposerButtons(conv);
     });
+    // back in the app: the buttons follow whatever is really in the field (see syncComposerButtons)
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) syncComposerButtons(conv); });
     // Send without closing the keyboard: a tap on a <button> moves focus to it (blurring the textarea = keyboard
     // down). Handling the tap on touchend with preventDefault stops iOS from making the mouse events/focus change;
     // click stays for non-touch input.
@@ -1655,8 +1652,7 @@
     conv.replyTo = null;
     conv.textarea.value = "";
     hideMentions(ctx);
-    conv.sendBtn.dataset.show = "0";
-    conv.micBtn.dataset.hide = "0";
+    syncComposerButtons(conv);
     setReplyTo(ctx, null);
     // Capture the unread count BEFORE openConversation() marks the chat read below, so the "Unread Messages"
     // divider can be placed against the real number the bridge reported — never fabricated, never re-derived
@@ -3055,6 +3051,16 @@
     } else conv.replyBar.dataset.show = "0";
   }
 
+  // Send/mic and the camera + gallery pair follow the text field. Like iMessage collapsing its app drawer button once
+  // you type, the pair steps out of the way and comes back when the field is empty. Clearing the field in code (send,
+  // opening a chat) fires no "input" event, and sending used to reset only send/mic: the pair stayed hidden until
+  // some later keystroke - leave the app right after sending and it never came back (user report 2026-09-29).
+  function syncComposerButtons(conv) {
+    const hasText = !!conv.textarea.value.trim();
+    conv.sendBtn.dataset.show = hasText ? "1" : "0";
+    conv.micBtn.dataset.hide = hasText ? "1" : "0";
+    conv.mediaBtns.dataset.hide = hasText ? "1" : "0";
+  }
   async function sendCurrentText(ctx) {
     const conv = ctx.conv;
     const text = conv.textarea.value.trim();
@@ -3065,8 +3071,7 @@
     conv.textarea.value = "";
     hideMentions(ctx);
     conv.textarea.style.height = "auto";
-    conv.sendBtn.dataset.show = "0";
-    conv.micBtn.dataset.hide = "0";
+    syncComposerButtons(conv);
     const replyToMessageId = conv.replyTo ? conv.replyTo.id : undefined;
     setReplyTo(ctx, null);
     if (pref("showTyping")) { conv.typingLen = 0; conv.lastTypingActivity = "finish"; api.typingActivity(convId, "finish").catch(() => {}); }
