@@ -76,6 +76,7 @@
   const isConv = (p) => typeof p.id === "string" && p.id && ("shortId" in p);
   const isMsg = (p) => p.message && typeof p.message === "object" && ("content" in p.message || "isFromMe" in p.message);
 
+  const convIdAttr = (it) => { const e = it.hasAttribute("data-conv-id") ? it : it.querySelector("[data-conv-id]"); return e ? String(e.getAttribute("data-conv-id") || "").trim() : ""; };
   function readConversations(doc) {
     const out = [];
     const items = qa(doc, SEL.convItem);
@@ -96,9 +97,12 @@
       let last = lastP ? str(lines(lastP.el).join(" "), 160) : "";
       if (!last) { const rest = all.filter((l) => l !== name && l !== time && !/^\d+\+?$/.test(l)); last = str(rest.join(" "), 160); }
       const unreadN = badge ? Number(String(badge).replace(/\D/g, "")) || 1 : 0;
+      // TikTok's list items carry the conversation id as a data-conv-id attribute (phone check 2026-09-29); without it
+      // Ghost fell back to "i<index>:<name>" keys, which never matched the open chat's id, so every send failed
+      const cid = cp ? cp.id : convIdAttr(it);
       out.push({
-        id: cp ? str(cp.id, 120) : "",
-        key: cp ? str(cp.id, 120) : "i" + i + ":" + name,
+        id: cid ? str(cid, 120) : "",
+        key: cid ? str(cid, 120) : "i" + i + ":" + name,
         name,
         avatar: str(imgSrc(q1(it, SEL.convAvatar) || it), 600),
         last, time,
@@ -257,7 +261,11 @@
 
   // ---- open a conversation / older messages ----
   function findConvItem(id, name) {
-    for (const it of qa(document, SEL.convItem)) { const p = propsUp(it, isConv, 25); if (p && p.id === id) return it; }
+    for (const it of qa(document, SEL.convItem)) {
+      const p = propsUp(it, isConv, 25);
+      const dc = convIdAttr(it);
+      if ((p && p.id === id) || (dc && dc === id)) return it;
+    }
     // no props ("i<index>:<name>" keys): by name, and only if exactly one chat has it - the list reorders as messages
     // arrive, so an index could point at someone else by now
     if (/^i\d+:/.test(String(id || "")) && name) {
@@ -269,7 +277,7 @@
   // a conversation is "open" when the chat on screen says so; with no React props, when its name is in the header
   function isOpen(id, name) {
     const cur = currentConvId(document);
-    if (cur) return cur === id;
+    if (cur && !/^i\d+:/.test(String(id || ""))) return cur === id;
     const n = q1(document, SEL.chatName);
     return !!(name && n && n.textContent.trim() === name);
   }
