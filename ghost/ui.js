@@ -265,6 +265,7 @@
     replyToStory: (userId, item, text) => bridge.call("replyToStory", [userId, item, text], 30000),
     setPresence: (convId) => bridge.call("setPresence", [convId]),
     sendTyping: (id) => bridge.call("sendTyping", [id]),
+    typingActivity: (id, activity) => bridge.call("typingActivity", [id, activity]),
     setReadReceipts: (on) => bridge.call("setReadReceipts", [on]),
     startCall: (id, video) => bridge.call("startCall", [id, video], 30000),
     answerCall: (id, video) => bridge.call("answerCall", [id, video], 30000),
@@ -1500,10 +1501,20 @@
     // "@username " - Snapchat itself turns @username / @myai in the text into real mentions when it sends.
     conv.mentionBox = screen.querySelector(".gh-mention-box");
     conv.textarea.addEventListener("input", () => updateMentions(ctx));
-    // let them see "typing…" (at most every 3 s, like Snapchat's own composer; off with Settings > Privacy)
+    // let them see "typing…" the way Snapchat's composer does (off with Settings > Privacy): the typing state goes to the
+    // chat's presence session on every change (typing / delete / delete_all, "finish" on send - see sendCurrentText),
+    // repeated at most once a second while you keep typing, plus the old typing notification every 3 s
     conv.textarea.addEventListener("input", () => {
       const id = ctx.state.currentConvId;
-      if (!id || !conv.textarea.value || !pref("showTyping") || nowMs() - (conv.lastTypingSent || 0) < 3000) return;
+      if (!id || !pref("showTyping")) return;
+      const len = conv.textarea.value.length, prev = conv.typingLen || 0;
+      conv.typingLen = len;
+      const activity = len === 0 ? "delete_all" : len < prev ? "delete" : "typing";
+      if (activity !== conv.lastTypingActivity || nowMs() - (conv.lastTypingActivityAt || 0) > 1000) {
+        conv.lastTypingActivity = activity; conv.lastTypingActivityAt = nowMs();
+        api.typingActivity(id, activity).then((r) => { if (r && r.ok === false && !conv.typingWarned) { conv.typingWarned = true; gtrail("typing: " + r.reason); } }).catch(() => {});
+      }
+      if (!len || nowMs() - (conv.lastTypingSent || 0) < 3000) return;
       conv.lastTypingSent = nowMs();
       api.sendTyping(id).catch(() => {});
     });
@@ -3058,6 +3069,7 @@
     conv.micBtn.dataset.hide = "0";
     const replyToMessageId = conv.replyTo ? conv.replyTo.id : undefined;
     setReplyTo(ctx, null);
+    if (pref("showTyping")) { conv.typingLen = 0; conv.lastTypingActivity = "finish"; api.typingActivity(convId, "finish").catch(() => {}); }
     conv.atBottom = true; scrollConvToBottom(ctx, false);
     try { await api.sendText(convId, text, replyToMessageId ? { replyToMessageId } : {}); }
     catch (e) { ctx.showToast("Couldn't send that message"); }

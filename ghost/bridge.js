@@ -2184,6 +2184,20 @@
       if (typeof m.sendTypingNotification === "function") await m.sendTypingNotification(convIdObj(conversationId));
       return true;
     },
+    // What friends' apps actually show as typing (the Bitmoji typing in the chat) comes from the chat presence session,
+    // not sendTypingNotification: Snapchat's composer calls presence.broadcastTypingActivity(conversationId, activity)
+    // on every change, activity = "typing" | "delete" | "delete_all" | "finish" (bundle 2026-09-29, the hook next to
+    // the composer's sendTypingNotification), which does presenceSession.onUserAction({type:"typing", typingAction:
+    // {activity, activityType:"text"}}). Ghost only sent the old notification, so friends saw you in the chat but never
+    // typing (user report 2026-09-29). Only works while setPresence() holds this chat's session.
+    typingActivity(conversationId, activity) {
+      requireStore();
+      if (!["typing", "delete", "delete_all", "finish"].includes(activity)) return { ok: false, reason: "bad activity" };
+      const s = (state().presence || {}).presenceSession;
+      if (!s || idOf(s.conversationId) !== conversationId || typeof s.onUserAction !== "function") return { ok: false, reason: "no presence session for this chat" };
+      s.onUserAction({ type: "typing", typingAction: { activity, activityType: "text" } });
+      return { ok: true };
+    },
 
     // Voice note: Snapchat's own voice-note sender (main.js 66836, the "$case:\"note\"...audio" encoder): it measures
     // the clip, uploads it and sends the note - messaging.sendVoiceNote(destinations, blob, locale).
