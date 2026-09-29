@@ -86,6 +86,8 @@ if (ghost / 'ui.js').exists():
 # the TikTok tab's hidden TikTok page script (runs in TikTokFeed.swift's own web view, never in Snapchat's page)
 if (ghost / 'tiktok-page.js').exists():
     (app / 'ghost-tiktok.js').write_text((ghost / 'tiktok-page.js').read_text())
+if (ghost / 'tiktok-dm-page.js').exists():
+    (app / 'ghost-tiktok-dm.js').write_text((ghost / 'tiktok-dm-page.js').read_text())
 
 with zipfile.ZipFile(root / 'Dark-Mobile-Safari.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
     for path in sorted(out.glob('*.user.js')):

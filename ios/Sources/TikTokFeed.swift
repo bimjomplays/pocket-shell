@@ -50,10 +50,19 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
 
     // MARK: ui.js ops ("tt", body.cmd)
 
+    /// TikTok messages (TikTokMessages.swift): its own hidden desktop-site page, created on first use
+    private var dm: GhostTikTokDM? // created by the first dm* command only (stop paths never create it)
+
     func handle(_ body: [String: Any], reply: @escaping (Any?, String?) -> Void) {
-        switch body["cmd"] as? String ?? "" {
+        let cmd = body["cmd"] as? String ?? ""
+        if cmd.hasPrefix("dm") {
+            if dm == nil, let host, let ghost { dm = GhostTikTokDM(host: host, ghost: ghost) }
+            guard let dm else { return reply(nil, "unavailable") }
+            return dm.handle(body, reply: reply)
+        }
+        switch cmd {
         case "start": start(fresh: body["fresh"] as? Bool == true); reply(true, nil)
-        case "stop": stop(); reply(true, nil)
+        case "stop": stop(); dm?.stop(); reply(true, nil) // the TikTok tab was switched off: messages go too
         case "active": // the TikTok tab is (not) on screen: unload a few minutes after it's left
             setActive(body["on"] as? Bool == true); reply(true, nil)
         case "more": more(); reply(true, nil)
@@ -309,6 +318,7 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
 
     private func signOut(reply: @escaping (Any?, String?) -> Void) {
         stop()
+        dm?.stop()
         user = nil
         let store = WKWebsiteDataStore.default()
         store.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in

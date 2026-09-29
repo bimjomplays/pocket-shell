@@ -149,7 +149,7 @@
 
   // The query params TikTok's own /api/ calls carry (aid, app_name, device_platform, screen size, region...), minus
   // signatures and per-call keys: Ghost's own search calls reuse them so they look like the page's own requests.
-  const PER_CALL = /^(msToken|X-Bogus|X-Gnarly|_signature|verifyFp|count|cursor|offset|keyword|secUid|uniqueId|musicID|challengeID|itemID|id|coverFormat|post_item_list_request_type|needPinnedItemIds|search_id|from_page|web_search_code|clientABVersions|user_is_login|WebIdLastTime)$/;
+  const PER_CALL = /^(msToken|X-Bogus|X-Gnarly|_signature|verifyFp|count|cursor|offset|keyword|secUid|uniqueId|musicID|challengeID|itemID|itemId|id|coverFormat|post_item_list_request_type|needPinnedItemIds|search_id|from_page|web_search_code|clientABVersions|user_is_login|WebIdLastTime)$/;
   let common = null;
   function noteParams(url) {
     try {
@@ -286,6 +286,8 @@
     tag: (p) => /^[\p{L}\p{N}_]{1,80}$/u.test(String(p.name || "")) ? ["/tag/" + encodeURIComponent(p.name), "html", parseTagPage] : null,
     tagVideos: (p) => idOk(p.id) ? ["/api/challenge/item_list/?" + enc(Object.assign(withCommon(), { challengeID: p.id, count: 30, cursor: clean(p.cursor || 0, 40), coverFormat: 2 })), "json", parseItemList] : null,
     sound: (p) => idOk(p.id) ? ["/music/" + (clean(p.slug, 80).replace(/[^A-Za-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "original-sound") + "-" + p.id, "html", parseMusicPage] : null,
+    // one video by id (a TikTok shared in a message): /api/item/detail/ -> itemInfo.itemStruct
+    item: (p) => idOk(p.id) ? ["/api/item/detail/?" + enc(Object.assign(withCommon(), { itemId: p.id })), "json", (d) => { const c = compact(d && d.itemInfo && d.itemInfo.itemStruct); return { items: c ? [c] : [] }; }] : null,
     soundVideos: (p) => idOk(p.id) ? ["/api/music/item_list/?" + enc(Object.assign(withCommon(), { musicID: p.id, count: 30, cursor: clean(p.cursor || 0, 40), coverFormat: 2 })), "json", parseItemList] : null,
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

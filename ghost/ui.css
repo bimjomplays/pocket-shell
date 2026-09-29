@@ -2650,5 +2650,51 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-tt-empty-link { color: rgba(255,255,255,0.8); font-size: 14.5px; padding: 6px 12px; }
 .gh-tt-loading { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
 .gh-tt-slide[data-failed="1"]::after { content: "Couldn't load this video"; position: absolute; left: 0; right: 0; top: 50%; text-align: center; color: rgba(255,255,255,0.75); font-size: 14px; }
+/* ---- TikTok messages (build 85) ---- */
+.gh-tt-dm-btn { position: absolute; left: 8px; top: calc(var(--gh-safe-t) + 2px); width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; color: #fff; pointer-events: auto; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5)); }
+.gh-tt-dm-dot { position: absolute; top: 9px; right: 7px; width: 9px; height: 9px; border-radius: 50%; background: #fe2c55; box-shadow: 0 0 0 1.5px #000; display: none; }
+.gh-tt-dm-dot[data-on="1"] { display: block; }
+.gh-tt-sharebtn { pointer-events: auto; }
+.gh-tt[data-dm="0"] .gh-tt-sharebtn { display: none; }
+.gh-ttdm-list { padding: 2px 0 16px; }
+.gh-ttdm-row { width: 100%; display: flex; align-items: center; gap: 12px; padding: 8px 16px; min-height: 72px; text-align: left; color: #fff; }
+.gh-ttdm-row-text { flex: 1; min-width: 0; }
+.gh-ttdm-row-name { font-size: 15.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-ttdm-row-sub { display: flex; font-size: 13.5px; color: rgba(255,255,255,0.55); margin-top: 3px; min-width: 0; }
+.gh-ttdm-row-last { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-ttdm-row-time { flex: none; white-space: nowrap; }
+.gh-ttdm-row[data-unread="1"] .gh-ttdm-row-last { color: #fff; font-weight: 600; }
+.gh-ttdm-unread { flex: none; width: 10px; height: 10px; border-radius: 50%; background: #fe2c55; }
+.gh-ttdm-problem { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 64px 32px; text-align: center; }
+.gh-ttdm-problem-text { font-size: 14.5px; line-height: 1.45; color: rgba(255,255,255,0.72); max-width: 300px; }
+.gh-ttdm-head { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 9px; }
+.gh-ttdm-head-text { min-width: 0; }
+.gh-ttdm-head-name { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-ttdm-head-handle { font-size: 12.5px; color: rgba(255,255,255,0.55); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-ttdm-head-handle:empty { display: none; }
+.gh-ttdm-chat .gh-tts-head { border-bottom: 1px solid rgba(255,255,255,0.1); }
+.gh-ttdm-msgs { display: flex; flex-direction: column; gap: 6px; padding: 12px 12px 10px; }
+.gh-ttdm-time { align-self: center; font-size: 12px; color: rgba(255,255,255,0.45); margin: 8px 0 2px; }
+.gh-ttdm-msg { display: flex; flex-direction: column; align-items: flex-start; max-width: 78%; gap: 4px; }
+.gh-ttdm-msg[data-me="1"] { align-self: flex-end; align-items: flex-end; }
+.gh-ttdm-bubble { padding: 9px 13px; border-radius: 18px; background: #2c2c2e; color: #fff; font-size: 15.5px; line-height: 1.35; white-space: pre-wrap; word-break: break-word; }
+.gh-ttdm-msg[data-me="1"] .gh-ttdm-bubble { background: #2f7cf6; }
+.gh-ttdm-other, .gh-ttdm-recalled { font-style: italic; color: rgba(255,255,255,0.7); background: transparent !important; border: 1px solid rgba(255,255,255,0.18); }
+.gh-ttdm-msg[data-state="sending"] .gh-ttdm-bubble { opacity: 0.6; }
+.gh-ttdm-msg[data-state="failed"] .gh-ttdm-bubble { background: #5a2330; }
+.gh-ttdm-state { font-size: 11.5px; color: rgba(255,255,255,0.5); }
+.gh-ttdm-msg[data-state="failed"] .gh-ttdm-state { color: #ff6b81; }
+.gh-ttdm-msg[data-state="unknown"] .gh-ttdm-state { color: #ffb340; }
+.gh-ttdm-video { display: flex; flex-direction: column; gap: 5px; text-align: left; color: #fff; }
+.gh-ttdm-video-cover { position: relative; width: 150px; aspect-ratio: 3 / 4; border-radius: 12px; overflow: hidden; background: #1c1c1e; }
+.gh-ttdm-video-cover img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: 0; transition: opacity 0.18s ease; }
+.gh-ttdm-video-cover img[data-loaded="1"] { opacity: 1; }
+.gh-ttdm-video-cover > svg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); fill: #fff; color: #fff; filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); }
+.gh-ttdm-video-name { font-size: 13px; color: rgba(255,255,255,0.7); max-width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-ttdm-composer { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px 10px; border-top: 1px solid rgba(255,255,255,0.1); background: #000; }
+.gh-ttdm-input { flex: 1; min-width: 0; min-height: 40px; max-height: 120px; resize: none; border: 0; outline: 0; border-radius: 20px; padding: 10px 14px; background: #2c2c2e; color: #fff; font: inherit; font-size: 16px; line-height: 1.25; -webkit-appearance: none; appearance: none; }
+.gh-ttdm-input::placeholder { color: rgba(255,255,255,0.45); }
+.gh-ttdm-send { flex: none; width: 40px; height: 40px; border-radius: 50%; background: #fe2c55; color: #fff; display: flex; align-items: center; justify-content: center; }
+.gh-ttdm-send:disabled { background: #3a3a3c; color: rgba(255,255,255,0.4); }
 /* the tab bar stays dark over the video, like TikTok */
 .gh-screen[data-screen="home"]:has(.gh-tt[data-open="1"]) .gh-tab-bar { background: #000; border-top-color: rgba(255,255,255,0.08); }

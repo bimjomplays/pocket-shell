@@ -3991,6 +3991,7 @@
   };
   const PREF_DEFAULTS = {
     tiktokTab: true, // Settings > TikTok > TikTok Tab (the far-right tab; off = nothing loads from TikTok)
+    tiktokDM: true, // Settings > TikTok > TikTok Messages (the inbox button + "Send to" in the player; off = its page is torn down)
     theme: "night", accent: "blue", wallpaper: "aurora", textScale: 1, bubbleRadius: 17, bubbleStyle: "gradient",
     compactList: false, showStoriesRail: true, avatars: "bitmoji", hidePreviews: false, readReceipts: true, chatRowStyle: "both",
     doubleTapCamera: true, messageNotifications: true, doubleTapReaction: 1, autoplayGifs: true, sendOnReturn: false, showTimes: true, showTyping: true,
@@ -4483,7 +4484,14 @@
     },
     tiktok(ctx, body) {
       const g = setGroup(body, null, "Off removes the TikTok tab and Ghost stops loading TikTok completely. Your TikTok sign-in stays until you sign out.");
-      setRow(g, { icon: "reels", tint: "linear-gradient(135deg,#25c5e8,#f0366a)", label: "TikTok Tab", toggle: { get: () => pref("tiktokTab") !== false, set: (v) => { setPref(ctx, "tiktokTab", v); paintAcct(); } } });
+      setRow(g, { icon: "reels", tint: "linear-gradient(135deg,#25c5e8,#f0366a)", label: "TikTok Tab", toggle: { get: () => pref("tiktokTab") !== false, set: (v) => { setPref(ctx, "tiktokTab", v); paintAcct(); paintDM(); } } });
+      const dmG = setGroup(body, null, "Your TikTok messages inside Ghost: the inbox button at the top of the TikTok tab, and Send To on a video. Ghost reads them from TikTok's own messages page on this iPhone and sends with TikTok's own message box. Off closes that page.");
+      const paintDM = () => {
+        dmG.innerHTML = "";
+        if (pref("tiktokTab") === false) { setRow(dmG, { label: "TikTok Messages", value: "Off" }); return; }
+        setRow(dmG, { icon: "chatsTab", tint: "linear-gradient(135deg,#3a7bfd,#20d5ec)", label: "TikTok Messages", toggle: { get: () => pref("tiktokDM") !== false, set: (v) => setPref(ctx, "tiktokDM", v) } });
+      };
+      paintDM();
       const acct = setGroup(body, "TikTok Account", "Sign in on TikTok's own page with your phone number, email or username. Google sign-in doesn't work inside apps (Google blocks it). Ghost never sees your password; your TikTok sign-in stays on this iPhone.");
       const paintAcct = async () => {
         acct.innerHTML = "";
@@ -9090,7 +9098,7 @@
     wrap.dataset.open = "0";
     wrap.innerHTML = `
       <div class="gh-tt-pager"></div>
-      <div class="gh-tt-top"><span class="gh-tt-title">For You</span><button class="gh-tt-search-btn gh-press" data-ttact="search" aria-label="Search TikTok"></button></div>
+      <div class="gh-tt-top"><button class="gh-tt-dm-btn gh-press" data-ttact="dm" aria-label="TikTok messages"><i class="gh-tt-dm-dot"></i></button><span class="gh-tt-title">For You</span><button class="gh-tt-search-btn gh-press" data-ttact="search" aria-label="Search TikTok"></button></div>
       <div class="gh-tt-banner" style="display:none"><span>Sign in to TikTok for your own For You feed</span><button class="gh-tt-banner-btn gh-press" data-ttact="signin">Sign In</button></div>
       <div class="gh-tt-empty" style="display:none">
         <div class="gh-tt-empty-title">TikTok</div>
@@ -9103,6 +9111,7 @@
     `;
     screen.insertBefore(wrap, tabBar);
     wrap.querySelector('[data-ttact="search"]').appendChild(icon("search", 25));
+    wrap.querySelector('[data-ttact="dm"]').prepend(icon("chatsTab", 26));
     const T = {
       el: wrap, pager: wrap.querySelector(".gh-tt-pager"), banner: wrap.querySelector(".gh-tt-banner"),
       empty: wrap.querySelector(".gh-tt-empty"), loading: wrap.querySelector(".gh-tt-loading"),
@@ -9110,18 +9119,21 @@
       drag: null, anim: false, moreAt: 0, emptyTimer: null, paused: false,
       onNearEnd: () => ttPost("more").catch(() => {}),
       search: { el: wrap.querySelector(".gh-tts"), stack: [], recent: null },
+      dm: { snap: null, pending: [], listeners: new Set() },
     };
     ctx.tiktok = T;
     ttCtx = ctx;
     for (const b of wrap.querySelectorAll('[data-ttact="signin"]')) b.addEventListener("click", () => { haptic("light"); ttPost("signIn").catch(() => {}); });
     wrap.querySelector('[data-ttact="retry"]').addEventListener("click", () => { haptic("light"); T.empty.style.display = "none"; T.loading.style.display = ""; ttPost("more").catch(() => {}); armEmptyTimer(ctx); });
     wrap.querySelector('[data-ttact="search"]').addEventListener("click", () => { haptic("light"); openTTSearch(ctx); });
+    wrap.querySelector('[data-ttact="dm"]').addEventListener("click", () => { haptic("light"); openTTMessages(ctx); });
 
     // native -> ui.js (darkmobile world)
     window.__ghostTikTok = {
       items: (p) => ttAddItems(ctx, (p && p.items) || []),
       status: (s) => ttApplyStatus(ctx, s || {}),
       reset: () => { ttClear(ctx); if (T.el.dataset.open === "1") { T.loading.style.display = ""; armEmptyTimer(ctx); } },
+      dm: (snap) => ttDMApply(ctx, snap || {}),
     };
     wireTikTokPager(ctx, T);
 
@@ -9204,6 +9216,7 @@
     const on = pref("tiktokTab") !== false;
     const tab = ctx.home && ctx.home.screen.querySelector('[data-tab="tiktok"]');
     if (tab) tab.style.display = on ? "" : "none";
+    applyTikTokDM(ctx);
     if (!on && (T.started || T.el.dataset.open === "1" || T.search.stack.length)) {
       if (T.el.dataset.open === "1") { closeTikTok(ctx); const chats = ctx.home.screen.querySelector('[data-tab="chats"]'); if (chats) { for (const t of ctx.home.screen.querySelectorAll(".gh-tab-btn")) t.dataset.active = "0"; chats.dataset.active = "1"; } }
       ttClear(ctx);
@@ -9360,7 +9373,7 @@
         <div class="gh-tt-desc"></div>
         <div class="gh-tt-music" data-ttlink="sound"></div>
       </div>
-      <div class="gh-tt-side"><div class="gh-tt-stat"></div></div>
+      <div class="gh-tt-side"><div class="gh-tt-stat"></div><div class="gh-tt-stat gh-tt-sharebtn" data-ttlink="share"></div></div>
       <div class="gh-tt-paused-ic"></div>
       <div class="gh-tt-progress"><i></i></div>
     `;
@@ -9370,6 +9383,9 @@
     if (it.music) { mus.append(icon("music", 13)); mus.append(document.createTextNode(" " + it.music)); } else mus.remove();
     const stat = slide.querySelector(".gh-tt-stat");
     stat.append(icon("heartFill", 30), Object.assign(el("span"), { textContent: fmtCount(it.stats && it.stats.likes) }));
+    const shareB = slide.querySelector(".gh-tt-sharebtn");
+    shareB.append(icon("send", 28), Object.assign(el("span"), { textContent: "Send" }));
+    shareB.setAttribute("aria-label", "Send to a TikTok friend");
     slide.querySelector(".gh-tt-paused-ic").appendChild(icon("play", 54));
     const video = slide.querySelector("video");
     const cover = slide.querySelector(".gh-tt-cover");
@@ -9417,6 +9433,7 @@
     else if (kind === "user") openTTProfile(ctx, { uniqueId: a.dataset.handle });
     else if (kind === "tag") openTTTag(ctx, { id: a.dataset.id || "", name: a.dataset.name });
     else if (kind === "sound" && it && it.musicInfo) openTTSound(ctx, it.musicInfo);
+    else if (kind === "share" && it) openTTShare(ctx, it);
     else return false;
     return true;
   }
@@ -10064,6 +10081,335 @@
     pushTTPage(ctx, pg);
     layoutTikTok(ctx, 0, true, P);
     syncTikTokPlayback(ctx);
+    return pg;
+  }
+
+  // =====================================================================================================
+  // TikTok messages (build 85; native: TikTokMessages.swift, page script: ghost/tiktok-dm-page.js). TikTok's phone
+  // website has no chats, so native keeps TikTok's *desktop* messages page open out of sight while these screens are in
+  // use; its page script reads the inbox and the open chat as TikTok draws them and posts snapshots here
+  // (window.__ghostTikTok.dm). Ghost draws its own inbox, chat and "Send to" sheet over them. Sending types into
+  // TikTok's own message box and presses its send button (dm op "dmSend"), once per request id, only after checking the
+  // chat on screen is the right one. DM text only lives in this world's memory: never stored, never logged.
+  // =====================================================================================================
+  function ttDMOn() { return pref("tiktokTab") !== false && pref("tiktokDM") !== false; }
+  function applyTikTokDM(ctx) {
+    const T = ctx.tiktok;
+    if (!T) return;
+    const on = ttDMOn();
+    const b = T.el.querySelector('[data-ttact="dm"]');
+    if (b) b.style.display = on ? "" : "none";
+    T.el.dataset.dm = on ? "1" : "0";
+    if (!on && (T.dm.active || T.search.stack.some((pg) => /^dm/.test(pg.kind)))) {
+      // close every messages screen (and anything opened from them), then tear TikTok's messages page down
+      while (T.search.stack.some((pg) => /^dm/.test(pg.kind))) popTTPageNow(ctx);
+      T.dm.snap = null; T.dm.pending = [];
+      T.dm.active = false;
+      ttPost("dmStop").catch(() => {});
+    }
+  }
+  function popTTPageNow(ctx) {
+    const T = ctx.tiktok;
+    const pg = T.search.stack.pop();
+    if (!pg) return;
+    if (pg.player) syncTikTokPlayer(pg.player, true);
+    destroyTTPage(pg);
+    const prev = T.search.stack[T.search.stack.length - 1];
+    if (prev) { prev.el.dataset.hidden = "0"; if (prev.onShow) prev.onShow(); }
+    if (!T.search.stack.length) T.search.el.dataset.open = "0";
+    syncTikTokPlayback(ctx);
+  }
+  // one messages screen or more open -> TikTok's messages page runs; the last one closing -> it may go idle
+  function ttDMUse(ctx, on) {
+    const D = ctx.tiktok.dm;
+    D.users = Math.max(0, (D.users || 0) + (on ? 1 : -1));
+    const want = D.users > 0;
+    if (want === !!D.active) return;
+    D.active = want;
+    if (want) {
+      ttPost("dmStart").then((snap) => { if (snap && !D.snap) ttDMApply(ctx, snap); }, () => {});
+      ttPost("dmActive", { on: true }).catch(() => {});
+    } else ttPost("dmActive", { on: false }).catch(() => {});
+  }
+  function ttDMApply(ctx, snap) {
+    const T = ctx.tiktok;
+    if (!T || !ttDMOn()) return;
+    const D = T.dm;
+    D.snap = snap;
+    // a sent message that TikTok now shows is no longer "pending"
+    const chat = snap.chat;
+    if (D.pending.length) {
+      const mine = new Map();
+      if (chat) for (const m of chat.messages || []) if (m.me) mine.set(m.text, (mine.get(m.text) || 0) + 1);
+      D.pending = D.pending.filter((p) => {
+        if (p.state !== "sent" && p.state !== "unknown") return true;
+        if (chat && (p.convKey === chat.id || !chat.id)) {
+          const n = mine.get(p.text) || 0;
+          if (n > (p.seenBefore || 0)) { mine.set(p.text, n - 1); return false; }
+        }
+        return nowMs() - p.at < 20000; // TikTok never showed it: stop saying "Sent" after a while
+      });
+    }
+    // unread dot on the inbox button
+    const dot = T.el.querySelector(".gh-tt-dm-dot");
+    if (dot) dot.dataset.on = snap.state === "ok" && (snap.convs || []).some((c) => c.unread) ? "1" : "0";
+    for (const f of D.listeners) { try { f(); } catch (e) {} }
+  }
+  // what to show when TikTok's messages page isn't an inbox: { text, buttons }
+  function ttDMProblem(ctx, snap) {
+    const st = (snap && snap.state) || "loading";
+    if (st === "ok") return null;
+    if (st === "loading" || st === "stopped") return { loading: true, text: "Opening your TikTok messages…" };
+    if (st === "signedOut") return { text: "Sign in to TikTok to see your messages. Use your phone number, email or username (Google sign-in doesn't work inside apps).", buttons: [["Sign in to TikTok", () => ttPost("signIn").catch(() => {})]] };
+    if (st === "verify") return { text: "TikTok wants to check it's you before showing your messages.", buttons: [["Open TikTok", () => ttPost("dmShow").catch(() => {})]] };
+    if (st === "wall") return { text: "TikTok is asking you to open its app instead.", buttons: [["Open TikTok", () => ttPost("dmShow").catch(() => {})]] };
+    return { text: "Couldn't read TikTok's messages page.", buttons: [["Try Again", () => { ttPost("dmStop").then(() => ttPost("dmStart")).then((s) => ttDMApply(ctx, s || { state: "loading" }), () => {}); }], ["Open TikTok", () => ttPost("dmShow").catch(() => {})]] };
+  }
+  function ttDMProblemEl(pb) {
+    const box = el("div", "gh-ttdm-problem");
+    if (pb.loading) box.appendChild(el("div", "gh-spinner"));
+    box.appendChild(Object.assign(el("div", "gh-ttdm-problem-text"), { textContent: pb.text }));
+    (pb.buttons || []).forEach(([label, fn], i) => {
+      const b = el("button", (i ? "gh-tt-empty-link" : "gh-tt-empty-btn") + " gh-press");
+      b.textContent = label;
+      b.addEventListener("click", () => { haptic("light"); fn(); });
+      box.appendChild(b);
+    });
+    return box;
+  }
+  function ttDMRow(L, c, onTap) {
+    const row = el("button", "gh-ttdm-row gh-press");
+    row.dataset.unread = c.unread ? "1" : "0";
+    row.appendChild(ttAvatar(L, c.avatar, 56));
+    const col = el("div", "gh-ttdm-row-text");
+    col.appendChild(Object.assign(el("div", "gh-ttdm-row-name"), { textContent: c.name || "TikTok user" }));
+    const sub = el("div", "gh-ttdm-row-sub");
+    sub.appendChild(Object.assign(el("span", "gh-ttdm-row-last"), { textContent: c.last || "" }));
+    if (c.time) sub.appendChild(Object.assign(el("span", "gh-ttdm-row-time"), { textContent: "\u00a0· " + c.time })); // (a flex item drops a plain leading space)
+    col.appendChild(sub);
+    row.appendChild(col);
+    if (c.unread) row.appendChild(el("i", "gh-ttdm-unread"));
+    row.addEventListener("click", () => { haptic("light"); onTap(c); });
+    return row;
+  }
+  // ---- inbox ----
+  function openTTMessages(ctx) {
+    const T = ctx.tiktok;
+    if (!T || !ttDMOn()) return;
+    const page = ttPageShell("dmlist", "Messages");
+    const body = page.querySelector(".gh-tts-body");
+    let L = ttLazy(body);
+    const pg = { kind: "dmlist", el: page, lazies: [L] };
+    let sig = "";
+    const paint = () => {
+      if (pg.dead) return;
+      const snap = T.dm.snap;
+      const pb = ttDMProblem(ctx, snap);
+      const convs = (snap && snap.convs) || [];
+      const nsig = JSON.stringify([pb && pb.text, convs]);
+      if (nsig === sig) return;
+      sig = nsig;
+      L.destroy(); L = ttLazy(body); pg.lazies[0] = L;
+      body.innerHTML = "";
+      if (pb) { body.appendChild(ttDMProblemEl(pb)); return; }
+      if (!convs.length) { body.appendChild(Object.assign(el("div", "gh-tts-note"), { textContent: "No messages yet. Messages from your TikTok friends show up here." })); return; }
+      const list = el("div", "gh-ttdm-list");
+      for (const c of convs) list.appendChild(ttDMRow(L, c, (cv) => openTTChat(ctx, cv)));
+      body.appendChild(list);
+    };
+    T.dm.listeners.add(paint);
+    pg.onDestroy = () => { T.dm.listeners.delete(paint); ttDMUse(ctx, false); };
+    pg.onShow = paint;
+    page.querySelector(".gh-tts-back").addEventListener("click", () => { haptic("light"); popTTPage(ctx); });
+    pushTTPage(ctx, pg);
+    ttDMUse(ctx, true);
+    paint();
+    return pg;
+  }
+  // ---- one conversation ----
+  function ttDMTime(ms) {
+    if (!ms) return "";
+    const d = new Date(ms), now = new Date();
+    const hm = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    if (d.toDateString() === now.toDateString()) return hm;
+    return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + hm;
+  }
+  function ttDMChatFor(conv, snap) {
+    const chat = snap && snap.chat;
+    if (!chat) return null;
+    if (conv.id) return chat.id === conv.id ? chat : null;
+    return chat.name && chat.name === conv.name ? chat : null; // no ids on this page: by name
+  }
+  function openTTChat(ctx, conv) {
+    const T = ctx.tiktok;
+    if (!T || !ttDMOn() || !conv) return;
+    const convKey = conv.id || conv.key;
+    const page = el("div", "gh-tts-page gh-ttdm-chat");
+    page.dataset.kind = "dmchat";
+    page.innerHTML = `<div class="gh-tts-head"><button class="gh-tts-back gh-press" aria-label="Back"></button><div class="gh-ttdm-head"><span class="gh-ttdm-head-av"></span><div class="gh-ttdm-head-text"><div class="gh-ttdm-head-name"></div><div class="gh-ttdm-head-handle"></div></div></div><span class="gh-tts-head-gap"></span></div>
+      <div class="gh-tts-body gh-ttdm-msgs"></div>
+      <div class="gh-ttdm-composer"><textarea class="gh-ttdm-input" rows="1" placeholder="Send a message..." aria-label="Message"></textarea><button class="gh-ttdm-send gh-press" aria-label="Send" disabled></button></div>`;
+    page.querySelector(".gh-tts-back").appendChild(icon("back", 24));
+    page.querySelector(".gh-ttdm-send").appendChild(icon("send", 20));
+    const msgs = page.querySelector(".gh-ttdm-msgs");
+    const input = page.querySelector(".gh-ttdm-input");
+    const sendB = page.querySelector(".gh-ttdm-send");
+    let L = ttLazy(msgs);
+    const pg = { kind: "dmchat", el: page, lazies: [L], conv };
+    page.querySelector(".gh-ttdm-head-name").textContent = conv.name || "";
+    const headL = ttLazy(page.querySelector(".gh-tts-head"));
+    pg.lazies.push(headL);
+    page.querySelector(".gh-ttdm-head-av").appendChild(ttAvatar(headL, conv.avatar, 34));
+    let sig = "", opened = false, olderAt = 0;
+    const paint = () => {
+      if (pg.dead) return;
+      const snap = T.dm.snap;
+      const pb = ttDMProblem(ctx, snap);
+      const chat = pb ? null : ttDMChatFor(conv, snap);
+      if (chat && chat.handle) page.querySelector(".gh-ttdm-head-handle").textContent = "@" + chat.handle;
+      if (!pb && !chat && !opened) { opened = true; ttPost("dmOpen", { id: conv.id || conv.key, name: conv.name }).catch(() => {}); }
+      const pend = T.dm.pending.filter((p) => p.convKey === convKey);
+      const nsig = JSON.stringify([pb && pb.text, chat && chat.messages, pend.map((p) => [p.rid, p.state])]);
+      if (nsig === sig) return;
+      sig = nsig;
+      const atBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
+      const prevH = msgs.scrollHeight, prevTop = msgs.scrollTop;
+      L.destroy(); L = ttLazy(msgs); pg.lazies[0] = L;
+      msgs.innerHTML = "";
+      input.disabled = sendB.disabled = !!pb || !chat || chat.canSend === false;
+      if (pb) { msgs.appendChild(ttDMProblemEl(pb)); return; }
+      if (!chat) { msgs.appendChild(ttDMProblemEl({ loading: true, text: "Opening the chat…" })); return; }
+      if (chat.canSend === false) page.querySelector(".gh-ttdm-input").placeholder = "You can't message this account";
+      let lastT = 0;
+      for (const m of chat.messages || []) {
+        if (m.time && m.time - lastT > 5 * 60000) msgs.appendChild(Object.assign(el("div", "gh-ttdm-time"), { textContent: ttDMTime(m.time) }));
+        if (m.time) lastT = m.time;
+        msgs.appendChild(ttDMBubble(ctx, L, m));
+      }
+      for (const p of pend) {
+        const b = ttDMBubble(ctx, L, { me: true, text: p.text, kind: "text" });
+        b.dataset.state = p.state;
+        const st = Object.assign(el("div", "gh-ttdm-state"), { textContent: p.state === "failed" ? "Not sent · Tap to try again" : p.state === "unknown" ? "Might not have sent · check before sending again" : p.state === "sending" ? "Sending…" : "Sent" });
+        b.appendChild(st);
+        if (p.state === "failed") b.addEventListener("click", () => { haptic("light"); T.dm.pending = T.dm.pending.filter((x) => x !== p); ttDMSend(ctx, conv, p.text); });
+        msgs.appendChild(b);
+      }
+      if (atBottom || !msgs.dataset.painted) msgs.scrollTop = msgs.scrollHeight;
+      else msgs.scrollTop = prevTop + (msgs.scrollHeight - prevH > 0 && prevTop < 40 ? msgs.scrollHeight - prevH : 0);
+      msgs.dataset.painted = "1";
+    };
+    msgs.addEventListener("scroll", () => {
+      if (msgs.scrollTop < 30 && nowMs() - olderAt > 1500) { olderAt = nowMs(); ttPost("dmOlder").catch(() => {}); }
+    }, { passive: true });
+    const syncBtn = () => { sendB.disabled = input.disabled || !input.value.trim(); input.style.height = "auto"; input.style.height = Math.min(120, input.scrollHeight) + "px"; };
+    input.addEventListener("input", syncBtn);
+    const go = () => {
+      const text = input.value.trim();
+      if (!text || input.disabled) return;
+      input.value = ""; syncBtn();
+      ttDMSend(ctx, conv, text);
+    };
+    sendB.addEventListener("click", () => { haptic("light"); go(); });
+    T.dm.listeners.add(paint);
+    pg.onDestroy = () => { T.dm.listeners.delete(paint); ttDMUse(ctx, false); };
+    pg.onShow = paint;
+    page.querySelector(".gh-tts-back").addEventListener("click", () => { haptic("light"); popTTPage(ctx); });
+    pushTTPage(ctx, pg);
+    ttDMUse(ctx, true);
+    opened = true;
+    ttPost("dmOpen", { id: conv.id || conv.key, name: conv.name }).catch(() => {});
+    paint();
+    return pg;
+  }
+  function ttDMBubble(ctx, L, m) {
+    const b = el("div", "gh-ttdm-msg");
+    b.dataset.me = m.me ? "1" : "0";
+    if (m.video && m.video.itemId) {
+      const card = el("button", "gh-ttdm-video gh-press");
+      const cov = el("span", "gh-ttdm-video-cover"); const img = el("img"); img.alt = ""; cov.appendChild(img); L.add(img, m.video.cover);
+      cov.appendChild(icon("play", 30));
+      card.appendChild(cov);
+      if (m.video.name) card.appendChild(Object.assign(el("span", "gh-ttdm-video-name"), { textContent: "@" + m.video.name }));
+      card.addEventListener("click", () => { haptic("light"); ttOpenSharedVideo(ctx, m.video.itemId); });
+      b.appendChild(card);
+      if (m.text) b.appendChild(Object.assign(el("div", "gh-ttdm-bubble"), { textContent: m.text }));
+      return b;
+    }
+    const bub = el("div", "gh-ttdm-bubble" + (m.kind === "other" ? " gh-ttdm-other" : "") + (m.recalled ? " gh-ttdm-recalled" : ""));
+    bub.textContent = m.recalled ? "This message was deleted" : m.text || "Message";
+    b.appendChild(bub);
+    return b;
+  }
+  async function ttOpenSharedVideo(ctx, itemId) {
+    try {
+      const r = await ttApi("item", { id: String(itemId) });
+      const it = (r.items || [])[0];
+      if (!it) throw new Error("gone");
+      const S = ttSource(async () => ({ list: [it], cursor: 0, hasMore: false }), (x) => x.id);
+      await S.ready();
+      openTTPlayer(ctx, S, 0);
+    } catch (e) { if (!e.captcha) ctx.showToast("Couldn't open that video"); }
+  }
+  // send one message; the request id makes sure a retry of the same request never sends twice
+  async function ttDMSend(ctx, conv, text) {
+    const T = ctx.tiktok;
+    const convKey = conv.id || conv.key;
+    const chat = ttDMChatFor(conv, T.dm.snap);
+    const seenBefore = chat ? (chat.messages || []).filter((m) => m.me && m.text === text).length : 0;
+    const p = { rid: "g" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), convKey, text, state: "sending", at: nowMs(), seenBefore };
+    T.dm.pending.push(p);
+    ttDMApply(ctx, T.dm.snap || { state: "loading" });
+    let r = null;
+    try { r = await ttPost("dmSend", { id: convKey, name: conv.name || "", text, rid: p.rid }); } catch (e) { r = { error: String((e && e.message) || e) }; }
+    if (r && r.ok) { p.state = "sent"; p.at = nowMs(); setTimeout(() => ttDMApply(ctx, T.dm.snap || { state: "loading" }), 21000); }
+    // "try again" only when TikTok's page says the send button was never pressed; anything else (the page went away
+    // mid-send, no answer) may have sent it: say so, and don't offer a one-tap resend that could send it twice
+    else if (r && r.notSent) { p.state = "failed"; gtrail("tiktok dm not sent: " + String(r.error || "").slice(0, 60)); }
+    else { p.state = "unknown"; p.at = nowMs(); gtrail("tiktok dm send unknown: " + String((r && r.error) || "no answer").slice(0, 60)); }
+    ttDMApply(ctx, T.dm.snap || { state: "loading" });
+    return !!(r && r.ok);
+  }
+  // ---- "Send to" a TikTok friend from the player: sends the video's link as a message ----
+  function openTTShare(ctx, it) {
+    const T = ctx.tiktok;
+    if (!T || !ttDMOn() || !it || !it.id) return;
+    const link = "https://www.tiktok.com/@" + ((it.author && it.author.uniqueId) || "tiktok") + "/video/" + it.id;
+    const page = ttPageShell("dmshare", "Send to");
+    const body = page.querySelector(".gh-tts-body");
+    let L = ttLazy(body);
+    const pg = { kind: "dmshare", el: page, lazies: [L] };
+    let sig = "", busy = false;
+    const paint = () => {
+      if (pg.dead) return;
+      const snap = T.dm.snap;
+      const pb = ttDMProblem(ctx, snap);
+      const convs = (snap && snap.convs) || [];
+      const nsig = JSON.stringify([pb && pb.text, convs.map((c) => [c.key, c.name, c.avatar])]);
+      if (nsig === sig) return;
+      sig = nsig;
+      L.destroy(); L = ttLazy(body); pg.lazies[0] = L;
+      body.innerHTML = "";
+      if (pb) { body.appendChild(ttDMProblemEl(pb)); return; }
+      if (!convs.length) { body.appendChild(Object.assign(el("div", "gh-tts-note"), { textContent: "No TikTok chats yet. Start one in the TikTok app, then it shows up here." })); return; }
+      body.appendChild(Object.assign(el("div", "gh-tts-sec"), { textContent: "Recent chats" }));
+      const list = el("div", "gh-ttdm-list");
+      for (const c of convs.slice(0, 30)) list.appendChild(ttDMRow(L, Object.assign({}, c, { unread: false, last: c.last, time: "" }), async (cv) => {
+        if (busy) return;
+        busy = true;
+        const ok = await ttDMSend(ctx, cv, link);
+        busy = false;
+        ctx.showToast(ok ? "Sent to " + (cv.name || "your friend") : "Couldn't send it. Try again from the chat.");
+        if (ok && !pg.dead && T.search.stack[T.search.stack.length - 1] === pg) popTTPage(ctx);
+      }));
+      body.appendChild(list);
+    };
+    T.dm.listeners.add(paint);
+    pg.onDestroy = () => { T.dm.listeners.delete(paint); ttDMUse(ctx, false); };
+    pg.onShow = paint;
+    page.querySelector(".gh-tts-back").addEventListener("click", () => { haptic("light"); popTTPage(ctx); });
+    pushTTPage(ctx, pg);
+    ttDMUse(ctx, true);
+    paint();
     return pg;
   }
 
