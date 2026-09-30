@@ -9833,6 +9833,8 @@
       if (!C.data) C.list.appendChild(Object.assign(el("div", "gh-ttc-note"), { textContent: /signed out/i.test(String(r && r.error)) || (r && r.signedIn === false) ? "Sign in to TikTok to see comments (Settings > TikTok)." : "Couldn't load the comments." }));
       return;
     }
+    // TikTok says there are comments but none arrived yet: ask once more instead of "No comments yet"
+    if (!more && !(r.comments || []).length && Number(r.total) > 0 && C.retryGen !== gen) { C.retryGen = gen; setTimeout(() => { if (gen === C.gen) ttLoadComments(ctx, false); }, 1200); return; }
     const before = C.data ? C.data.comments.length : 0;
     C.data = { comments: r.comments || [], done: more && (r.comments || []).length <= before };
     for (const rep of r.replies || []) { const a = C.replies.get(rep.replyTo) || []; if (!a.some((x) => x.cid === rep.cid)) a.push(rep); C.replies.set(rep.replyTo, a); }

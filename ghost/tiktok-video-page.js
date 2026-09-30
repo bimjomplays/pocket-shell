@@ -243,6 +243,9 @@
     const s = state(id);
     if (!s.ok) return { error: "TikTok's page didn't show that video" };
     if (!(await openComments())) return { error: "TikTok's comments didn't open", comments: [] };
+    // the panel (and its input) shows before its comments arrive: on the phone the first open answered "no comments"
+    // on a video with hundreds (2026-09-29). When TikTok's count says there are some, wait for them to arrive.
+    if (s.comments > 0 && !readComments().length) await waitFor(() => readComments().length > 0, 12000);
     if (more) {
       const before = readComments().length;
       const sc = scroller(); if (sc) { sc.scrollTop = sc.scrollHeight; sc.dispatchEvent(new Event("scroll")); }
