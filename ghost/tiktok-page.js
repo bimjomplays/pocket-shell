@@ -140,7 +140,7 @@
       const c = compact({ id: v.id, desc: v.desc, video: { playAddr: v.playAddr, cover: v.coverUrl, originCover: v.originCoverUrl, width: v.width, height: v.height },
         author: { id: ui.id, uniqueId: v.authorUniqueId || ui.uniqueId, nickname: ui.nickname, avatarThumb: ui.avatarThumbUrl, verified: ui.verified },
         stats: { playCount: v.playCount } });
-      if (c) items.push(c);
+      if (c) { c.nostats = true; items.push(c); } // the embed has plays only: Ghost fills likes/comments later
     }
     return { items };
   }

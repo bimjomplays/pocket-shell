@@ -9483,6 +9483,7 @@
       if (old) { old.el.dataset.paused = "0"; if (old.video) { try { old.video.pause(); old.video.currentTime = 0; } catch (e) {} } }
       P.index = to; P.paused = false; // no haptic per video: TikTok doesn't buzz on every swipe (user 2026-09-29)
       if (P === ctx.tiktok && P.items[to]) ttMarkSeen(P.items[to].id);
+      if (P.items[to]) ttFillStats(ctx, P.items[to]);
     }
     layoutTikTok(ctx, startOffset, true, P);
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -9639,14 +9640,26 @@
     if (!slide || !it) return;
     const st = it.stats || {};
     const set = (k, n, on) => { const b = slide.querySelector(`[data-rail="${k}"]`); if (!b) return; b.querySelector("span").textContent = n == null ? "" : fmtCount(n); if (on != null) b.dataset.on = on ? "1" : "0"; };
-    set("like", st.likes, !!it.liked);
-    set("comments", it.commentsOff ? null : st.comments);
+    const known = !it.nostats; // counts still on their way: blank, not "0"
+    set("like", known ? st.likes : null, !!it.liked);
+    set("comments", it.commentsOff || !known ? null : st.comments);
     set("save", null, ttBmHas(it.id)); // a local bookmark: no TikTok count
-    set("share", st.shares);
+    set("share", known ? st.shares : null);
     const f = slide.querySelector(".gh-tt-follow");
     if (f) { f.dataset.on = it.following ? "1" : "0"; f.setAttribute("aria-label", it.following ? "Following" : "Follow"); }
   }
   // every slide showing this video (the feed and any search player) repaints
+  // a video shown without its like/comment counts (profile videos from the creator embed): ask TikTok for them
+  function ttFillStats(ctx, it) {
+    const st = (it && it.stats) || {};
+    // also when both counts read 0: a list that came without counts (every profile video said 0, phone 2026-09-29)
+    if (!it || it._statsAsked || !(it.nostats || (String(st.likes || 0) === "0" && String(st.comments || 0) === "0"))) return;
+    it._statsAsked = true;
+    ttApi("item", { id: it.id }).then((r) => {
+      const full = r && r.items && r.items[0];
+      if (full && full.stats) { it.stats = Object.assign({}, it.stats, full.stats); delete it.nostats; ttRepaintItem(ctx, it); }
+    }, () => {});
+  }
   function ttRepaintItem(ctx, it) {
     const T = ctx.tiktok;
     const players = [T].concat(T.search.stack.map((pg) => pg.player).filter(Boolean));
@@ -10080,7 +10093,13 @@
       try {
         const r = await fetchPage(S.cursor, S);
         let added = 0;
-        for (const x of r.list || []) { const k = keyOf(x); if (!k || S.ids.has(k)) continue; S.ids.add(k); S.items.push(x); added++; }
+        for (const x of r.list || []) {
+          const k = keyOf(x); if (!k) continue;
+          // seen already (a profile's first videos come from the creator embed, which has no like/comment counts):
+          // take the counts from the fuller copy
+          if (S.ids.has(k)) { const ex = S.items.find((y) => keyOf(y) === k); if (ex && ex.nostats && x.stats && !x.nostats) { ex.stats = x.stats; delete ex.nostats; } continue; }
+          S.ids.add(k); S.items.push(x); added++;
+        }
         S.cursor = r.cursor;
         // no new rows = the end, even if TikTok says there's more (stops endless empty pages)
         // (keepGoing: the page moved on even though every row was a duplicate - the profile's embed rows)
@@ -10697,6 +10716,7 @@
     page.dataset.kind = "player";
     page.innerHTML = `<div class="gh-tt-pager"></div><button class="gh-tts-pback gh-press" aria-label="Back"></button>`;
     page.querySelector(".gh-tts-pback").appendChild(icon("back", 26));
+    if (S.items[index]) ttFillStats(ctx, S.items[index]);
     const P = { pager: page.querySelector(".gh-tt-pager"), items: S.items, index, slides: new Map(), paused: false, drag: null, anim: false, moreAt: 0,
       onNearEnd: () => { if (S.hasMore) S.more(); } };
     const pg = { kind: "player", el: page, player: P, lazies: [] };
