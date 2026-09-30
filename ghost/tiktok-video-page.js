@@ -105,16 +105,33 @@
   function itemFrom(el) {
     return propsUp(el, (p) => { if (isItem(p.item)) return p.item; if (isItem(p.itemInfo)) return p.itemInfo; if (isItem(p.video)) return p.video; if (isItem(p)) return p; for (const k of Object.keys(p)) if (isItem(p[k])) return p[k]; return null; }, 30);
   }
+  // TikTok's desktop video page can show more than one video (the one asked for and the next ones), and sometimes
+  // not the one asked for at all (phone 2026-09-29: URL + page data said 7663…, the buttons belonged to 7690…/7640…).
+  // So everything is matched by the video's id, never "the first like button".
+  const ITEM_SELS = ['[data-e2e="like-icon"]', '[data-e2e="browse-like-icon"]', '[data-e2e="favorite-icon"]', '[data-e2e="video-desc"]', '[data-e2e="feed-video"]'];
   function currentItem(id) {
-    for (const a of [q('[data-e2e="like-icon"]'), q('[data-e2e="favorite-icon"]'), q('[data-e2e="video-desc"]'), q('[data-e2e="feed-video"]')]) {
-      const it = a && itemFrom(a);
+    for (const sel of ITEM_SELS) for (const a of qa(sel)) {
+      const it = itemFrom(a);
       if (it && (!id || it.id === id)) return it;
     }
     return null;
   }
+  // the button (like / favorite / comment / follow) that belongs to video `id`
+  function buttonFor(id, sel) {
+    for (const b of qa(sel)) { const it = itemFrom(b); if (it && it.id === id) return b; }
+    return null;
+  }
+  // the page's own data says it's this video but none of its buttons are: reload once (TikTok then shows it)
+  function reloadIfMissing(id) {
+    if (!id || currentItem(id) || document.readyState !== "complete") return;
+    let rh = ""; try { rh = JSON.parse(document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__").textContent).__DEFAULT_SCOPE__["webapp.video-detail"].itemInfo.itemStruct.id; } catch (e) {}
+    const key = "ghReload:" + id;
+    if (performance.now() > 5000 && !sessionStorage.getItem(key) && (rh === id || location.pathname.includes(id))) { sessionStorage.setItem(key, "1"); location.reload(); }
+  }
   const num = (x) => { const n = Number(x); return isFinite(n) ? n : 0; };
   function state(id) {
     const it = currentItem(id);
+    if (!it && id) reloadIfMissing(id);
     const st = (it && (it.statsV2 || it.stats)) || {};
     const followBtn = q('[data-e2e="feed-follow"]') || q('[data-e2e="browse-follow"]');
     const followText = followBtn ? followBtn.textContent.trim().toLowerCase() : "";
@@ -164,9 +181,12 @@
     const key = which === "like" ? "liked" : which === "save" ? "saved" : "following";
     if (before[key] === on) return { ok: true, state: before, already: true };
     const sel = which === "like" ? '[data-e2e="like-icon"], [data-e2e="browse-like-icon"]' : which === "save" ? '[data-e2e="favorite-icon"], [data-e2e="browse-favorite-icon"]' : '[data-e2e="feed-follow"], [data-e2e="browse-follow"]';
-    // the video's data is on the page a moment before its buttons are (phone 2026-09-29: "no like button")
-    const btn = await waitFor(() => q(sel), 8000);
+    // the video's data is on the page a moment before its buttons are (phone 2026-09-29: "no like button"); and the
+    // button must be THIS video's (the page can show other videos too)
+    const btn = await waitFor(() => (which === "follow" ? buttonFor(id, sel) || q(sel) : buttonFor(id, sel)), 8000);
     if (!btn || !clickEl(btn)) return { error: "no " + which + " button on TikTok's page", notDone: true };
+    // if the pointer press didn't take, one plain click (only while the state still hasn't changed)
+    if (!(await waitFor(() => state(id)[key] === on, 2500)) && state(id)[key] !== on) { const b2 = btn.closest("button") || btn.closest("[role=button]") || btn; b2.click(); }
     // unfollowing may ask to confirm
     if (which === "follow" && !on) {
       const confirm = await waitFor(() => qa('[role="dialog"] button, [data-e2e*="confirm"]').find((b) => /unfollow/i.test(b.textContent || "")), 1500);
@@ -222,9 +242,9 @@
     return out;
   }
   const strip = (list) => list.map((c) => { const x = Object.assign({}, c); delete x._el; return x; });
-  async function openComments() {
+  async function openComments(id) {
     if (readComments().length) return true;
-    const ic = await waitFor(() => q('[data-e2e="comment-icon"], [data-e2e="browse-comment-icon"]'), 8000);
+    const ic = await waitFor(() => (id ? buttonFor(id, '[data-e2e="comment-icon"], [data-e2e="browse-comment-icon"]') : null) || (!id ? q('[data-e2e="comment-icon"]') : null), 8000);
     if (!ic) return false;
     // a plain click opens the comment panel (1.4.0 did, checked on the phone); the full pointer sequence toggled it
     // open and shut again ("TikTok's comments didn't open" in 1.5.x)
@@ -242,7 +262,7 @@
   async function comments(id, more) {
     const s = state(id);
     if (!s.ok) return { error: "TikTok's page didn't show that video" };
-    if (!(await openComments())) return { error: "TikTok's comments didn't open", comments: [] };
+    if (!(await openComments(id))) return { error: "TikTok's comments didn't open", comments: [] };
     // the panel (and its input) shows before its comments arrive: on the phone the first open answered "no comments"
     // on a video with hundreds (2026-09-29). When TikTok's count says there are some, wait for them to arrive.
     if (s.comments > 0 && !readComments().length) await waitFor(() => readComments().length > 0, 12000);
@@ -261,18 +281,24 @@
     return null;
   }
   async function replies(id, cid) {
-    if (!(await openComments())) return { error: "TikTok's comments didn't open" };
+    if (!(await openComments(id))) return { error: "TikTok's comments didn't open" };
     const el = commentEl(cid);
     if (!el) return { error: "that comment isn't on TikTok's page" };
     const box = commentBox(el) || el;
     const area = box.parentElement || box;
     const btn = qa("p, span, div, button", area).find((b) => /^(view|view more)\s+\d*\s*(more\s+)?repl/i.test((b.textContent || "").trim()) && b.children.length < 3);
     const before = readComments().filter((c) => c.replyTo === cid).length;
-    if (btn) { clickEl(btn); await waitFor(() => readComments().filter((c) => c.replyTo === cid).length > before, 5000); }
+    if (btn) {
+      // a plain click first (like the comment button), the full pointer press only if nothing happened
+      (btn.closest("button") || btn.closest("[role=button]") || btn).click();
+      if (!(await waitFor(() => readComments().filter((c) => c.replyTo === cid).length > before, 4000))) {
+        clickEl(btn); await waitFor(() => readComments().filter((c) => c.replyTo === cid).length > before, 5000);
+      }
+    }
     return { ok: true, replies: strip(readComments().filter((c) => c.replyTo === cid)) };
   }
   async function likeComment(id, cid, on) {
-    if (!(await openComments())) return { error: "TikTok's comments didn't open", notDone: true };
+    if (!(await openComments(id))) return { error: "TikTok's comments didn't open", notDone: true };
     const cur = readComments().find((c) => c.cid === cid);
     if (!cur) return { error: "that comment isn't on TikTok's page", notDone: true };
     if (cur.liked === on) return { ok: true, already: true };
@@ -310,7 +336,7 @@
     const s = state(id);
     if (!s.ok) return { error: "TikTok's page didn't show that video", notSent: true };
     if (!s.signedIn) return { error: "signed out", notSent: true };
-    if (!(await openComments())) return { error: "TikTok's comments didn't open", notSent: true };
+    if (!(await openComments(id))) return { error: "TikTok's comments didn't open", notSent: true };
     if (replyCid) {
       const el = commentEl(replyCid);
       if (!el) return { error: "that comment isn't on TikTok's page", notSent: true };
