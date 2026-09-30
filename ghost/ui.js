@@ -1000,9 +1000,16 @@
     });
     return box;
   }
+  // you, anywhere Ghost draws your own avatar (your reactions in a group chat, Settings): the picture from your Ghost
+  // profile instead of your Bitmoji, once you've set one (user request 2026-09-29)
+  function myGhostPic(user) {
+    const me = gn.ctx && gn.ctx.state && gn.ctx.state.me;
+    if (!user || user.members || !me || !(user === me || (user.id && me.id && user.id === me.id))) return null;
+    return (gn.picUrls && gn.picUrls.get("me:pic")) || null;
+  }
   function makeAvatar(user, size) {
     // your own picture for them > their Ghost profile picture (connected Ghost friends) > Bitmoji
-    const custom = user && ((user.convId && customAvatarUrls.get("conv:" + user.convId)) || (user.id && customAvatarUrls.get("user:" + user.id)) || (user.id && !user.members && gnPicFor(user.id)));
+    const custom = user && ((user.convId && customAvatarUrls.get("conv:" + user.convId)) || (user.id && customAvatarUrls.get("user:" + user.id)) || (user.id && !user.members && gnPicFor(user.id)) || myGhostPic(user));
     if (custom) {
       const img = el("img", "gh-avatar");
       img.style.width = size + "px"; img.style.height = size + "px"; img.width = size; img.height = size; img.alt = "";
@@ -4468,12 +4475,21 @@
     },
     main(ctx, body) {
       const me = ctx.state.me || {};
-      const prof = el("div", "gh-set-profile");
-      prof.appendChild(makeAvatar(me, 84));
-      const nm = el("div", "gh-set-profile-name"); nm.textContent = me.name || "You";
-      const un = el("div", "gh-set-profile-user"); un.textContent = me.username ? "@" + me.username : "";
-      prof.append(nm, un);
-      body.appendChild(prof);
+      // the top of Settings is your Ghost profile (banner, picture, name) once you've set one, else your Snapchat one
+      if (gn.net) {
+        const p = gn.net.profile(), st = gn.net.status();
+        const head = gnProfileHead(me, p, gn.picUrls.get("me:banner"), gn.picUrls.get("me:pic"), false, { status: st && st.text });
+        head.classList.add("gh-set-mehead", "gh-press");
+        head.addEventListener("click", () => { haptic("light"); pushSettingsPage(ctx, "gnProfile"); });
+        body.appendChild(head);
+      } else {
+        const prof = el("div", "gh-set-profile");
+        prof.appendChild(makeAvatar(me, 84));
+        const nm = el("div", "gh-set-profile-name"); nm.textContent = me.name || me.username || "You";
+        const un = el("div", "gh-set-profile-user"); un.textContent = me.username ? "@" + me.username : "";
+        prof.append(nm, un);
+        body.appendChild(prof);
+      }
       let g = setGroup(body);
       if (gn.net) setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Ghost Profile", value: gn.net.profile().name || (gn.net.profile().v ? "" : "Set Up"), onClick: () => pushSettingsPage(ctx, "gnProfile") });
       setRow(g, { icon: "bookmark", tint: "linear-gradient(135deg,#f0b232,#ff9433)", label: "Bookmarks", value: String((pref("bookmarks") || []).length || ""), onClick: () => { ctx.settings.bookmarksConv = null; pushSettingsPage(ctx, "bookmarks"); } });
