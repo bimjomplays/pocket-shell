@@ -290,7 +290,8 @@
     for (let e = el.parentElement, i = 0; e && i < 8; e = e.parentElement, i++) { if (e.querySelectorAll('[data-e2e="comment-level-1"]').length > 1) break; area = e; }
     // TikTok's "View 6 replies" is a <button class="TUXButton"> inside a DivViewRepliesContainer (phone 2026-09-29);
     // clicking the container div never reaches the button's handler, so the button itself is taken first
-    const isView = (b) => /^(view|view more)\s+\d*\s*(more\s+)?repl/i.test((b.textContent || "").trim());
+    // first "View 6 replies", then (once some show) "View 3 more" - no "replies" in that one (phone 2026-09-29)
+    const isView = (b) => /^view\s+(\d+\s+)?(more\s+)?(repl|more\b)/i.test((b.textContent || "").trim());
     const btn = qa("button, [role=button]", area).find(isView) || qa("p, span, div", area).find((b) => isView(b) && b.children.length < 3);
     const before = readComments().filter((c) => c.replyTo === cid).length;
     if (btn) {
