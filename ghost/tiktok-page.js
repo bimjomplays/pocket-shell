@@ -50,7 +50,9 @@
       music: m ? str(m.title, 120) + (m.authorName ? " - " + str(m.authorName, 80) : "") : "",
       musicInfo: m && m.id ? { id: str(m.id, 40), title: str(m.title, 120), author: str(m.authorName, 80), cover: pick(m.coverMedium) || pick(m.coverThumb) || "", duration: num(m.duration), original: !!m.original } : null,
       tags: tags.slice(0, 12),
-      stats: { likes: String(st.diggCount || 0), comments: String(st.commentCount || 0), shares: String(st.shareCount || 0), plays: String(st.playCount || 0) },
+      stats: { likes: String(st.diggCount || 0), comments: String(st.commentCount || 0), shares: String(st.shareCount || 0), plays: String(st.playCount || 0), saves: String(st.collectCount || 0) },
+      liked: !!it.digged, saved: !!it.collected, following: !!(a.relation && a.relation > 0),
+      commentsOff: it.itemCommentStatus != null && it.itemCommentStatus !== 0,
       created: num(it.createTime),
     };
   }
@@ -165,7 +167,7 @@
     const list = (d && d.itemList) || [];
     const items = [];
     for (const it of list) { const c = compact(it); if (c && !seen.has(c.id)) { seen.add(c.id); items.push(c); } }
-    post({ type: "items", items, hasMore: d.hasMore !== false, source: /preload/.test(url) ? "preload" : "recommend" });
+    post({ type: "items", items, hasMore: d.hasMore !== false, source: /preload/.test(url) ? "preload" : "recommend", refresh: refreshing && /\/api\/recommend\//.test(url) && /[?&]pullType=1(&|$)/.test(url) });
   }
 
   // The query params TikTok's own /api/ calls carry (aid, app_name, device_platform, screen size, region...), minus
@@ -286,6 +288,21 @@
       return r.ok;
     } catch (e) { return false; } finally { moreBusy = false; }
   }
+  // TikTok's refresh (tapping For You again): a new first page, pullType 1 like the page's own first request; the
+  // answer is marked refresh so Ghost puts it at the top. Already-shown videos are still left out (seen).
+  let refreshing = false;
+  window.__ghostTTRefresh = async function () {
+    if (!lastRec || refreshing) return false;
+    refreshing = true;
+    try {
+      const u = new URL(lastRec, location.href);
+      ["X-Bogus", "X-Gnarly", "msToken", "_signature"].forEach((k) => u.searchParams.delete(k));
+      u.searchParams.set("pullType", "1"); u.searchParams.set("count", "8");
+      const r = await window.fetch(u.pathname + u.search, { credentials: "include" });
+      await r.text().catch(() => "");
+      return r.ok;
+    } catch (e) { return false; } finally { setTimeout(() => { refreshing = false; }, 0); }
+  };
   window.__ghostTTMore = function (n) {
     sweep();
     fetchMore();

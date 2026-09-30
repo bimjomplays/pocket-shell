@@ -9133,10 +9133,14 @@
     wrap.querySelector('[data-ttact="retry"]').addEventListener("click", () => { haptic("light"); T.empty.style.display = "none"; T.loading.style.display = ""; ttPost("more").catch(() => {}); armEmptyTimer(ctx); });
     wrap.querySelector('[data-ttact="search"]').addEventListener("click", () => { haptic("light"); openTTSearch(ctx); });
     wrap.querySelector('[data-ttact="dm"]').addEventListener("click", () => { haptic("light"); openTTMessages(ctx); });
+    const title = wrap.querySelector(".gh-tt-title");
+    title.setAttribute("role", "button"); title.setAttribute("aria-label", "For You - tap to refresh");
+    title.addEventListener("click", () => ttRefresh(ctx));
 
     // native -> ui.js (darkmobile world)
     window.__ghostTikTok = {
-      items: (p) => ttAddItems(ctx, (p && p.items) || []),
+      // a refresh answer (the page's pullType-1 request after a For You tap) goes on top if it comes within 30 s of the tap
+      items: (p) => { if (p && p.refresh && nowMs() - (ctx.tiktok.refreshAt || 0) < 30000) ttApplyRefresh(ctx, p.items || []); else ttAddItems(ctx, (p && p.items) || []); },
       status: (s) => ttApplyStatus(ctx, s || {}),
       reset: () => { ttClear(ctx); if (T.el.dataset.open === "1") { T.loading.style.display = ""; armEmptyTimer(ctx); } },
       dm: (snap) => ttDMApply(ctx, snap || {}),
@@ -9156,7 +9160,11 @@
     const H = () => P.pager.clientHeight || window.innerHeight;
     P.pager.addEventListener("touchstart", (e) => {
       if (P.anim || e.touches.length !== 1) return;
-      P.drag = { y0: e.touches[0].clientY, t0: nowMs(), dy: 0, moved: false, target: e.target };
+      const d = { y0: e.touches[0].clientY, x0: e.touches[0].clientX, t0: nowMs(), dy: 0, moved: false, target: e.target, long: false };
+      P.drag = d;
+      // hold still ~0.5 s: TikTok's long-press menu (not on the rail or caption links)
+      clearTimeout(P.longTimer);
+      if (!(e.target.closest && e.target.closest("[data-ttlink]"))) P.longTimer = setTimeout(() => { if (P.drag === d && !d.moved) { d.long = true; haptic("medium"); openTTMenu(ctx, P); } }, 500);
     }, { passive: true });
     P.pager.addEventListener("touchmove", (e) => {
       if (!P.drag) return;
@@ -9170,8 +9178,24 @@
     }, { passive: false });
     const end = () => {
       const d = P.drag; P.drag = null;
-      if (!d) return;
-      if (!d.moved) { if (!openTTLink(ctx, d.target, P)) toggleTikTokPause(ctx, P); return; }
+      clearTimeout(P.longTimer);
+      if (!d || d.long) return;
+      if (!d.moved) {
+        if (openTTLink(ctx, d.target, P)) return;
+        // double tap = like with the heart burst (like TikTok, it never un-likes); the first tap's pause is undone
+        const last = P.lastTap;
+        if (last && nowMs() - last.t < 320 && Math.hypot(d.x0 - last.x, d.y0 - last.y) < 60) {
+          P.lastTap = null;
+          if (last.paused) toggleTikTokPause(ctx, P);
+          ttHeartBurst(ctx, P, d.x0, d.y0);
+          const it = P.items[P.index];
+          if (it && !it.liked) ttToggle(ctx, it, "like", true);
+          return;
+        }
+        toggleTikTokPause(ctx, P);
+        P.lastTap = { t: nowMs(), x: d.x0, y: d.y0, paused: true };
+        return;
+      }
       const v = d.dy / Math.max(1, nowMs() - d.t0); // px per ms
       let to = P.index;
       if ((d.dy < -H() * 0.18 || v < -0.45) && P.index < P.items.length - 1) to = P.index + 1;
@@ -9292,6 +9316,7 @@
   }
   function ttClear(ctx) {
     const T = ctx.tiktok;
+    if (T.comments && T.comments.it) T.comments.close();
     closeTTSearchAll(ctx, true);
     for (const i of Array.from(T.slides.keys())) dropTikTokSlide(ctx, i);
     T.items = []; T.ids = new Set(); T.index = 0; T.paused = false;
@@ -9379,7 +9404,13 @@
         <div class="gh-tt-desc"></div>
         <div class="gh-tt-music" data-ttlink="sound"></div>
       </div>
-      <div class="gh-tt-side"><div class="gh-tt-stat"></div><div class="gh-tt-stat gh-tt-sharebtn" data-ttlink="share"></div></div>
+      <div class="gh-tt-side">
+        <div class="gh-tt-rail-av" data-ttlink="author"><span class="gh-tt-av gh-tt-av-lg"></span><span class="gh-tt-follow" data-ttlink="follow"></span></div>
+        <div class="gh-tt-stat" data-ttlink="like" data-rail="like"></div>
+        <div class="gh-tt-stat" data-ttlink="comments" data-rail="comments"></div>
+        <div class="gh-tt-stat" data-ttlink="save" data-rail="save"></div>
+        <div class="gh-tt-stat" data-ttlink="sharesheet" data-rail="share"></div>
+      </div>
       <div class="gh-tt-paused-ic"></div>
       <div class="gh-tt-progress"><i></i></div>
     `;
@@ -9387,11 +9418,8 @@
     ttCaption(slide.querySelector(".gh-tt-desc"), it.desc || "", it.tags);
     const mus = slide.querySelector(".gh-tt-music");
     if (it.music) { mus.append(icon("music", 13)); mus.append(document.createTextNode(" " + it.music)); } else mus.remove();
-    const stat = slide.querySelector(".gh-tt-stat");
-    stat.append(icon("heartFill", 30), Object.assign(el("span"), { textContent: fmtCount(it.stats && it.stats.likes) }));
-    const shareB = slide.querySelector(".gh-tt-sharebtn");
-    shareB.append(icon("send", 28), Object.assign(el("span"), { textContent: "Send" }));
-    shareB.setAttribute("aria-label", "Send to a TikTok friend");
+    ttRailBuild(slide);
+    ttRailPaint(slide, it);
     slide.querySelector(".gh-tt-paused-ic").appendChild(icon("play", 54));
     const video = slide.querySelector("video");
     const cover = slide.querySelector(".gh-tt-cover");
@@ -9404,12 +9432,14 @@
     if (it.cover) ttBlob(it.cover, false).then((b) => { if (!alive()) return; cover.src = keep(URL.createObjectURL(b)); }, () => {});
     if (it.author && it.author.avatar) ttBlob(it.author.avatar, false).then((b) => {
       if (!alive()) return;
-      const img = el("img"); img.alt = ""; img.src = keep(URL.createObjectURL(b)); slide.querySelector(".gh-tt-av").appendChild(img);
+      const u = keep(URL.createObjectURL(b));
+      for (const av of slide.querySelectorAll(".gh-tt-av")) { const img = el("img"); img.alt = ""; img.src = u; av.appendChild(img); }
     }, () => {});
     P.slides.set(i, s);
     ttBlob(it.play, true, alive).then((b) => {
       if (!alive()) return;
       video.src = keep(URL.createObjectURL(b));
+      if (P.speed) video.playbackRate = P.speed;
       s.ready = true;
       slide.dataset.ready = "1";
       syncTikTokPlayback(ctx);
@@ -9440,8 +9470,346 @@
     else if (kind === "tag") openTTTag(ctx, { id: a.dataset.id || "", name: a.dataset.name });
     else if (kind === "sound" && it && it.musicInfo) openTTSound(ctx, it.musicInfo);
     else if (kind === "share" && it) openTTShare(ctx, it);
+    else if (kind === "like" && it) ttToggle(ctx, it, "like", !it.liked);
+    else if (kind === "save" && it) ttToggle(ctx, it, "save", !it.saved);
+    else if (kind === "follow" && it) ttToggle(ctx, it, "follow", !it.following);
+    else if (kind === "comments" && it) openTTComments(ctx, it);
+    else if (kind === "sharesheet" && it) openTTShareSheet(ctx, it);
     else return false;
     return true;
+  }
+
+  // =====================================================================================================
+  // TikTok actions (Ghost 1.4.0): the right-hand rail like TikTok's app (author + follow, like, comments, save,
+  // share), double-tap like, the long-press menu, the comments sheet and the share sheet. Every account action runs
+  // in native's hidden desktop-site page for that video (TikTokVideo.swift + ghost/tiktok-video-page.js), which
+  // presses TikTok's own button there - only from a tap here. The rail changes at once and goes back if TikTok's
+  // page says it didn't happen.
+  // =====================================================================================================
+  function ttRailBuild(slide) {
+    const r = (k) => slide.querySelector(`[data-rail="${k}"]`);
+    r("like").append(icon("heartFill", 32), el("span"));
+    r("comments").append(icon("chatsTab", 30), el("span"));
+    r("save").append(icon("bookmark", 29), el("span"));
+    r("share").append(icon("share", 29), el("span"));
+    slide.querySelector(".gh-tt-follow").append(icon("plus", 12));
+    r("like").setAttribute("aria-label", "Like"); r("comments").setAttribute("aria-label", "Comments");
+    r("save").setAttribute("aria-label", "Save"); r("share").setAttribute("aria-label", "Share");
+  }
+  function ttRailPaint(slide, it) {
+    if (!slide || !it) return;
+    const st = it.stats || {};
+    const set = (k, n, on) => { const b = slide.querySelector(`[data-rail="${k}"]`); if (!b) return; b.querySelector("span").textContent = n == null ? "" : fmtCount(n); if (on != null) b.dataset.on = on ? "1" : "0"; };
+    set("like", st.likes, !!it.liked);
+    set("comments", it.commentsOff ? null : st.comments);
+    set("save", st.saves, !!it.saved);
+    set("share", st.shares);
+    const f = slide.querySelector(".gh-tt-follow");
+    if (f) { f.dataset.on = it.following ? "1" : "0"; f.setAttribute("aria-label", it.following ? "Following" : "Follow"); }
+  }
+  // every slide showing this video (the feed and any search player) repaints
+  function ttRepaintItem(ctx, it) {
+    const T = ctx.tiktok;
+    const players = [T].concat(T.search.stack.map((pg) => pg.player).filter(Boolean));
+    for (const P of players) for (const [i, s] of P.slides) if (P.items[i] && P.items[i].id === it.id) { if (P.items[i] !== it) Object.assign(P.items[i], { liked: it.liked, saved: it.saved, following: it.following, stats: it.stats }); ttRailPaint(s.el, P.items[i]); }
+  }
+  function ttVP(action, it, args) {
+    return ttPost("vpRun", { action, id: String(it.id), handle: (it.author && it.author.uniqueId) || "", args: args || {} });
+  }
+  const TT_WHAT = { like: ["liked", "likes"], save: ["saved", "saves"], follow: ["following", null] };
+  function ttToggle(ctx, it, what, on) {
+    if (!it || pref("tiktokTab") === false) return;
+    it._busy = it._busy || {};
+    if (it._busy[what]) return; // one at a time per button: a second tap waits for TikTok's answer
+    const T = ctx.tiktok;
+    if (!T.signedIn) { ctx.showToast("Sign in to TikTok first (Settings > TikTok)"); return; }
+    const [flag, count] = TT_WHAT[what];
+    const prev = { v: !!it[flag], n: count ? Number((it.stats || {})[count]) || 0 : 0 };
+    const apply = (v, n) => { it[flag] = v; if (count) it.stats = Object.assign({}, it.stats, { [count]: String(Math.max(0, n)) }); ttRepaintItem(ctx, it); };
+    apply(on, prev.n + (count ? (on ? 1 : -1) * (prev.v === on ? 0 : 1) : 0));
+    haptic("light");
+    it._busy[what] = true;
+    ttVP(what, it, { on }).then((r) => {
+      it._busy[what] = false;
+      if (r && r.ok && r.state) {
+        // TikTok's own numbers win
+        const s = r.state;
+        it.liked = !!s.liked; it.saved = !!s.saved; if (s.following != null) it.following = !!s.following;
+        it.stats = Object.assign({}, it.stats, s.likes ? { likes: String(s.likes) } : {}, s.saves ? { saves: String(s.saves) } : {}, s.comments ? { comments: String(s.comments) } : {});
+        ttRepaintItem(ctx, it);
+      } else if (r && r.ok === false && r.unknown) {
+        ctx.showToast("TikTok didn't confirm that - check in a moment");
+      } else if (!r || r.error) {
+        apply(prev.v, prev.n);
+        ctx.showToast(ttActionError(what, r && r.error));
+      }
+    }, (e) => { it._busy[what] = false; apply(prev.v, prev.n); ctx.showToast(ttActionError(what, e && e.message)); });
+  }
+  function ttActionError(what, err) {
+    const verb = { like: "like that", save: "save that", follow: "change following", comment: "post that comment", notInterested: "tell TikTok that" }[what] || "do that";
+    if (/signed out|sign in/i.test(String(err || ""))) return "Couldn't " + verb + ": sign in to TikTok again (Settings > TikTok)";
+    return "Couldn't " + verb + " on TikTok";
+  }
+  function ttHeartBurst(ctx, P, x, y) {
+    const T = ctx.tiktok;
+    const at = toLocal(P.pager, x, y);
+    const h = el("div", "gh-tt-burst");
+    h.appendChild(icon("heartFill", 86));
+    h.style.left = at.x + "px"; h.style.top = at.y + "px";
+    h.style.setProperty("--rot", (Math.random() * 30 - 15).toFixed(1) + "deg");
+    P.pager.appendChild(h);
+    setTimeout(() => h.remove(), 900);
+    if (T) haptic("medium");
+  }
+
+  // ---- long-press menu (TikTok's): Not interested, Save video, playback speed, clear display ----
+  function openTTMenu(ctx, P) {
+    const it = P.items[P.index];
+    const slide = P.slides.get(P.index);
+    if (!it || !slide) return;
+    const sh = ctx.chatSheet;
+    sh.sheet.innerHTML = "";
+    sh.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const body = el("div", "gh-tt-menu");
+    sh.sheet.appendChild(body);
+    const close = () => closeSheetGeneric(sh.backdrop, sh.sheet);
+    const g = setGroup(body);
+    setRow(g, { icon: "eyeOff", tint: "#8e8e93", label: "Not interested", onClick: () => { close(); ttNotInterested(ctx, P, it); } });
+    setRow(g, { icon: "download", tint: "#34c759", label: "Save video", onClick: () => { close(); ttSaveVideo(ctx, it); } });
+    const g2 = setGroup(body, "Playback speed");
+    const cur = Number(slide.video.playbackRate) || 1;
+    const row = el("div", "gh-tt-speeds");
+    for (const v of [0.5, 1, 1.5, 2]) {
+      const b = el("button", "gh-tt-speed gh-press"); b.textContent = v + "×"; b.dataset.on = v === cur ? "1" : "0";
+      b.addEventListener("click", () => { haptic("light"); P.speed = v; for (const s of P.slides.values()) if (s.video) s.video.playbackRate = v; for (const x of row.children) x.dataset.on = x === b ? "1" : "0"; });
+      row.appendChild(b);
+    }
+    g2.appendChild(row);
+    const g3 = setGroup(body);
+    setRow(g3, { icon: "expand", tint: "#5856d6", label: P.pager.dataset.clear === "1" ? "Show captions and buttons" : "Clear display", onClick: () => { close(); P.pager.dataset.clear = P.pager.dataset.clear === "1" ? "0" : "1"; } });
+    openSheetGeneric(sh.backdrop, sh.sheet);
+  }
+  function ttNotInterested(ctx, P, it) {
+    const T = ctx.tiktok;
+    if (!T.signedIn) { ctx.showToast("Sign in to TikTok first (Settings > TikTok)"); return; }
+    if (it._ni) return;
+    it._ni = true;
+    ctx.showToast("You'll see fewer videos like this");
+    ttVP("notInterested", it).then((r) => { if (!r || r.error) { it._ni = false; ctx.showToast(ttActionError("notInterested", r && r.error)); } }, () => { it._ni = false; });
+    // like TikTok: move on to the next video
+    if (P.index < P.items.length - 1) goTikTok(ctx, P.index + 1, 0, P);
+  }
+  async function ttSaveVideo(ctx, it) {
+    ctx.showToast("Saving…");
+    try {
+      const blob = await ttBlob(it.play, true);
+      await saveRefToPhotos(ctx, { blob, type: "video" });
+    } catch (e) { ctx.showToast("Couldn't save that video"); }
+  }
+
+  // ---- share sheet: send to a TikTok friend, copy link, share with other apps ----
+  function ttLink(it) { return "https://www.tiktok.com/@" + ((it.author && it.author.uniqueId) || "tiktok") + "/video/" + it.id; }
+  function openTTShareSheet(ctx, it) {
+    const sh = ctx.chatSheet;
+    sh.sheet.innerHTML = "";
+    sh.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const body = el("div", "gh-tt-menu");
+    sh.sheet.appendChild(body);
+    const close = () => closeSheetGeneric(sh.backdrop, sh.sheet);
+    const g = setGroup(body, "Share");
+    if (ttDMOn()) setRow(g, { icon: "send", tint: "var(--gh-accent)", label: "Send to a TikTok friend", onClick: () => { close(); openTTShare(ctx, it); } });
+    setRow(g, { icon: "copy", tint: "#8e8e93", label: "Copy link", onClick: () => { close(); copyToClipboard(ttLink(it)); ctx.showToast("Link copied"); } });
+    setRow(g, { icon: "share", tint: "#34c759", label: "Share to…", onClick: () => { close(); ttPost("shareLink", { url: ttLink(it) }).catch(() => ctx.showToast("Couldn't open sharing")); } });
+    openSheetGeneric(sh.backdrop, sh.sheet);
+  }
+
+  // ---- comments sheet (TikTok's): count, list, replies, like a comment, post / reply ----
+  function ttCommentsSheet(ctx) {
+    const T = ctx.tiktok;
+    if (T.comments) return T.comments;
+    const overlays = ctx.root.querySelector(".gh-overlay-layer") || ctx.root;
+    const backdrop = el("div", "gh-backdrop");
+    const sheet = el("div", "gh-sheet gh-ttc-sheet");
+    sheet.style.display = "none";
+    sheet.innerHTML = `
+      <div class="gh-sheet-grip"></div>
+      <div class="gh-ttc-head"><span class="gh-ttc-title"></span><button class="gh-ttc-close gh-hit gh-press" aria-label="Close"></button></div>
+      <div class="gh-ttc-list"></div>
+      <div class="gh-ttc-replying" style="display:none"><span></span><button class="gh-ttc-replying-x gh-press" aria-label="Cancel reply"></button></div>
+      <div class="gh-ttc-compose"><textarea class="gh-ttc-input" rows="1" maxlength="150" placeholder="Add comment…"></textarea><button class="gh-ttc-send gh-press" aria-label="Post"></button></div>`;
+    overlays.append(backdrop, sheet);
+    sheet.querySelector(".gh-ttc-close").appendChild(icon("close", 18));
+    sheet.querySelector(".gh-ttc-send").appendChild(icon("send", 20));
+    sheet.querySelector(".gh-ttc-replying-x").appendChild(icon("close", 14));
+    const C = { backdrop, sheet, list: sheet.querySelector(".gh-ttc-list"), title: sheet.querySelector(".gh-ttc-title"), input: sheet.querySelector(".gh-ttc-input"),
+      replying: sheet.querySelector(".gh-ttc-replying"), it: null, data: null, replies: new Map(), replyTo: null, loading: false, gen: 0, L: null };
+    const close = () => { closeSheetGeneric(backdrop, sheet); C.it = null; C.gen++; if (C.L) { C.L.destroy(); C.L = null; } C.list.innerHTML = ""; C.input.blur(); };
+    backdrop.addEventListener("click", close);
+    sheet.querySelector(".gh-ttc-close").addEventListener("click", () => { haptic("light"); close(); });
+    sheet.querySelector(".gh-ttc-replying-x").addEventListener("click", () => { C.replyTo = null; C.replying.style.display = "none"; C.input.placeholder = "Add comment…"; });
+    C.input.addEventListener("input", () => { C.input.style.height = "auto"; C.input.style.height = Math.min(96, C.input.scrollHeight) + "px"; });
+    sheet.querySelector(".gh-ttc-send").addEventListener("click", () => ttPostComment(ctx));
+    C.input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ttPostComment(ctx); } });
+    C.list.addEventListener("scroll", () => { if (C.list.scrollTop + C.list.clientHeight > C.list.scrollHeight - 300) ttLoadComments(ctx, true); }, { passive: true });
+    C.close = close;
+    T.comments = C;
+    return C;
+  }
+  function openTTComments(ctx, it) {
+    if (it.commentsOff) { ctx.showToast("Comments are turned off for this video"); return; }
+    const C = ttCommentsSheet(ctx);
+    C.it = it; C.data = null; C.replies = new Map(); C.replyTo = null; C.gen++;
+    C.replying.style.display = "none"; C.input.value = ""; C.input.placeholder = "Add comment…";
+    C.title.textContent = fmtCount((it.stats || {}).comments) + " comments";
+    if (C.L) C.L.destroy();
+    C.L = ttLazy(C.list);
+    C.list.innerHTML = '<div class="gh-ttc-note"><div class="gh-spinner"></div></div>';
+    openSheetGeneric(C.backdrop, C.sheet);
+    ttLoadComments(ctx, false);
+  }
+  async function ttLoadComments(ctx, more) {
+    const C = ctx.tiktok.comments;
+    if (!C || !C.it || C.loading || (more && (!C.data || C.data.done))) return;
+    C.loading = true;
+    const gen = C.gen, it = C.it;
+    let r = null;
+    try { r = await ttVP("comments", it, { more: !!more }); } catch (e) { r = { error: e && e.message }; }
+    C.loading = false;
+    if (gen !== C.gen) return;
+    if (!r || r.error) {
+      if (!C.data) C.list.innerHTML = "";
+      if (!C.data) C.list.appendChild(Object.assign(el("div", "gh-ttc-note"), { textContent: /signed out/i.test(String(r && r.error)) || (r && r.signedIn === false) ? "Sign in to TikTok to see comments (Settings > TikTok)." : "Couldn't load the comments." }));
+      return;
+    }
+    const before = C.data ? C.data.comments.length : 0;
+    C.data = { comments: r.comments || [], done: more && (r.comments || []).length <= before };
+    for (const rep of r.replies || []) { const a = C.replies.get(rep.replyTo) || []; if (!a.some((x) => x.cid === rep.cid)) a.push(rep); C.replies.set(rep.replyTo, a); }
+    if (r.total) C.title.textContent = fmtCount(r.total) + " comments";
+    ttPaintComments(ctx);
+  }
+  function ttPaintComments(ctx) {
+    const C = ctx.tiktok.comments;
+    const keep = C.list.scrollTop;
+    if (C.L) C.L.destroy();
+    C.L = ttLazy(C.list);
+    C.list.innerHTML = "";
+    const list = (C.data && C.data.comments) || [];
+    if (!list.length) { C.list.appendChild(Object.assign(el("div", "gh-ttc-note"), { textContent: "No comments yet. Be the first." })); return; }
+    for (const c of list) {
+      C.list.appendChild(ttCommentRow(ctx, c, false));
+      const reps = C.replies.get(c.cid) || [];
+      const box = el("div", "gh-ttc-replies");
+      for (const r of reps) box.appendChild(ttCommentRow(ctx, r, true));
+      C.list.appendChild(box);
+      const left = (c.replies || 0) - reps.length;
+      if (left > 0) {
+        const b = el("button", "gh-ttc-more gh-press");
+        b.textContent = (reps.length ? "View " + left + " more" : "View " + left + (left === 1 ? " reply" : " replies"));
+        b.addEventListener("click", async () => {
+          haptic("light"); b.disabled = true; b.textContent = "Loading…";
+          const gen = C.gen;
+          let r = null; try { r = await ttVP("replies", C.it, { cid: c.cid }); } catch (e) {}
+          if (gen !== C.gen) return;
+          if (r && r.replies) { const a = C.replies.get(c.cid) || []; for (const x of r.replies) if (!a.some((y) => y.cid === x.cid)) a.push(x); C.replies.set(c.cid, a); }
+          else ctx.showToast("Couldn't load the replies");
+          ttPaintComments(ctx);
+        });
+        C.list.appendChild(b);
+      }
+    }
+    C.list.scrollTop = keep;
+  }
+  function ttCommentRow(ctx, c, isReply) {
+    const C = ctx.tiktok.comments;
+    const row = el("div", "gh-ttc-row" + (isReply ? " gh-ttc-reply" : ""));
+    row.appendChild(ttAvatar(C.L, c.user && c.user.avatar, isReply ? 26 : 34, "gh-ttc-av"));
+    const col = el("div", "gh-ttc-col");
+    const nm = el("div", "gh-ttc-name"); nm.textContent = (c.user && (c.user.nickname || c.user.uniqueId)) || "TikTok user";
+    const tx = el("div", "gh-ttc-text"); tx.textContent = c.text;
+    const meta = el("div", "gh-ttc-meta");
+    meta.appendChild(Object.assign(el("span"), { textContent: c.time ? ttAgo(c.time) : "" }));
+    const rb = el("button", "gh-ttc-replybtn gh-press"); rb.textContent = "Reply";
+    rb.addEventListener("click", () => { haptic("light"); C.replyTo = { cid: isReply ? (c.replyTo || c.cid) : c.cid, name: nm.textContent, handle: c.user && c.user.uniqueId }; C.replying.style.display = ""; C.replying.querySelector("span").textContent = "Replying to " + nm.textContent; C.input.placeholder = "Add a reply…"; C.input.focus(); });
+    meta.appendChild(rb);
+    col.append(nm, tx, meta);
+    const like = el("button", "gh-ttc-like gh-press");
+    like.dataset.on = c.liked ? "1" : "0";
+    like.append(icon(c.liked ? "heartFill" : "heart", 17), Object.assign(el("span"), { textContent: c.likes ? fmtCount(c.likes) : "" }));
+    like.setAttribute("aria-label", c.liked ? "Unlike comment" : "Like comment");
+    like.addEventListener("click", () => ttLikeComment(ctx, c, like));
+    row.append(col, like);
+    return row;
+  }
+  function ttLikeComment(ctx, c, btn) {
+    const C = ctx.tiktok.comments;
+    if (!C.it || c._busy) return;
+    if (!ctx.tiktok.signedIn) { ctx.showToast("Sign in to TikTok first (Settings > TikTok)"); return; }
+    const on = !c.liked, prev = { liked: c.liked, likes: c.likes };
+    const paint = () => { btn.dataset.on = c.liked ? "1" : "0"; btn.innerHTML = ""; btn.append(icon(c.liked ? "heartFill" : "heart", 17), Object.assign(el("span"), { textContent: c.likes ? fmtCount(c.likes) : "" })); };
+    c.liked = on; c.likes = Math.max(0, (c.likes || 0) + (on ? 1 : -1)); paint(); haptic("light");
+    c._busy = true;
+    ttVP("likeComment", C.it, { cid: c.cid, on }).then((r) => { c._busy = false; if (!r || r.error) { Object.assign(c, prev); paint(); ctx.showToast("Couldn't like that comment on TikTok"); } }, () => { c._busy = false; Object.assign(c, prev); paint(); });
+  }
+  async function ttPostComment(ctx) {
+    const C = ctx.tiktok.comments;
+    if (!C || !C.it || C.posting) return;
+    const text = C.input.value.trim();
+    if (!text) return;
+    if (!ctx.tiktok.signedIn) { ctx.showToast("Sign in to TikTok first (Settings > TikTok)"); return; }
+    if (text.length > 150) { ctx.showToast("TikTok comments can be up to 150 characters"); return; }
+    C.posting = true;
+    haptic("light");
+    const it = C.it, gen = C.gen, replyTo = C.replyTo;
+    const rid = "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const mine = { cid: rid, text, time: Math.floor(Date.now() / 1000), likes: 0, liked: false, replies: 0, replyTo: replyTo ? replyTo.cid : "", user: { nickname: "You", uniqueId: "", avatar: "" }, pending: true };
+    C.input.value = ""; C.input.style.height = "auto";
+    if (replyTo) { const a = C.replies.get(replyTo.cid) || []; a.push(mine); C.replies.set(replyTo.cid, a); }
+    else if (C.data) C.data.comments.unshift(mine); else C.data = { comments: [mine], done: false };
+    C.replyTo = null; C.replying.style.display = "none"; C.input.placeholder = "Add comment…";
+    ttPaintComments(ctx);
+    let r = null;
+    try { r = await ttVP("comment", it, { text, replyTo: replyTo ? replyTo.cid : "", rid }); } catch (e) { r = { error: e && e.message, unknown: true }; }
+    C.posting = false;
+    if (gen !== C.gen) return;
+    if (r && r.unknown) { mine.pending = false; ctx.showToast("TikTok might not have posted it - check before trying again"); return; }
+    if (!r || r.error) {
+      // not posted (TikTok's page said so before pressing Post): take it back out and give the text back to edit
+      if (replyTo) C.replies.set(replyTo.cid, (C.replies.get(replyTo.cid) || []).filter((x) => x !== mine)); else if (C.data) C.data.comments = C.data.comments.filter((x) => x !== mine);
+      C.input.value = text;
+      ttPaintComments(ctx);
+      ctx.showToast(r && r.notSent === false ? "TikTok might not have posted it - check before trying again" : ttActionError("comment", r && r.error));
+      return;
+    }
+    mine.pending = false;
+    it.stats = Object.assign({}, it.stats, { comments: String((Number((it.stats || {}).comments) || 0) + 1) });
+    ttRepaintItem(ctx, it);
+    if (!r.confirmed) ctx.showToast("Posted - TikTok hasn't shown it yet");
+  }
+
+  // ---- For You: tapping it again is TikTok's refresh ----
+  function ttRefresh(ctx) {
+    const T = ctx.tiktok;
+    if (!T || !T.started || T.refreshing || T.search.stack.length) return;
+    T.refreshing = true; T.refreshAt = nowMs();
+    haptic("light");
+    T.el.dataset.refreshing = "1";
+    ttPost("refresh").catch(() => {});
+    clearTimeout(T.refreshTimer);
+    T.refreshTimer = setTimeout(() => { T.refreshing = false; T.el.dataset.refreshing = "0"; }, 8000);
+  }
+  // a refresh answer: new videos first, then whatever hadn't been watched yet; back to the top
+  function ttApplyRefresh(ctx, list) {
+    const T = ctx.tiktok;
+    clearTimeout(T.refreshTimer); T.refreshing = false; T.refreshAt = 0; T.el.dataset.refreshing = "0";
+    const fresh = list.filter((it) => it && it.id && it.play && !T.ids.has(it.id));
+    if (!fresh.length) { ctx.showToast("You're all caught up"); return; }
+    for (const it of fresh) T.ids.add(it.id);
+    const rest = T.items.slice(T.index + 1);
+    for (const i of Array.from(T.slides.keys())) dropTikTokSlide(ctx, i);
+    T.items = fresh.concat(rest); T.index = 0; T.paused = false;
+    T.loading.style.display = "none"; T.empty.style.display = "none";
+    layoutTikTok(ctx, 0, true);
+    syncTikTokPlayback(ctx);
   }
 
   // =====================================================================================================

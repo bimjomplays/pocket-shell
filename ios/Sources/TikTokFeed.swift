@@ -52,6 +52,8 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
 
     /// TikTok messages (TikTokMessages.swift): its own hidden desktop-site page, created on first use
     private var dm: GhostTikTokDM? // created by the first dm* command only (stop paths never create it)
+    /// TikTok actions (TikTokVideo.swift): a hidden desktop-site page for the video acted on, created on first use
+    private var vp: GhostTikTokVideo?
 
     func handle(_ body: [String: Any], reply: @escaping (Any?, String?) -> Void) {
         let cmd = body["cmd"] as? String ?? ""
@@ -60,12 +62,24 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             guard let dm else { return reply(nil, "unavailable") }
             return dm.handle(body, reply: reply)
         }
+        if cmd.hasPrefix("vp") {
+            if vp == nil, let host { vp = GhostTikTokVideo(host: host) }
+            guard let vp else { return reply(nil, "unavailable") }
+            return vp.handle(body, reply: reply)
+        }
         switch cmd {
         case "start": start(fresh: body["fresh"] as? Bool == true); reply(true, nil)
-        case "stop": stop(); dm?.stop(); reply(true, nil) // the TikTok tab was switched off: messages go too
+        case "stop": stop(); dm?.stop(); vp?.stop(); reply(true, nil) // the TikTok tab was switched off: messages and actions go too
         case "active": // the TikTok tab is (not) on screen: unload a few minutes after it's left
             setActive(body["on"] as? Bool == true); reply(true, nil)
         case "more": more(); reply(true, nil)
+        case "refresh": refresh(); reply(true, nil)
+        case "shareLink": // the share sheet's "Share to…": iOS's own share sheet with the video's TikTok link
+            guard let s = body["url"] as? String, let url = URL(string: s), url.scheme == "https", url.host == "www.tiktok.com", let host else { return reply(nil, "bad link") }
+            let sheet = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            if let pop = sheet.popoverPresentationController { pop.sourceView = host.view; pop.sourceRect = CGRect(x: host.view.bounds.midX, y: host.view.bounds.maxY - 80, width: 1, height: 1) }
+            (host.presentedViewController ?? host).present(sheet, animated: true)
+            reply(true, nil)
         case "fetch": fetch(body, reply: reply)
         case "api": api(body, reply: reply)
         case "signIn": signIn(); reply(true, nil)
@@ -142,6 +156,12 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     }
 
     /// Asks TikTok's page to move its feed on (it fetches the next page near the end); reloads if nothing new comes.
+    /// "For You" tapped again: TikTok's own refresh - a new first page (pullType 1) through the page's signed fetch
+    private func refresh() {
+        guard let wv = web else { start(); return }
+        wv.evaluateJavaScript("window.__ghostTTRefresh && window.__ghostTTRefresh()", in: nil, in: .page, completionHandler: nil)
+    }
+
     private func more() {
         guard let wv = web else { start(); return }
         wv.evaluateJavaScript("window.__ghostTTMore && window.__ghostTTMore(4)", in: nil, in: .page, completionHandler: nil)
@@ -163,7 +183,7 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
         case "items":
             guard let items = body["items"] as? [[String: Any]] else { return }
             if !items.isEmpty { lastItemsAt = Date() }
-            send("items", ["items": items, "hasMore": body["hasMore"] as? Bool ?? true])
+            send("items", ["items": items, "hasMore": body["hasMore"] as? Bool ?? true, "refresh": body["refresh"] as? Bool ?? false])
         case "page":
             user = body["user"] as? [String: Any]
             refreshStatus()
@@ -319,6 +339,7 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     private func signOut(reply: @escaping (Any?, String?) -> Void) {
         stop()
         dm?.stop()
+        vp?.stop()
         user = nil
         let store = WKWebsiteDataStore.default()
         store.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
