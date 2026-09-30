@@ -127,6 +127,23 @@
     if (!ui || !ui.user || !ui.user.uniqueId) return { user: null };
     return { user: compactUser(ui.user, ui.statsV2 || ui.stats) };
   }
+  function parseCreatorEmbed(html) {
+    const m = String(html).match(/<script[^>]*id="__FRONTITY_CONNECT_STATE__"[^>]*>([\s\S]*?)<\/script>/);
+    let st = null; try { st = m && JSON.parse(m[1]); } catch (e) {}
+    const data = (st && st.source && st.source.data) || {};
+    const key = Object.keys(data).find((k) => k.indexOf("/embed/@") === 0);
+    const d = key && data[key];
+    const ui = (d && d.userInfo) || {};
+    const items = [];
+    for (const v of (d && d.videoList) || []) {
+      if (!v || !v.id || !v.playAddr || v.privateItem) continue;
+      const c = compact({ id: v.id, desc: v.desc, video: { playAddr: v.playAddr, cover: v.coverUrl, originCover: v.originCoverUrl, width: v.width, height: v.height },
+        author: { id: ui.id, uniqueId: v.authorUniqueId || ui.uniqueId, nickname: ui.nickname, avatarThumb: ui.avatarThumbUrl, verified: ui.verified },
+        stats: { playCount: v.playCount } });
+      if (c) items.push(c);
+    }
+    return { items };
+  }
   function parseEmbedPage(html) {
     const m = String(html).match(/<script[^>]*id="__FRONTITY_CONNECT_STATE__"[^>]*>([\s\S]*?)<\/script>/);
     let st = null; try { st = m && JSON.parse(m[1]); } catch (e) {}
@@ -345,6 +362,8 @@
     // /api/item/detail/ answers an empty body on the website now (checked on the phone 2026-09-29), so a single video
     // (a TikTok shared in a DM) comes from TikTok's own embed page, whose state carries the play URL
     item: (p) => idOk(p.id) ? ["/embed/v2/" + p.id, "html", parseEmbedPage] : null,
+    // a creator's latest ~10 videos, instantly, from TikTok's creator embed (the full list comes from the desktop page)
+    userEmbed: (p) => handleOk(p.uniqueId) ? ["/embed/@" + p.uniqueId, "html", parseCreatorEmbed] : null,
     soundVideos: (p) => idOk(p.id) ? ["/api/music/item_list/?" + enc(Object.assign(withCommon(), { musicID: p.id, count: 30, cursor: clean(p.cursor || 0, 40), coverFormat: 2 })), "json", parseItemList] : null,
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

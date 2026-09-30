@@ -54,6 +54,7 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     private var dm: GhostTikTokDM? // created by the first dm* command only (stop paths never create it)
     /// TikTok actions (TikTokVideo.swift): a hidden desktop-site page for the video acted on, created on first use
     private var vp: GhostTikTokVideo?
+    private lazy var bookmarks = GhostTikTokBookmarks()
 
     func handle(_ body: [String: Any], reply: @escaping (Any?, String?) -> Void) {
         let cmd = body["cmd"] as? String ?? ""
@@ -62,6 +63,7 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             guard let dm else { return reply(nil, "unavailable") }
             return dm.handle(body, reply: reply)
         }
+        if cmd.hasPrefix("bm") { return bookmarks.handle(body, reply: reply) } // Ghost's own TikTok bookmarks (Gallery > TikTok)
         if cmd.hasPrefix("vp") {
             if vp == nil, let host { vp = GhostTikTokVideo(host: host) }
             guard let vp else { return reply(nil, "unavailable") }

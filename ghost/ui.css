@@ -2753,3 +2753,14 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-ttdm-send:disabled { background: var(--gh-bg-panel-2); color: var(--gh-text-tertiary); }
 /* the tab bar over the TikTok tab: Ghost has no precedent (its viewers cover it), so it stays dark with Ghost's darkest surface */
 .gh-screen[data-screen="home"]:has(.gh-tt[data-open="1"]) .gh-tab-bar { background: var(--gh-bg-app); border-top-color: var(--gh-divider); }
+
+/* ---- Gallery > TikTok (Ghost 1.5.0): videos bookmarked in the TikTok tab, saved in Ghost ---- */
+.gh-gal-seg { flex: none; display: none; gap: 2px; margin: 8px 14px 6px; padding: 2px; border-radius: 9px; background: var(--gh-bg-input); }
+.gh-gal-seg[data-show="1"] { display: flex; }
+.gh-gal-seg-btn { flex: 1; height: 30px; border-radius: 7px; font-size: 14px; font-weight: 600; color: var(--gh-text-secondary); background: transparent; }
+.gh-gal-seg-btn[data-on="1"] { background: var(--gh-bg-panel-2); color: var(--gh-text); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); }
+.gh-gal-tt { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding-bottom: calc(var(--gh-safe-b) + 64px); }
+.gh-gal-tt-grid { border-top: 0; }
+.gh-gal-tt-empty { padding: 64px 32px; text-align: center; font-size: 14.5px; line-height: 1.45; color: var(--gh-text-secondary); }
+.gh-gal[data-mode="tiktok"] .gh-gal-scroll, .gh-gal[data-mode="tiktok"] .gh-gal-scrub, .gh-gal[data-mode="tiktok"] .gh-gal-limited,
+.gh-gal[data-mode="tiktok"] .gh-gal-select, .gh-gal[data-mode="tiktok"] .gh-gal-album .gh-gal-sub, .gh-gal[data-mode="tiktok"] .gh-gal-denied { display: none !important; }

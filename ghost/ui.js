@@ -8960,6 +8960,8 @@
           <button class="gh-gal-select gh-press" data-gact="select">Select</button>
         </div>
       </div>
+      <div class="gh-gal-seg" data-show="0"><button class="gh-gal-seg-btn gh-press" data-gseg="photos" data-on="1">Photos</button><button class="gh-gal-seg-btn gh-press" data-gseg="tiktok" data-on="0">TikTok</button></div>
+      <div class="gh-gal-tt" style="display:none"><div class="gh-tts-grid3 gh-gal-tt-grid"></div><div class="gh-gal-tt-empty" style="display:none">Videos you bookmark in the TikTok tab show here. They're saved in Ghost, not on your TikTok account.</div></div>
       <button class="gh-gal-limited gh-press" style="display:none">Limited access — Manage</button>
       <div class="gh-gal-scroll gh-scroll">
         <div class="gh-gal-otd" style="display:none">
@@ -9031,6 +9033,7 @@
     g.scroll.addEventListener("scroll", () => { scheduleGalLayout(ctx); showGalScrubber(ctx); }, { passive: true });
     if (typeof ResizeObserver === "function") new ResizeObserver(() => { if (g.el.dataset.open === "1") layoutGallery(ctx); }).observe(g.scroll);
     initGalScrubber(ctx);
+    initGalTikTok(ctx);
     let changeTimer = null;
     window.__ghostGalleryChanged = (albums) => {
       clearTimeout(changeTimer);
@@ -9044,9 +9047,78 @@
     return g;
   }
 
+  // ---- Gallery > TikTok (Ghost 1.5.0): the videos bookmarked in the TikTok tab, saved as files in Ghost ----
+  function initGalTikTok(ctx) {
+    const g = ctx.gallery;
+    g.seg = g.el.querySelector(".gh-gal-seg");
+    g.tt = { el: g.el.querySelector(".gh-gal-tt"), grid: g.el.querySelector(".gh-gal-tt-grid"), empty: g.el.querySelector(".gh-gal-tt-empty"), urls: [], sig: "" };
+    g.mode = "photos";
+    for (const b of g.seg.querySelectorAll("[data-gseg]")) b.addEventListener("click", () => { haptic("light"); setGalMode(ctx, b.dataset.gseg); });
+    ttBM.listeners.add(() => { if (g.mode === "tiktok" && g.el.dataset.open === "1") paintGalTikTok(ctx); });
+  }
+  function galTikTokOn() { return pref("tiktokTab") !== false; }
+  function setGalMode(ctx, mode) {
+    const g = ctx.gallery;
+    if (mode === "tiktok" && !galTikTokOn()) mode = "photos";
+    if (g.selecting && mode === "tiktok") setGalSelecting(ctx, false);
+    g.mode = mode;
+    g.el.dataset.mode = mode;
+    for (const b of g.seg.querySelectorAll("[data-gseg]")) b.dataset.on = b.dataset.gseg === mode ? "1" : "0";
+    g.tt.el.style.display = mode === "tiktok" ? "" : "none";
+    if (mode === "tiktok") { ttBmLoad(true).then(() => paintGalTikTok(ctx)); paintGalTikTok(ctx); }
+    else { freeGalTikTok(ctx); requestAnimationFrame(() => layoutGallery(ctx)); }
+  }
+  function freeGalTikTok(ctx) {
+    const t = ctx.gallery.tt;
+    for (const u of t.urls) URL.revokeObjectURL(u);
+    t.urls = []; t.sig = ""; t.grid.innerHTML = "";
+  }
+  function paintGalTikTok(ctx) {
+    const g = ctx.gallery, t = g.tt;
+    const items = ttBM.items;
+    const sig = items.map((x) => x.id).join(",");
+    t.empty.style.display = ttBM.loaded && !items.length ? "" : "none";
+    if (sig === t.sig) return;
+    freeGalTikTok(ctx);
+    t.sig = sig;
+    const S = { items: items.slice(), ids: new Set(items.map((x) => x.id)), hasMore: false, loading: false, listeners: new Set(), extra: {}, more: async () => {}, ready: async () => {} };
+    items.forEach((it, i) => {
+      const tile = el("div", "gh-tts-tile gh-press"); tile.dataset.id = it.id;
+      const img = el("img"); img.alt = ""; tile.appendChild(img);
+      if (it.cover) ttBlob(it.cover, false).then((b) => { if (t.sig !== sig) return; const u = URL.createObjectURL(b); t.urls.push(u); img.onload = () => { img.dataset.loaded = "1"; }; img.src = u; }, () => {});
+      if (it.author && it.author.uniqueId) tile.appendChild(Object.assign(el("span", "gh-tts-tile-plays"), { textContent: "@" + it.author.uniqueId }));
+      let held = null, longed = false;
+      tile.addEventListener("touchstart", () => { longed = false; held = setTimeout(() => { longed = true; haptic("medium"); openGalTikTokMenu(ctx, it); }, 480); }, { passive: true });
+      const cancel = () => clearTimeout(held);
+      tile.addEventListener("touchmove", cancel, { passive: true }); tile.addEventListener("touchend", cancel); tile.addEventListener("touchcancel", cancel);
+      tile.addEventListener("contextmenu", (e) => { e.preventDefault(); openGalTikTokMenu(ctx, it); });
+      tile.addEventListener("click", () => { if (longed) return; haptic("light"); openGalTikTokPlayer(ctx, S, i); });
+      t.grid.appendChild(tile);
+    });
+  }
+  function openGalTikTokMenu(ctx, it) {
+    const sh = ctx.chatSheet;
+    sh.sheet.innerHTML = "";
+    sh.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const body = el("div", "gh-tt-menu"); sh.sheet.appendChild(body);
+    const close = () => closeSheetGeneric(sh.backdrop, sh.sheet);
+    const g = setGroup(body);
+    setRow(g, { icon: "download", tint: "#34c759", label: "Save video to Photos", onClick: () => { close(); ttSaveVideo(ctx, it); } });
+    setRow(g, { icon: "trash", tint: "#ff3b30", label: "Remove bookmark", onClick: () => { close(); ttBookmark(ctx, it); } });
+    openSheetGeneric(sh.backdrop, sh.sheet);
+  }
+  // the player lives in the TikTok tab's page stack: switch there, and Back comes home to Gallery > TikTok
+  function openGalTikTokPlayer(ctx, S, index) {
+    const tab = ctx.home && ctx.home.screen.querySelector('[data-tab="tiktok"]');
+    if (!tab || !galTikTokOn()) return;
+    tab.click();
+    const pg = openTTPlayer(ctx, S, index);
+    if (pg) pg.returnTo = "gallery";
+  }
   function openGallery(ctx) {
     const g = ctx.gallery;
     g.el.dataset.open = "1";
+    if (g.seg) { g.seg.dataset.show = galTikTokOn() ? "1" : "0"; if (g.mode === "tiktok") { if (galTikTokOn()) { ttBmLoad(true).then(() => paintGalTikTok(ctx)); } else setGalMode(ctx, "photos"); } }
     if (!g.loaded && !g.loading) loadGallery(ctx);
     else {
       requestAnimationFrame(() => layoutGallery(ctx));
@@ -9058,6 +9130,7 @@
     const g = ctx.gallery;
     if (g.selecting) setGalSelecting(ctx, false);
     g.el.dataset.open = "0";
+    if (g.tt) freeGalTikTok(ctx);
   }
 
   // =====================================================================================================
@@ -9074,6 +9147,21 @@
   // queue ahead of the video on screen (review 2026-09-29)
   async function ttBlob(url, video, live) {
     if (typeof window.__ghostTTBlobMock === "function") return window.__ghostTTBlobMock(url, video);
+    // a video saved in Gallery > TikTok: read back from Ghost's own file (TikTokBookmarks.swift "bmRead")
+    const bm = /^ghostbm:(video|cover):(\d{5,30})$/.exec(String(url || ""));
+    if (bm) {
+      const parts = []; let off = 0, total = Infinity, type = "";
+      while (off < total) {
+        if (live && !live()) throw new Error("cancelled");
+        const r = await ttPost("bmRead", { id: bm[2], kind: bm[1], offset: off });
+        if (!r || typeof r.body !== "string") throw new Error("no data");
+        type = r.type || type; total = Number(r.total) || 0;
+        const part = b64ToBlob(r.body, "");
+        if (!part.size) break;
+        parts.push(part); off += part.size;
+      }
+      return new Blob(parts, { type: type || (bm[1] === "video" ? "video/mp4" : "image/jpeg") });
+    }
     const parts = [];
     let pos = 0, total = Infinity, type = "";
     while (pos < total) {
@@ -9258,6 +9346,7 @@
     const T = ctx.tiktok;
     if (!T || pref("tiktokTab") === false) return;
     T.el.dataset.open = "1";
+    if (!ttBM.loaded) ttBmLoad(); // which videos are bookmarked in Ghost (the rail's bookmark state)
     ttPost("active", { on: true }).catch(() => {});
     if (!T.started) {
       T.started = true;
@@ -9342,8 +9431,7 @@
     if (changed) {
       const old = P.slides.get(P.index);
       if (old) { old.el.dataset.paused = "0"; if (old.video) { try { old.video.pause(); old.video.currentTime = 0; } catch (e) {} } }
-      P.index = to; P.paused = false;
-      haptic("light");
+      P.index = to; P.paused = false; // no haptic per video: TikTok doesn't buzz on every swipe (user 2026-09-29)
     }
     layoutTikTok(ctx, startOffset, true, P);
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -9471,7 +9559,7 @@
     else if (kind === "sound" && it && it.musicInfo) openTTSound(ctx, it.musicInfo);
     else if (kind === "share" && it) openTTShare(ctx, it);
     else if (kind === "like" && it) ttToggle(ctx, it, "like", !it.liked);
-    else if (kind === "save" && it) ttToggle(ctx, it, "save", !it.saved);
+    else if (kind === "save" && it) ttBookmark(ctx, it); // Ghost's own bookmark (Gallery > TikTok), not TikTok's Favorites
     else if (kind === "follow" && it) ttToggle(ctx, it, "follow", !it.following);
     else if (kind === "comments" && it) openTTComments(ctx, it);
     else if (kind === "sharesheet" && it) openTTShareSheet(ctx, it);
@@ -9494,7 +9582,7 @@
     r("share").append(icon("share", 29), el("span"));
     slide.querySelector(".gh-tt-follow").append(icon("plus", 12));
     r("like").setAttribute("aria-label", "Like"); r("comments").setAttribute("aria-label", "Comments");
-    r("save").setAttribute("aria-label", "Save"); r("share").setAttribute("aria-label", "Share");
+    r("save").setAttribute("aria-label", "Bookmark in Ghost"); r("share").setAttribute("aria-label", "Share");
   }
   function ttRailPaint(slide, it) {
     if (!slide || !it) return;
@@ -9502,7 +9590,7 @@
     const set = (k, n, on) => { const b = slide.querySelector(`[data-rail="${k}"]`); if (!b) return; b.querySelector("span").textContent = n == null ? "" : fmtCount(n); if (on != null) b.dataset.on = on ? "1" : "0"; };
     set("like", st.likes, !!it.liked);
     set("comments", it.commentsOff ? null : st.comments);
-    set("save", st.saves, !!it.saved);
+    set("save", null, ttBmHas(it.id)); // a local bookmark: no TikTok count
     set("share", st.shares);
     const f = slide.querySelector(".gh-tt-follow");
     if (f) { f.dataset.on = it.following ? "1" : "0"; f.setAttribute("aria-label", it.following ? "Following" : "Follow"); }
@@ -9512,6 +9600,68 @@
     const T = ctx.tiktok;
     const players = [T].concat(T.search.stack.map((pg) => pg.player).filter(Boolean));
     for (const P of players) for (const [i, s] of P.slides) if (P.items[i] && P.items[i].id === it.id) { if (P.items[i] !== it) Object.assign(P.items[i], { liked: it.liked, saved: it.saved, following: it.following, stats: it.stats }); ttRailPaint(s.el, P.items[i]); }
+  }
+  // ---- Ghost's own TikTok bookmarks (Ghost 1.5.0, user decision 2026-09-29: "i dont want bookmark to put it on my
+  // tiktok account"): the rail's bookmark saves the video FILE into Ghost (TikTokBookmarks.swift, Documents/
+  // tiktok-bookmarks) and it shows in Gallery > TikTok. Tapping it again removes it. TikTok never hears about it.
+  const ttBM = { ids: new Set(), items: [], loaded: false, loading: null, listeners: new Set() };
+  function ttBmHas(id) { return ttBM.ids.has(String(id)); }
+  function ttBmItem(m) {
+    const id = String(m.id);
+    return Object.assign({}, m.item || {}, { id, play: "ghostbm:video:" + id, cover: m.hasCover ? "ghostbm:cover:" + id : "", bookmarked: true, savedAt: Number(m.savedAt) || 0, fileSize: Number(m.fileSize) || 0 });
+  }
+  function ttBmChanged() { for (const f of ttBM.listeners) { try { f(); } catch (e) {} } }
+  function ttBmLoad(force) {
+    if (ttBM.loading && !force) return ttBM.loading;
+    ttBM.loading = ttPost("bmList", {}).then((list) => {
+      ttBM.items = (Array.isArray(list) ? list : []).map(ttBmItem);
+      ttBM.ids = new Set(ttBM.items.map((x) => x.id));
+      ttBM.loaded = true;
+      ttBmChanged();
+      return ttBM.items;
+    }, () => { ttBM.loaded = true; return ttBM.items; });
+    return ttBM.loading;
+  }
+  const ttBmBusy = new Set(); // one save/remove per video at a time: a quick second tap waits for the first
+  async function ttBookmark(ctx, it) {
+    const id = String(it.id);
+    if (ttBmBusy.has(id)) return;
+    ttBmBusy.add(id);
+    try { await ttBookmarkNow(ctx, it, id); } finally { ttBmBusy.delete(id); }
+  }
+  async function ttBookmarkNow(ctx, it, id) {
+    haptic("light");
+    if (ttBmHas(id)) {
+      ttBM.ids.delete(id); ttBM.items = ttBM.items.filter((x) => x.id !== id);
+      ttRepaintItem(ctx, it); ttBmChanged();
+      try { await ttPost("bmRemove", { id }); ctx.showToast("Removed from Gallery › TikTok"); }
+      catch (e) { ctx.showToast("Couldn't remove that bookmark"); ttBmLoad(true).then(() => ttRepaintItem(ctx, it)); }
+      return;
+    }
+    if (!it.play || /^ghostbm:/.test(it.play)) { ctx.showToast("Couldn't save that video"); return; }
+    ttBM.ids.add(id); ttRepaintItem(ctx, it);
+    ctx.showToast("Saving to Gallery › TikTok…");
+    // everything the saved copy needs to show and play without TikTok (links in it expire; the file doesn't)
+    const keep = { id, desc: it.desc || "", author: it.author || null, music: it.music || "", musicInfo: it.musicInfo || null, tags: it.tags || [], stats: it.stats || null, w: it.w || 0, h: it.h || 0, duration: it.duration || 0, created: it.created || 0 };
+    const link = "https://www.tiktok.com/@" + ((it.author && it.author.uniqueId) || "i") + "/video/" + id;
+    try {
+      const r = await ttPost("bmSave", { id, play: it.play, cover: it.cover || "", meta: { id, item: keep, link } });
+      if (!r || r.error) throw new Error((r && r.error) || "no answer");
+      await ttBmLoad(true);
+      ttRepaintItem(ctx, it);
+      if (!r.busy) ctx.showToast("Saved to Gallery › TikTok");
+    } catch (e) {
+      ttBM.ids.delete(id); ttRepaintItem(ctx, it);
+      ctx.showToast("Couldn't save that video");
+      gtrail("tiktok bookmark failed " + (e && e.message || e));
+    }
+  }
+  // a profile / hashtag / sound list read off TikTok's desktop page (TikTokVideo.swift "vpList"): TikTok's own page
+  // fetches it, Ghost's own request gets an empty answer. from = items Ghost already has; more = scroll for the next page
+  async function ttVPList(kind, params, from, more) {
+    const r = await ttPost("vpList", Object.assign({ kind, from: from || 0, more: !!more }, params || {}));
+    if (!r || r.error) throw new Error((r && r.error) || "no answer");
+    return r;
   }
   function ttVP(action, it, args) {
     return ttPost("vpRun", { action, id: String(it.id), handle: (it.author && it.author.uniqueId) || "", args: args || {} });
@@ -9878,7 +10028,8 @@
         for (const x of r.list || []) { const k = keyOf(x); if (!k || S.ids.has(k)) continue; S.ids.add(k); S.items.push(x); added++; }
         S.cursor = r.cursor;
         // no new rows = the end, even if TikTok says there's more (stops endless empty pages)
-        S.hasMore = !!r.hasMore && added > 0;
+        // (keepGoing: the page moved on even though every row was a duplicate - the profile's embed rows)
+        S.hasMore = !!r.hasMore && (added > 0 || !!r.keepGoing);
         S.error = null;
       } catch (e) { S.error = e; S.hasMore = false; }
       S.loading = false;
@@ -9909,6 +10060,7 @@
     const T = ctx.tiktok;
     const pg = T.search.stack.pop();
     if (!pg) return;
+    if (pg.returnTo === "gallery" && !T.search.stack.length) setTimeout(() => { const gt = ctx.home && ctx.home.screen.querySelector('[data-tab="gallery"]'); if (gt) { gt.click(); setGalMode(ctx, "tiktok"); } }, 0);
     if (pg.player) syncTikTokPlayer(pg.player, true); // silent while it slides away
     const prev = T.search.stack[T.search.stack.length - 1];
     if (prev) prev.el.dataset.hidden = "0";
@@ -10357,11 +10509,22 @@
     const T = ctx.tiktok;
     const u = Object.assign({}, u0 || {});
     if (!u.uniqueId) return;
-    const S = ttSource(async (cursor) => {
-      if (!u.secUid) { try { const r = await ttApi("user", { uniqueId: u.uniqueId }); if (r.user && !pg.dead) { Object.assign(u, r.user); paintHead(); } } catch (e) { if (e.captcha) throw e; } }
-      if (!u.secUid) return { list: [], cursor: 0, hasMore: false };
-      const r = await ttApi("userVideos", { secUid: u.secUid, cursor });
-      return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
+    // Ghost 1.5.0: TikTok answers Ghost's own /api/post/item_list/ with nothing, so the grid starts with the creator
+    // embed's latest ~10 (instant) and then pages through the list TikTok's desktop profile page loads for itself.
+    // cursor = how many videos the desktop page has handed over so far.
+    const S = ttSource(async (cursor, src) => {
+      if (!src.extra.embedTried) {
+        src.extra.embedTried = true;
+        try { const r = await ttApi("userEmbed", { uniqueId: u.uniqueId }); if ((r.items || []).length) return { list: r.items, cursor: 0, hasMore: true }; } catch (e) { if (e.captcha) throw e; }
+      }
+      let r;
+      try { r = await ttVPList("user", { handle: u.uniqueId }, Number(cursor) || 0, (Number(cursor) || 0) > 0); }
+      catch (e) { if (!src.items.length) throw e; return { list: [], cursor, hasMore: false }; }
+      if (r.user && !pg.dead) { Object.assign(u, r.user); paintHead(); }
+      const list = r.items || [];
+      const next = (Number(cursor) || 0) + list.length;
+      // every video TikTok's page handed over, even ones the embed already showed, moves the cursor on
+      return { list, cursor: next, hasMore: !!r.hasMore && list.length > 0, keepGoing: list.length > 0 };
     }, (x) => x.id);
     const pg = ttGridPage(ctx, "profile", u.nickname || u.uniqueId, S, () => (u.privateAccount ? "This account is private." : T.signedIn ? "No videos yet." : "Sign in to TikTok (Settings > TikTok) to see their videos."));
     const paintHead = () => {
@@ -10382,9 +10545,17 @@
   function openTTSound(ctx, s0) {
     const s = Object.assign({}, s0 || {});
     if (!s.id) return;
-    const S = ttSource(async (cursor) => {
-      const r = await ttApi("soundVideos", { id: s.id, cursor });
-      return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
+    const S = ttSource(async (cursor, src) => {
+      if (!src.extra.desktop) {
+        try {
+          const r = await ttApi("soundVideos", { id: s.id, cursor });
+          if ((r.items || []).length || cursor) return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
+        } catch (e) { if (e.captcha) throw e; }
+        src.extra.desktop = true; cursor = 0; // empty answer: the list TikTok's desktop sound page loads
+      }
+      const r = await ttVPList("sound", { id: s.id, slug: s.title || "" }, Number(cursor) || 0, (Number(cursor) || 0) > 0);
+      const list = r.items || [];
+      return { list, cursor: (Number(cursor) || 0) + list.length, hasMore: !!r.hasMore && list.length > 0 };
     }, (x) => x.id);
     const pg = ttGridPage(ctx, "sound", s.title || "Sound", S, "No videos with this sound yet.");
     const paintHead = () => {
@@ -10408,13 +10579,23 @@
         src.extra.triedPage = true;
         try { const r = await ttApi("tag", { name: t.name }); if (r.tag && !pg.dead) { Object.assign(t, r.tag); paintHead(); } } catch (e) { if (e.captcha) throw e; }
       }
-      if (t.id && !src.extra.fallback) {
+      if (t.id && !src.extra.fallback && !src.extra.tagEmpty) {
         try {
           const r = await ttApi("tagVideos", { id: t.id, cursor });
           if ((r.items || []).length || cursor) return { list: r.items || [], cursor: r.cursor, hasMore: r.hasMore };
         } catch (e) { if (e.captcha) throw e; }
+        src.extra.tagEmpty = true;
       }
-      // signed out the hashtag's own list is empty: search for "#name" instead
+      // the hashtag's own list came back empty: the list TikTok's desktop hashtag page loads, then a "#name" search
+      if (!src.extra.fallback && !src.extra.noDesktop) {
+        const from = Number(src.extra.vpFrom) || 0;
+        try {
+          const r = await ttVPList("tag", { name: t.name }, from, from > 0);
+          const list = r.items || [];
+          if (list.length || from) { src.extra.vpFrom = from + list.length; return { list, cursor: 0, hasMore: !!r.hasMore && list.length > 0 }; }
+        } catch (e) {}
+        src.extra.noDesktop = true;
+      }
       src.extra.fallback = true;
       const r = await ttApi("top", { q: "#" + t.name, cursor, searchId: src.extra.searchId || "" });
       if (r.searchId) src.extra.searchId = r.searchId;
@@ -10486,6 +10667,7 @@
     const T = ctx.tiktok;
     const pg = T.search.stack.pop();
     if (!pg) return;
+    if (pg.returnTo === "gallery" && !T.search.stack.length) setTimeout(() => { const gt = ctx.home && ctx.home.screen.querySelector('[data-tab="gallery"]'); if (gt) { gt.click(); setGalMode(ctx, "tiktok"); } }, 0);
     if (pg.player) syncTikTokPlayer(pg.player, true);
     destroyTTPage(pg);
     const prev = T.search.stack[T.search.stack.length - 1];
@@ -11074,7 +11256,7 @@
       g.scroll.scrollTop = frac * max;
       g.scrubThumb.style.transform = `translateY(${frac * track}px)`;
       const label = galMonthLabelAt(ctx, frac * max);
-      if (label !== g.scrubLabel.textContent) { g.scrubLabel.textContent = label; haptic("light"); }
+      if (label !== g.scrubLabel.textContent) { g.scrubLabel.textContent = label; }
       g.scrubLabel.style.transform = `translateY(${frac * track}px)`;
       updateGalVisible(ctx);
     };

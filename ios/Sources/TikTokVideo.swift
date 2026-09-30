@@ -37,6 +37,23 @@ final class GhostTikTokVideo: NSObject, WKNavigationDelegate, WKUIDelegate {
             var args = body["args"] as? [String: Any] ?? [:]
             args["id"] = id
             enqueue(run: { [weak self] in self?.run(action, id: id, handle: handle, args: args, reply: reply) }, cancel: { reply(nil, "stopped") })
+        case "vpList":
+            // a profile / hashtag / sound page on TikTok's desktop site: TikTok's own page fetches the video list
+            // (Ghost's own request gets an empty answer), the page script keeps a copy (window.__ghostVPList)
+            let kind = body["kind"] as? String ?? ""
+            let ok: (String?, String) -> String? = { v, re in (v ?? "").range(of: re, options: .regularExpression) != nil ? v : nil }
+            var path = ""
+            if kind == "user", let h = ok(body["handle"] as? String, "^[A-Za-z0-9._]{1,40}$") { path = "/@\(h)" }
+            else if kind == "tag", let n = ok(body["name"] as? String, "^[\\p{L}\\p{N}_]{1,80}$"), let e = n.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) { path = "/tag/\(e)" }
+            else if kind == "sound", let i = ok(body["id"] as? String, "^[0-9]{1,30}$") {
+                let slug = (body["slug"] as? String ?? "").replacingOccurrences(of: "[^A-Za-z0-9-]+", with: "-", options: .regularExpression).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+                path = "/music/\(slug.isEmpty ? "original-sound" : String(slug.prefix(60)))-\(i)"
+            }
+            guard !path.isEmpty, let url = URL(string: "https://www.tiktok.com" + path) else { return reply(nil, "bad list") }
+            // which page the answer must come from (not the page that was open before this load)
+            let match: [String: String] = kind == "sound" ? ["suffix": "-" + (body["id"] as? String ?? "")] : ["exact": path.removingPercentEncoding?.lowercased() ?? path.lowercased()]
+            let args: [String: Any] = ["from": body["from"] as? Int ?? 0, "more": body["more"] as? Bool == true, "match": match]
+            enqueue(run: { [weak self] in self?.runList(url, key: path, args: args, reply: reply) }, cancel: { reply(nil, "stopped") })
         case "vpStop": stop(); reply(true, nil)
         default: reply(nil, "unknown video command")
         }
@@ -145,6 +162,46 @@ final class GhostTikTokVideo: NSObject, WKNavigationDelegate, WKUIDelegate {
                     done(value, nil)
                 case .failure(let error):
                     done(nil, error.localizedDescription)
+                }
+            }
+        }
+        attempt(0)
+    }
+
+    private func runList(_ url: URL, key: String, args: [String: Any], reply: @escaping (Any?, String?) -> Void) {
+        start()
+        idleTimer?.invalidate(); idleTimer = nil
+        guard let wv = web else { reply(nil, "not running"); return next() }
+        busy += 1
+        var finished = false
+        let done: (Any?, String?) -> Void = { [weak self] v, e in
+            guard !finished else { return }
+            finished = true
+            reply(v, e)
+            guard let self else { return }
+            self.busy = max(0, self.busy - 1)
+            self.armIdle()
+            self.next()
+        }
+        if loadedID != key { loadedID = key; wv.load(URLRequest(url: url)) }
+        func attempt(_ n: Int) {
+            guard self.web === wv else { return done(nil, "stopped") }
+            wv.callAsyncJavaScript("""
+                const p = decodeURIComponent(location.pathname).replace(/\\/+$/, "").toLowerCase();
+                const m = args.match || {};
+                if (!window.__ghostVPList || document.readyState === "loading" || (m.exact && p !== m.exact) || (m.suffix && !p.endsWith(m.suffix))) return { notReady: true };
+                return await window.__ghostVPList(args);
+                """, arguments: ["args": args], in: nil, in: .page) { [weak self] result in
+                guard let self, self.web === wv else { return done(nil, "stopped") }
+                switch result {
+                case .success(let value):
+                    if let d = value as? [String: Any], d["notReady"] as? Bool == true {
+                        if n < 50 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { attempt(n + 1) } }
+                        else { done(["error": "TikTok's page didn't load"], nil) }
+                        return
+                    }
+                    done(value, nil)
+                case .failure(let error): done(nil, error.localizedDescription)
                 }
             }
         }

@@ -19,6 +19,74 @@
   const q = (sel, root) => (root || document).querySelector(sel);
   const qa = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
+  // ---- profile / hashtag / sound lists (Ghost 1.5.0) ----------------------------------------------------------
+  // /api/post/item_list/ answers an empty body to a fetch Ghost makes itself (checked on the phone 2026-09-29), but
+  // TikTok's own desktop profile page fetches it fine. So native opens https://www.tiktok.com/@<user> (or /tag/<name>,
+  // /music/<slug>-<id>) in this hidden page, this hook keeps a compact copy of every list answer TikTok's page gets,
+  // and scrolling the page makes TikTok fetch the next one. compact() is the TikTok tab's (build-userscripts.py
+  // copies it in from tiktok-page.js at the marker below).
+  /* @ghost-compact */
+  const LIST_RE = /\/api\/(post|challenge|music)\/item_list\//;
+  const L = { items: [], ids: new Set(), hasMore: true, answers: 0 };
+  function onList(text) {
+    let d; try { d = JSON.parse(text); } catch (e) { return; }
+    if (!d || typeof d !== "object") return;
+    L.answers++;
+    for (const it of d.itemList || d.item_list || []) {
+      let c = null; try { c = typeof compact === "function" ? compact(it) : null; } catch (e) {}
+      if (c && !L.ids.has(c.id)) { L.ids.add(c.id); L.items.push(c); }
+    }
+    if (d.hasMore === false || d.has_more === false || d.has_more === 0) L.hasMore = false;
+  }
+  const OF = window.fetch;
+  window.fetch = function (input, init) {
+    const url = String((input && input.url) || input || "");
+    if (!LIST_RE.test(url)) return OF.apply(this, arguments);
+    return OF.apply(this, arguments).then((r) => { try { r.clone().text().then(onList, () => {}); } catch (e) {} return r; });
+  };
+  const XO = XMLHttpRequest.prototype.open, XS = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (m, url) { this.__ghL = LIST_RE.test(String(url || "")); return XO.apply(this, arguments); };
+  XMLHttpRequest.prototype.send = function () {
+    if (this.__ghL) this.addEventListener("load", () => { try { if (this.responseType === "" || this.responseType === "text") onList(this.responseText); else if (this.responseType === "json") onList(JSON.stringify(this.response)); } catch (e) {} });
+    return XS.apply(this, arguments);
+  };
+  function pageHeader() {
+    try {
+      const sc = JSON.parse(document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__").textContent).__DEFAULT_SCOPE__ || {};
+      const ud = sc["webapp.user-detail"] && sc["webapp.user-detail"].userInfo;
+      if (ud && ud.user) {
+        const u = ud.user, st = ud.statsV2 || ud.stats || {};
+        return { user: { id: str(u.id, 40), uniqueId: str(u.uniqueId, 60), nickname: str(u.nickname, 80), secUid: str(u.secUid, 120), avatar: str(u.avatarThumb, 600), avatarLarge: str(u.avatarLarger || u.avatarMedium, 600), signature: str(u.signature, 300), verified: !!u.verified, privateAccount: !!u.privateAccount, followers: String(st.followerCount || 0), following: String(st.followingCount || 0), likes: String(st.heartCount || st.heart || 0), videos: String(st.videoCount || 0) } };
+      }
+    } catch (e) {}
+    return {};
+  }
+  function scrollForMore() {
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    for (const e of qa("main, div")) { if (e.scrollHeight > e.clientHeight + 200 && /(auto|scroll)/.test(getComputedStyle(e).overflowY)) { e.scrollTop = e.scrollHeight; e.dispatchEvent(new Event("scroll")); } }
+    window.dispatchEvent(new Event("scroll"));
+  }
+  // from: how many items Ghost already has; more: scroll for the next page first
+  window.__ghostVPList = async function (a) {
+    a = a || {};
+    const from = Math.max(0, Number(a.from) || 0);
+    const want = from + 1;
+    if (a.more && L.items.length < want && L.hasMore) {
+      const before = L.items.length, answers = L.answers;
+      for (let i = 0; i < 3 && L.items.length === before && L.hasMore; i++) {
+        scrollForMore();
+        const end = Date.now() + 3000;
+        while (Date.now() < end && L.answers === answers) await sleep(150);
+        await sleep(200);
+      }
+    } else if (!L.items.length) {
+      const end = Date.now() + 9000; // the first page arrives with the page itself
+      while (Date.now() < end && !L.answers) await sleep(200);
+    }
+    const out = L.items.slice(from, from + 60);
+    return Object.assign({ ok: true, items: out, total: L.items.length, hasMore: L.hasMore || L.items.length > from + out.length, answers: L.answers }, pageHeader());
+  };
+
   function fiberOf(el) {
     if (!el) return null;
     for (const k in el) if (k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$")) return el[k];
@@ -67,10 +135,18 @@
     if (a != null) return a === "true";
     return false;
   }
+  // TikTok's buttons react to the whole pointer sequence, not a bare click(): on the phone a click() left the like
+  // off, while pointerdown/mousedown/pointerup/mouseup/click at the button's centre liked it (checked 2026-09-29).
   function clickEl(el) {
     const b = (el && (el.closest("button") || el.closest("[role=button]"))) || el;
     if (!b) return false;
-    b.click();
+    const r = b.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+    const o = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, buttons: 1, pointerId: 1, pointerType: "mouse", isPrimary: true, view: window };
+    try {
+      b.dispatchEvent(new PointerEvent("pointerdown", o)); b.dispatchEvent(new MouseEvent("mousedown", o));
+      b.dispatchEvent(new PointerEvent("pointerup", Object.assign({}, o, { buttons: 0 }))); b.dispatchEvent(new MouseEvent("mouseup", Object.assign({}, o, { buttons: 0 })));
+      b.dispatchEvent(new MouseEvent("click", Object.assign({}, o, { buttons: 0 })));
+    } catch (e) { b.click(); }
     return true;
   }
   async function waitFor(test, ms) {
@@ -92,7 +168,7 @@
     // unfollowing may ask to confirm
     if (which === "follow" && !on) {
       const confirm = await waitFor(() => qa('[role="dialog"] button, [data-e2e*="confirm"]').find((b) => /unfollow/i.test(b.textContent || "")), 1500);
-      if (confirm) confirm.click();
+      if (confirm) clickEl(confirm);
     }
     const after = await waitFor(() => { const s = state(id); return s[key] === on ? s : null; }, 5000);
     if (after) return { ok: true, state: after };
@@ -126,12 +202,15 @@
     const out = [], seen = new Set();
     for (const el of qa("div, li, p, span", root)) {
       if (out.length > 400) break;
-      const f = fiberOf(el); if (!f) continue;
-      const p = f.memoizedProps;
-      if (!p || typeof p !== "object") continue;
+      // the comment object sits on the element's own component or the one just above it (commentItem on the
+      // phone's desktop page, 2026-09-29: one level up from the comment-level-1 element)
       let c = null;
-      for (const k of ["comment", "commentItem", "data", "item", "reply"]) if (isComment(p[k])) { c = p[k]; break; }
-      if (!c && isComment(p)) c = p;
+      for (let f = fiberOf(el), d = 0; f && d < 3 && !c; f = f.return, d++) {
+        const p = f.memoizedProps;
+        if (!p || typeof p !== "object") continue;
+        for (const k of ["comment", "commentItem", "data", "item", "reply"]) if (isComment(p[k])) { c = p[k]; break; }
+        if (!c && isComment(p)) c = p;
+      }
       if (!c || seen.has(String(c.cid))) continue;
       seen.add(String(c.cid));
       const cc = compactComment(c);
@@ -200,6 +279,9 @@
   const posted = new Set();
   let lock = Promise.resolve();
   function commentEditor() {
+    // live on the phone (2026-09-29): comment-input holds comment-text, TikTok's Draft editor
+    const txt = q('[data-e2e="comment-text"]');
+    if (txt) { const ce = txt.isContentEditable ? txt : q('[contenteditable="true"]', txt); if (ce) return ce; }
     const box = q('[data-e2e="comment-input"]') || q('[class*="CommentInputContainer"]') || q('[class*="DivInputEditorContainer"]');
     const root = box || document;
     return q('[contenteditable="true"]', root) || q("textarea", root);

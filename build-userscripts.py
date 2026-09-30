@@ -89,7 +89,14 @@ if (ghost / 'tiktok-page.js').exists():
 if (ghost / 'tiktok-dm-page.js').exists():
     (app / 'ghost-tiktok-dm.js').write_text((ghost / 'tiktok-dm-page.js').read_text())
 if (ghost / 'tiktok-video-page.js').exists():
-    (app / 'ghost-tiktok-video.js').write_text((ghost / 'tiktok-video-page.js').read_text())
+    # the hidden desktop page turns TikTok's list answers into the same compact items as the TikTok tab:
+    # copy pick/urlOf + compact() out of tiktok-page.js at the /* @ghost-compact */ marker (str/num exist there already)
+    tp = (ghost / 'tiktok-page.js').read_text()
+    a = tp.index('  const pick = '); b = tp.index('\n', tp.index('  const urlOf = ')) + 1
+    c = tp.index('  function compact(it) {'); d = tp.index('  // a search/user result')
+    vp = (ghost / 'tiktok-video-page.js').read_text()
+    assert '/* @ghost-compact */' in vp
+    (app / 'ghost-tiktok-video.js').write_text(vp.replace('/* @ghost-compact */', tp[a:b] + tp[c:d]))
 
 with zipfile.ZipFile(root / 'Dark-Mobile-Safari.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
     for path in sorted(out.glob('*.user.js')):
