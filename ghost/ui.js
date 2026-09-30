@@ -12868,7 +12868,9 @@
       },
     });
     try { await gn.net.init(); } catch (e) { gnTrail("init " + (e && e.message)); }
-    if (gn.net.friends().length) gnChanged(ctx);
+    // always, not only with friends: this also loads YOUR saved Ghost picture/banner (with no connected friends yet,
+    // they stayed blank after every launch until the next edit - phone 2026-09-29)
+    gnChanged(ctx);
     const round = async (withSync) => {
       if (document.hidden || !gn.net.hasWork() || gn.polling) return;
       gn.polling = true;
