@@ -2319,7 +2319,14 @@
         if (gnCode) return gnCardBubble(ctx, m, isMe, isLast, gnCode);
         const b = el("div", "gh-bubble");
         if (isLast) b.dataset.tail = "1";
-        appendRichText(ctx, b, m.text);
+        // a TikTok link: its preview card (like a shared video in TikTok Messages), any other text above it
+        const ttl = ttLinkIn(m.text);
+        if (ttl) {
+          b.classList.add("gh-ttlink-bubble");
+          const rest = String(m.text || "").replace(ttl.url, " ").replace(/[ \t]{2,}/g, " ").trim();
+          if (rest) { const tx = el("div", "gh-ttlink-text"); appendRichText(ctx, tx, rest); b.appendChild(tx); }
+          b.appendChild(ttLinkCard(ctx, ttl));
+        } else appendRichText(ctx, b, m.text);
         b.appendChild(tickMetaEl(m, isMe));
         if (m.failed) b.dataset.failed = "1";
         return b;
@@ -3195,7 +3202,7 @@
       const t = e.touches[0];
       g = { wrap, x0: t.clientX, y0: t.clientY, dx: 0, dy: 0, locked: null, longFired: false, t0: Date.now(),
         // a tap on media/snaps/voice notes already does something on the first tap: no double-tap heart there
-        tappable: !target.closest(".gh-media, .gh-snap-row, .gh-snap-media, .gh-audio-body, .gh-link, .gh-reply-quote") };
+        tappable: !target.closest(".gh-media, .gh-snap-row, .gh-snap-media, .gh-audio-body, .gh-link, .gh-reply-quote, .gh-ttlink-card") };
       g.timer = setTimeout(() => {
         g.longFired = true;
         haptic("medium");
@@ -9054,6 +9061,11 @@
   async function renderEditorOutput(ctx, c) {
     const cap = c.captured, ed = c.editor;
     if (!ed || !ed.hasEdits()) return { blob: cap.blob };
+    // a photo sent before its preview finished loading has no size yet: read it from the file rather than falling
+    // back to 1080x1920 (that squeezed/shrank the photo and misplaced the edits)
+    if (!cap.width && cap.kind !== "video" && cap.blob && typeof createImageBitmap === "function") {
+      try { const bm = await createImageBitmap(cap.blob); cap.width = bm.width; cap.height = bm.height; bm.close && bm.close(); } catch (e) {}
+    }
     const w = Math.max(1, Math.round(cap.width || 1080)), h = Math.max(1, Math.round(cap.height || 1920));
     const overlayCanvas = document.createElement("canvas");
     overlayCanvas.width = w; overlayCanvas.height = h;
@@ -11192,6 +11204,100 @@
     bub.textContent = m.recalled ? "This message was deleted" : m.text || "Message";
     b.appendChild(bub);
     return b;
+  }
+  // ---- TikTok links in Snapchat chats (Ghost 1.9.0): a preview card that plays right in the chat ----
+  // www.tiktok.com/@user/video/<id> · /@user/photo/<id> · m.tiktok.com/v/<id>.html · vm./vt.tiktok.com/<code> ·
+  // www.tiktok.com/t/<code> (short links are followed natively: TikTokFeed.swift "resolve", TikTok hosts only)
+  const TT_URL_RE = /https?:\/\/(?:(?:www|m|vm|vt)\.)?tiktok\.com\/[^\s<>"]+[^\s<>".,;:!?)\]']/i;
+  function ttParseLink(url) {
+    let m = /^https?:\/\/(?:www\.|m\.)?tiktok\.com\/@([\w.]{1,40})\/(video|photo)\/(\d{5,30})/i.exec(url);
+    if (m) return { url, handle: m[1], kind: m[2].toLowerCase(), id: m[3] };
+    m = /^https?:\/\/m\.tiktok\.com\/v\/(\d{5,30})\.html/i.exec(url);
+    if (m) return { url, kind: "video", id: m[1] };
+    if (/^https?:\/\/(?:vm|vt)\.tiktok\.com\/[A-Za-z0-9]{4,20}\/?/i.test(url) || /^https?:\/\/(?:www\.)?tiktok\.com\/t\/[A-Za-z0-9]{4,20}\/?/i.test(url)) return { url, kind: "short" };
+    return null;
+  }
+  function ttLinkIn(text) {
+    const m = TT_URL_RE.exec(String(text || ""));
+    return m ? ttParseLink(m[0]) : null;
+  }
+  // per link, for the session: { state: "loading"|"video"|"photo"|"none", item, cover (blob: URL), url, waiters }
+  const ttLinkCache = new Map();
+  function ttLinkLoad(link) {
+    let e = ttLinkCache.get(link.url);
+    if (e) return e;
+    e = { state: "loading", url: link.url, item: null, cover: "", waiters: new Set() };
+    ttLinkCache.set(link.url, e);
+    // keep the cache small: forget (and free the cover of) the oldest ones
+    if (ttLinkCache.size > 60) { const [k, old] = ttLinkCache.entries().next().value; if (old.cover) URL.revokeObjectURL(old.cover); ttLinkCache.delete(k); }
+    const done = (state) => { e.state = state; for (const f of e.waiters) { try { f(); } catch (x) {} } e.waiters.clear(); };
+    (async () => {
+      if (pref("tiktokTab") === false) return done("none");
+      let l = link;
+      if (l.kind === "short") {
+        const r = await ttPost("resolve", { url: l.url }).catch(() => null);
+        l = (r && r.url && ttParseLink(r.url)) || null;
+        if (!l || l.kind === "short") return done("none");
+      }
+      if (l.kind === "photo") return done("photo");
+      const r = await ttApi("item", { id: l.id }).catch(() => null);
+      const it = r && r.items && r.items[0];
+      if (!it) return done("none");
+      e.item = it;
+      if (it.cover) { try { e.cover = URL.createObjectURL(await ttBlob(it.cover, false)); } catch (x) {} }
+      done("video");
+    })().catch(() => done("none"));
+    return e;
+  }
+  function ttLinkCard(ctx, link) {
+    const card = el("div", "gh-ttlink-card gh-press");
+    card.setAttribute("role", "button");
+    const paint = () => {
+      const e = ttLinkCache.get(link.url) || { state: "loading" };
+      card.innerHTML = "";
+      card.dataset.state = e.state;
+      if (e.state === "video") {
+        const it = e.item;
+        const cov = el("span", "gh-ttlink-cover");
+        if (e.cover) { const img = el("img"); img.alt = ""; img.src = e.cover; cov.appendChild(img); }
+        cov.appendChild(icon("play", 30));
+        card.appendChild(cov);
+        const meta = el("span", "gh-ttlink-meta");
+        const a = it.author || {};
+        meta.appendChild(Object.assign(el("span", "gh-ttlink-author"), { textContent: "@" + (a.uniqueId || "tiktok") }));
+        if (it.desc) meta.appendChild(Object.assign(el("span", "gh-ttlink-desc"), { textContent: it.desc }));
+        card.appendChild(meta);
+      } else if (e.state === "loading") {
+        card.appendChild(el("span", "gh-ttlink-cover gh-ttlink-skel"));
+      } else { // photo post, TikTok off, or the video couldn't be read: a plain TikTok link card
+        const ic = el("span", "gh-ttlink-ic"); ic.appendChild(icon("reels", 22)); card.appendChild(ic);
+        const col = el("span", "gh-ttlink-plain");
+        col.appendChild(Object.assign(el("span", "gh-ttlink-title"), { textContent: e.state === "photo" ? "TikTok photo post" : "TikTok video" }));
+        col.appendChild(Object.assign(el("span", "gh-ttlink-url"), { textContent: link.url.replace(/^https?:\/\//, "") }));
+        card.appendChild(col);
+      }
+    };
+    const e = ttLinkLoad(link);
+    if (e.state === "loading") e.waiters.add(() => { if (card.isConnected || card.parentNode) paint(); });
+    paint();
+    card.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const x = ttLinkCache.get(link.url);
+      if (x && x.state === "video" && x.item) ttPlayLinkVideo(ctx, x.item, card);
+      else if (!x || x.state !== "loading") openLink(link.url);
+    });
+    return card;
+  }
+  // plays in the chat's own full-screen viewer: closing it is back in the chat, where it was
+  async function ttPlayLinkVideo(ctx, it, card) {
+    if (card.dataset.busy === "1") return;
+    card.dataset.busy = "1"; haptic("light");
+    try {
+      const blob = await ttBlob(it.play, true);
+      if (!blob || !blob.size) throw new Error("empty");
+      openViewerSingle(ctx, { type: "video", blob });
+    } catch (e) { ctx.showToast("Couldn't play that TikTok"); }
+    finally { card.dataset.busy = "0"; }
   }
   async function ttOpenSharedVideo(ctx, itemId) {
     try {

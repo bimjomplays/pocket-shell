@@ -2764,3 +2764,22 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-gal-tt-empty { padding: 64px 32px; text-align: center; font-size: 14.5px; line-height: 1.45; color: var(--gh-text-secondary); }
 .gh-gal[data-mode="tiktok"] .gh-gal-scroll, .gh-gal[data-mode="tiktok"] .gh-gal-scrub, .gh-gal[data-mode="tiktok"] .gh-gal-limited,
 .gh-gal[data-mode="tiktok"] .gh-gal-select, .gh-gal[data-mode="tiktok"] .gh-gal-album .gh-gal-sub, .gh-gal[data-mode="tiktok"] .gh-gal-denied { display: none !important; }
+
+/* ---- TikTok links in Snapchat chats (Ghost 1.9.0): the preview card inside the text bubble ---- */
+.gh-bubble.gh-ttlink-bubble { display: flex; flex-direction: column; gap: 6px; max-width: min(260px, 72%); }
+.gh-ttlink-text { overflow-wrap: anywhere; }
+.gh-ttlink-card { display: flex; flex-direction: column; gap: 6px; width: 200px; max-width: 100%; cursor: pointer; color: inherit; }
+.gh-ttlink-cover { position: relative; display: block; width: 100%; aspect-ratio: 3 / 4; border-radius: var(--gh-radius-sm); overflow: hidden; background: var(--gh-bg-panel-2); }
+.gh-ttlink-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.gh-ttlink-cover > svg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); fill: #fff; color: #fff; filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); } /* play glyph over the cover (white over a thumbnail, like the TikTok DM card) */
+.gh-ttlink-skel { animation: gh-ttlink-pulse 1.2s ease-in-out infinite; }
+@keyframes gh-ttlink-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+.gh-ttlink-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.gh-ttlink-author { font-weight: 600; font-size: 14px; }
+.gh-ttlink-desc { font-size: 13px; opacity: 0.8; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.gh-ttlink-card[data-state="none"], .gh-ttlink-card[data-state="photo"] { flex-direction: row; align-items: center; gap: 10px; width: 240px; }
+.gh-ttlink-ic { flex: none; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; background: var(--gh-bg-panel-2); color: var(--gh-text); }
+.gh-ttlink-plain { display: flex; flex-direction: column; min-width: 0; }
+.gh-ttlink-title { font-weight: 600; font-size: 14px; }
+.gh-ttlink-url { font-size: 12.5px; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-ttlink-card[data-busy="1"] { opacity: 0.6; }

@@ -83,6 +83,7 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
             (host.presentedViewController ?? host).present(sheet, animated: true)
             reply(true, nil)
         case "fetch": fetch(body, reply: reply)
+        case "resolve": resolve(body, reply: reply) // a TikTok short link (vm./vt.tiktok.com, /t/) -> the video URL
         case "api": api(body, reply: reply)
         case "signIn": signIn(); reply(true, nil)
         case "signOut": signOut(reply: reply)
@@ -247,6 +248,22 @@ final class GhostTikTok: NSObject, WKScriptMessageHandler, WKNavigationDelegate 
     }
 
     // MARK: video / picture bytes for ui.js
+
+    /// A TikTok share link from a chat: follow its redirects (the session only follows them within TikTok's hosts)
+    /// and answer the final URL, so ui.js can read the video id. Nothing but the URL goes back.
+    private func resolve(_ body: [String: Any], reply: @escaping (Any?, String?) -> Void) {
+        guard let text = body["url"] as? String, text.count < 300, let url = URL(string: text), url.scheme == "https",
+              let h = url.host, Self.allowed(h) else { return reply(nil, "unsupported link") }
+        var request = URLRequest(url: url, timeoutInterval: 12)
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("bytes=0-2047", forHTTPHeaderField: "Range") // only the address matters, not the page
+        session.dataTask(with: request) { _, response, error in
+            DispatchQueue.main.async {
+                if let final = response?.url, final.scheme == "https", let fh = final.host, Self.allowed(fh) { return reply(["url": final.absoluteString], nil) }
+                reply(nil, error?.localizedDescription ?? "no redirect")
+            }
+        }.resume()
+    }
 
     private func fetch(_ body: [String: Any], reply: @escaping (Any?, String?) -> Void) {
         guard let text = body["url"] as? String, let url = URL(string: text), url.scheme == "https", let h = url.host, Self.allowed(h) else {
