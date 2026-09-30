@@ -824,9 +824,15 @@
     tabTikTok.addEventListener("click", () => {
       haptic();
       if (ctx.gallery && ctx.gallery.el.dataset.open === "1") closeGallery(ctx);
+      const T = ctx.tiktok;
+      const already = !!(T && T.el.dataset.open === "1");
       for (const t of allTabs) t.dataset.active = "0";
       tabTikTok.dataset.active = "1";
+      // the tab always lands on the main For You feed (search / profiles / messages close); tapping it while already
+      // on TikTok also refreshes the feed, like TikTok's Home button (user request 2026-09-29)
+      if (T) { if (T.comments && T.comments.it) T.comments.close(); closeTTSearchAll(ctx, !already); }
       openTikTok(ctx);
+      if (already && T) ttRefresh(ctx);
     });
     tabSettings.addEventListener("click", () => {
       haptic();
@@ -9388,15 +9394,30 @@
     T.user = s.user || null;
     T.banner.style.display = T.signedIn || !T.started ? "none" : "";
   }
+  // Videos already shown in an earlier session: TikTok's website starts every fresh session with the same first batch
+  // (phone 2026-09-29: "if I close the app and open it back up it's the same feed"), so those are skipped and Ghost
+  // asks TikTok for more until there's something new.
+  const TT_SEEN_KEY = "ghostTTSeen";
+  let ttSeenBefore = null;
+  function ttSeenLoad() { if (!ttSeenBefore) { let a = []; try { a = JSON.parse(localStorage.getItem(TT_SEEN_KEY) || "[]"); } catch (e) {} ttSeenBefore = new Set(Array.isArray(a) ? a : []); } return ttSeenBefore; }
+  function ttMarkSeen(id) {
+    if (!id) return;
+    try { let a = JSON.parse(localStorage.getItem(TT_SEEN_KEY) || "[]"); if (!Array.isArray(a)) a = []; if (!a.includes(id)) { a.push(id); if (a.length > 800) a = a.slice(-800); localStorage.setItem(TT_SEEN_KEY, JSON.stringify(a)); } } catch (e) {}
+  }
   function ttAddItems(ctx, list) {
     const T = ctx.tiktok;
     if (!T || !T.started || pref("tiktokTab") === false) return;
-    let added = 0;
+    const before = ttSeenLoad();
+    let added = 0, skipped = 0;
     for (const it of list) {
       if (!it || !it.id || !it.play || T.ids.has(it.id)) continue;
+      if (before.has(it.id)) { skipped++; T.ids.add(it.id); continue; }
       T.ids.add(it.id); T.items.push(it); added++;
     }
+    // everything TikTok sent was already watched: ask for more (a few times, spaced out like the page's own paging)
+    if (!T.items.length && skipped && (T.freshTries || 0) < 5) { T.freshTries = (T.freshTries || 0) + 1; setTimeout(() => ttPost("more").catch(() => {}), 2800); }
     if (!added) return;
+    if (T.items.length === added) ttMarkSeen(T.items[0].id); // the first one is on screen now
     T.loading.style.display = "none";
     T.empty.style.display = "none";
     clearTimeout(T.emptyTimer);
@@ -9432,6 +9453,7 @@
       const old = P.slides.get(P.index);
       if (old) { old.el.dataset.paused = "0"; if (old.video) { try { old.video.pause(); old.video.currentTime = 0; } catch (e) {} } }
       P.index = to; P.paused = false; // no haptic per video: TikTok doesn't buzz on every swipe (user 2026-09-29)
+      if (P === ctx.tiktok && P.items[to]) ttMarkSeen(P.items[to].id);
     }
     layoutTikTok(ctx, startOffset, true, P);
     requestAnimationFrame(() => requestAnimationFrame(() => {
