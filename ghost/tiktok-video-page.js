@@ -163,8 +163,10 @@
     if (!before.signedIn) return { error: "signed out", notDone: true };
     const key = which === "like" ? "liked" : which === "save" ? "saved" : "following";
     if (before[key] === on) return { ok: true, state: before, already: true };
-    const sel = which === "like" ? '[data-e2e="like-icon"]' : which === "save" ? '[data-e2e="favorite-icon"]' : '[data-e2e="feed-follow"], [data-e2e="browse-follow"]';
-    if (!clickEl(q(sel))) return { error: "no " + which + " button on TikTok's page", notDone: true };
+    const sel = which === "like" ? '[data-e2e="like-icon"], [data-e2e="browse-like-icon"]' : which === "save" ? '[data-e2e="favorite-icon"], [data-e2e="browse-favorite-icon"]' : '[data-e2e="feed-follow"], [data-e2e="browse-follow"]';
+    // the video's data is on the page a moment before its buttons are (phone 2026-09-29: "no like button")
+    const btn = await waitFor(() => q(sel), 8000);
+    if (!btn || !clickEl(btn)) return { error: "no " + which + " button on TikTok's page", notDone: true };
     // unfollowing may ask to confirm
     if (which === "follow" && !on) {
       const confirm = await waitFor(() => qa('[role="dialog"] button, [data-e2e*="confirm"]').find((b) => /unfollow/i.test(b.textContent || "")), 1500);
@@ -222,9 +224,12 @@
   const strip = (list) => list.map((c) => { const x = Object.assign({}, c); delete x._el; return x; });
   async function openComments() {
     if (readComments().length) return true;
-    const ic = q('[data-e2e="comment-icon"]');
+    const ic = await waitFor(() => q('[data-e2e="comment-icon"], [data-e2e="browse-comment-icon"]'), 8000);
     if (!ic) return false;
-    clickEl(ic);
+    // a plain click opens the comment panel (1.4.0 did, checked on the phone); the full pointer sequence toggled it
+    // open and shut again ("TikTok's comments didn't open" in 1.5.x)
+    const b = ic.closest("button") || ic.closest("[role=button]") || ic;
+    b.click();
     return !!(await waitFor(() => readComments().length || q('[data-e2e="comment-input"]') || /no comments/i.test((panel() || document.body).textContent || ""), 6000));
   }
   function commentEl(cid) { const c = readComments().find((x) => x.cid === cid); return c ? c._el : null; }
