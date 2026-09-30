@@ -108,6 +108,7 @@
     flash: '<path d="M13 2L4 14h6l-1 8 9-12h-6z" fill="currentColor" stroke="none"/>',
     timerIcon: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/>',
     expand: '<path d="M9 3H3v6"/><path d="M15 3h6v6"/><path d="M21 15v6h-6"/><path d="M3 15v6h6"/>',
+    portrait: '<rect x="3" y="3" width="18" height="18" rx="4" stroke-dasharray="2.2 2.6"/><circle cx="12" cy="10" r="3"/><path d="M6.8 18.5c.9-2.4 2.9-3.7 5.2-3.7s4.3 1.3 5.2 3.7"/>',
     scissors: '<circle cx="6" cy="7" r="2.6"/><circle cx="6" cy="17" r="2.6"/><path d="M8.2 8.4L20 17"/><path d="M8.2 15.6L20 7"/>',
     loop: '<path d="M17 2.5l3 3-3 3"/><path d="M4 11.5v-1a5 5 0 015-5h11"/><path d="M7 21.5l-3-3 3-3"/><path d="M20 12.5v1a5 5 0 01-5 5H4"/>',
     share: '<path d="M12 3v12"/><path d="M8 7l4-4 4 4"/><path d="M6 11H5a2 2 0 00-2 2v6a2 2 0 002 2h14a2 2 0 002-2v-6a2 2 0 00-2-2h-1"/>',
@@ -7242,6 +7243,8 @@
       <input type="file" accept="image/*,video/*" hidden>
       <div class="gh-cam-review">
         <div class="gh-cam-review-media"></div>
+        <canvas class="gh-fx-info"></canvas><canvas class="gh-fx-info"></canvas>
+        <div class="gh-fx-name"></div>
         <canvas class="gh-editor-draw"></canvas>
         <div class="gh-editor-items"></div>
         <div class="gh-editor-textwrap">
@@ -7262,6 +7265,7 @@
           <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="text"></button>
           <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="sticker"></button>
           <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="scissors"></button>
+          <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="bg" style="display:none"></button>
           <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="loop" style="display:none"></button>
           <button class="gh-cam-btn gh-hit gh-editor-tool" data-tool="draw"></button>
         </div>
@@ -7886,7 +7890,7 @@
   // of a freshly captured blob filling the screen.
   function openReview(ctx, blob, kind, fromCamera, dims, extra) {
     const c = ctx.camera;
-    c.captured = { blob, kind, width: dims && dims.width, height: dims && dims.height, hasAudio: dims ? dims.hasAudio !== false : true };
+    c.captured = { blob, kind, width: dims && dims.width, height: dims && dims.height, hasAudio: dims ? dims.hasAudio !== false : true, at: Date.now() };
     stopCameraStream(ctx);
     c.reviewMedia.innerHTML = "";
     const url = extra && extra.url ? extra.url : URL.createObjectURL(blob);
@@ -7915,6 +7919,7 @@
     const v = c.reviewMedia.querySelector("video"); if (v) v.pause();
     c.reviewMedia.innerHTML = "";
     if (c.captured && c.captured.url && c.captured.ownUrl) URL.revokeObjectURL(c.captured.url);
+    if (c.captured && c.captured.fxUrls) for (const u of c.captured.fxUrls) URL.revokeObjectURL(u); // background-effect versions
     c.captured = null;
     c.editSource = null; c.el.dataset.editsrc = "0";
     teardownEditor(ctx, c);
@@ -7991,10 +7996,11 @@
     c.sending = true; c.sendBtn.dataset.sending = "1"; paintChosen(ctx);
     const cap = c.captured, ids = Array.from(c.picked);
     try {
-      const out = await renderEditorOutput(ctx, c);
+      if (cap.kind === "video" && fxNativeArgs(c.editor)) ctx.showToast("Adding your filter\u2026");
+      const out = await renderEditorOutput(ctx, c, { nativeVideo: true });
       await api.sendSnap(ids.filter((x) => x !== "__story__"), out.blob, {
         kind: cap.kind, width: out.width || cap.width, height: out.height || cap.height,
-        hasAudio: cap.hasAudio, myStory: ids.includes("__story__"), overlay: out.overlay,
+        hasAudio: out.hasAudio != null ? out.hasAudio : cap.hasAudio, myStory: ids.includes("__story__"), overlay: out.overlay,
         loop: cap.kind === "video" && !!(c.editor && c.editor.loop), // Snapchat: loops (infinity) vs plays once
       });
       haptic("success");
@@ -8013,17 +8019,20 @@
     c.saving = true;
     try {
       const out = await renderEditorOutput(ctx, c);
-      if (c.captured.kind === "video" && out.overlay) {
+      if (c.captured.kind === "video" && (out.overlay || out.fx)) {
         // The drawing/text/stickers are burned into the saved video natively (GalleryLibrary.swift galleryRender,
         // AVVideoCompositionCoreAnimationTool); if that fails, Photos gets the untouched clip like before.
         try {
           ctx.showToast("Saving…");
-          await dgPost("galleryRender", { source: { type: "data", kind: "video", data: await blobToB64(c.captured.blob) }, overlay: await blobToB64(out.overlay), mode: "copy" });
+          const args = { source: { type: "data", kind: "video", data: await blobToB64(c.captured.blob) }, mode: "copy" };
+          if (out.overlay) args.overlay = await blobToB64(out.overlay);
+          if (out.fx) args.fx = out.fx; // filter / speed (SnapFX.swift)
+          await dgPost("galleryRender", args);
           ctx.showToast("Saved to Photos");
         } catch (err) {
           gtrail("video save with edits failed " + (err && err.message || err));
           await saveRefToPhotos(ctx, { blob: c.captured.blob, type: "video" });
-          ctx.showToast("Saved to Photos without the drawing/text");
+          ctx.showToast("Saved to Photos without your edits");
         }
       } else {
         await saveRefToPhotos(ctx, { blob: out.blob, type: c.captured.kind === "video" ? "video" : "image" });
@@ -8124,12 +8133,15 @@
       emojiBrushBtn: root.querySelector(".gh-editor-emojibrush"), brushPreview: root.querySelector(".gh-editor-brushpreview"),
       brushSize: 9, brushEmoji: null, loop: false,
       trash: root.querySelector(".gh-editor-trash"),
-      hasEdits: () => ed.strokes.length > 0 || ed.items.length > 0,
+      hasEdits: () => ed.strokes.length > 0 || ed.items.length > 0 || fxHasEdits(ed),
+      fxInfoLayers: Array.from(root.querySelectorAll(".gh-fx-info")), fxName: root.querySelector(".gh-fx-name"),
+      railBg: root.querySelector('[data-tool="bg"]'), fx: { color: "none", info: null, speed: null }, car: null, bg: null,
     };
     c.editor = ed;
     ed.trash.querySelector(".gh-editor-trash-ic").appendChild(icon("trash", 24));
     ed.railScissors.appendChild(icon("scissors", 22)); ed.railScissors.setAttribute("aria-label", "Scissors: cut out a sticker");
     ed.railLoop.appendChild(icon("loop", 22)); ed.railLoop.setAttribute("aria-label", "Loop video");
+    ed.railBg.appendChild(icon("portrait", 22)); ed.railBg.setAttribute("aria-label", "Background: blur or replace");
     ed.colorbar.style.background = `linear-gradient(to bottom, ${EDITOR_COLOR_STOPS.join(",")})`;
     ed.textInput.dataset.placeholder = "Tap to type";
 
@@ -8164,16 +8176,21 @@
     onTap(ed.railScissors, () => { haptic("light"); runScissors(ctx, c); });
     onTap(ed.railLoop, () => { haptic("light"); ed.loop = !ed.loop; ed.railLoop.dataset.on = ed.loop ? "1" : "0"; ctx.showToast(ed.loop ? "Loops for your friend" : "Plays once"); });
     onTap(ed.emojiBrushBtn, () => { haptic("light"); openEmojiBrushPicker(ctx, c); });
+    onTap(ed.railBg, () => { haptic("light"); fxToggleBgPanel(ctx, c); });
     // Tapping the photo: same focus race (its default mousedown/touchstart would blur the caption first, so the
     // handler would misread "just committed" as "idle tap" and start a stray item) - same tap helper.
     const mediaEl = root.querySelector(".gh-cam-review-media");
     onTap(mediaEl, (e) => {
+      if (ed.car && ed.car.swallowTap) { ed.car.swallowTap = false; return; } // that touch locked a filter
+      if (ed.bgPanel && ed.bgPanel.dataset.open === "1") { fxToggleBgPanel(ctx, c); return; }
       if (ed.editingText) { commitTextEditing(ctx, c); return; }
       if (ed.tool) return;
       const p = toLocal(c.review, e.clientX, e.clientY);
       startNewTextItem(ctx, c, p.x, p.y);
     });
 
+    fxInitSwipe(ctx, c, mediaEl); // snap filters: swipe sideways
+    fxBuildBgPanel(ctx, c);
     initDrawCanvas(ctx, c);
     initColorbar(ctx, c);
     initSizePicker(ctx, c);
@@ -8188,6 +8205,7 @@
     ed.brushEmoji = null; ed.brushSize = 9; ed.loop = false;
     if (ed.railLoop) { ed.railLoop.dataset.on = "0"; ed.railLoop.style.display = c.captured && c.captured.kind === "video" ? "" : "none"; }
     if (ed.railScissors) ed.railScissors.style.display = c.captured && c.captured.kind === "video" ? "none" : "";
+    fxReset(ctx, c);
     if (ed.emojiBrushBtn) { ed.emojiBrushBtn.innerHTML = ""; ed.emojiBrushBtn.appendChild(icon("emoji", 20)); ed.emojiBrushBtn.dataset.show = "0"; }
     for (const item of ed.items) if (item.el) item.el.remove();
     ed.items = []; ed.strokes = []; ed.curStroke = null; ed.itemSeq = 0;
@@ -8215,6 +8233,7 @@
     if (ed.stickerSheetObj) closeSheetGeneric(ed.stickerSheetObj.backdrop, ed.stickerSheetObj.sheet);
     setTool(ctx, c, null);
     hideTrash(ctx, c);
+    fxTeardown(ctx, c);
   }
   function commitPendingEdits(ctx, c) { if (c.editor && c.editor.editingText) commitTextEditing(ctx, c); }
 
@@ -9089,6 +9108,7 @@
     // camera snaps fill the screen (cover); a Gallery item is shown whole (contain) - map with the same fit
     const t = (ed.fit === "contain" ? containTransform : coverTransform)(vw, vh, mediaW, mediaH);
     octx.clearRect(0, 0, mediaW, mediaH);
+    paintInfoFilterFinal(ed, octx, t, vw, vh, ed.capturedAt); // the info filter sits under drawings/text/stickers
     for (const s of ed.strokes) {
       const pts = s.pts.map((p) => viewportToMedia(t, p.x, p.y));
       strokePath(octx, Object.assign({}, s, { size: Math.max(1, s.size / t.scale), pts })); // keeps emoji-brush strokes emoji
@@ -9102,9 +9122,12 @@
   // and only when there are edits) is a transparent PNG at the video's own dimensions for bridge.sendSnap's
   // overlayMedia (see BRIDGE_NOTES.md). A photo's edits are always baked straight into the returned JPEG -
   // no separate overlay - since a flat raster is exactly what sendMedia/sendSnap already expect for images.
-  async function renderEditorOutput(ctx, c) {
+  // opts.nativeVideo (sending): a video's filter/speed is rendered natively into a new clip (SnapFX.swift); saving
+  // passes `fx` on to galleryRender itself.
+  async function renderEditorOutput(ctx, c, opts) {
     const cap = c.captured, ed = c.editor;
     if (!ed || !ed.hasEdits()) return { blob: cap.blob };
+    ed.capturedAt = cap.at;
     // a photo sent before its preview finished loading has no size yet: read it from the file rather than falling
     // back to 1080x1920 (that squeezed/shrank the photo and misplaced the edits)
     if (!cap.width && cap.kind !== "video" && cap.blob && typeof createImageBitmap === "function") {
@@ -9116,17 +9139,525 @@
     const octx = overlayCanvas.getContext("2d");
     paintEditorOverlay(ed, octx, w, h);
     if (cap.kind === "video") {
-      const overlay = await new Promise((res) => overlayCanvas.toBlob(res, "image/png"));
-      return { blob: cap.blob, overlay, width: w, height: h };
+      const overlay = fxOverlayHasContent(ed) ? await new Promise((res) => overlayCanvas.toBlob(res, "image/png")) : null;
+      const fx = fxNativeArgs(ed);
+      if (fx && opts && opts.nativeVideo) {
+        const res = await dgPost("galleryRender", { source: { type: "data", kind: "video", data: await blobToB64(cap.blob) }, fx, mode: "send", full: true });
+        if (!res || !res.data) throw new Error("video filter failed");
+        return { blob: b64ToBlob(res.data, res.mime || "video/mp4"), overlay, width: w, height: h, hasAudio: fx.reverse ? false : cap.hasAudio };
+      }
+      return { blob: cap.blob, overlay, width: w, height: h, fx };
     }
     const photoImg = await loadImageFromBlob(cap.blob);
     const finalCanvas = document.createElement("canvas");
     finalCanvas.width = w; finalCanvas.height = h;
     const fctx = finalCanvas.getContext("2d");
-    fctx.drawImage(photoImg, 0, 0, w, h);
+    let looked = null; // the colour look at full size (WebGL; snapfx.js falls back to the CPU)
+    if (HAS_SNAPFX && ed.fx && !SnapFX.isNone(ed.fx.color)) looked = SnapFX.renderCanvas(photoImg, w, h, ed.fx.color);
+    fctx.drawImage(looked ? looked.canvas : photoImg, 0, 0, w, h);
+    if (looked) looked.dispose();
     fctx.drawImage(overlayCanvas, 0, 0);
     const blob = await new Promise((res) => finalCanvas.toBlob(res, "image/jpeg", 0.92));
     return { blob, width: w, height: h };
+  }
+
+  // =====================================================================================================
+  // Snap filters (1.12.0). Colour looks + their WebGL renderer live in ghost/snapfx.js, the native half (videos,
+  // Gallery edits, background effects) in ios/Sources/SnapFX.swift. On the review screen you swipe sideways through
+  // one carousel: the colour looks, then info filters (time, date, temperature, speed, place), then - videos only -
+  // slow-mo, fast forward and rewind. Hold a finger still on the snap (or keep one finger down and swipe with a
+  // second) to lock the filter you're on; the next one you swipe to stacks on top (one per kind: a look, an info
+  // filter, a speed). Swiping back to Original clears everything. Review-only: the live camera is never filtered.
+  // Portrait blur / background swap (photos from the camera) is a rail button; Vision does the cut-out natively.
+  // =====================================================================================================
+  const HAS_SNAPFX = typeof SnapFX !== "undefined";
+  const FX_SPEEDS = [
+    { id: "slow", name: "🐌 Slow-mo", speed: 0.5 },
+    { id: "fast", name: "🐇 Fast forward", speed: 2 },
+    { id: "rewind", name: "⏪ Rewind", reverse: true },
+  ];
+  const FX_INFOS = [
+    { id: "time", name: "Time" }, { id: "date", name: "Date" },
+    { id: "temp", name: "Temperature", needs: true }, { id: "speed", name: "Speed", needs: true, fresh: true },
+    { id: "place", name: "Location", needs: true },
+  ];
+  const FX_BACKDROPS = [
+    { id: "sunset", name: "Sunset", stops: ["#ff7e5f", "#feb47b", "#6a3093"] },
+    { id: "ocean", name: "Ocean", stops: ["#0f2027", "#2c5364", "#4ca1af"] },
+    { id: "night", name: "Night", stops: ["#0b0c2a", "#2b1055", "#7597de"] },
+    { id: "mint", name: "Mint", stops: ["#d4fc79", "#96e6a1", "#43c6ac"] },
+    { id: "studio", name: "Studio", stops: ["#f5f5f5", "#bdbdbd", "#6e6e6e"] },
+  ];
+  let fxContext = null; // { at, data }: the last contextInfo (weather/place/speed) for the info filters
+
+  function fxEntries(c) {
+    const list = [];
+    for (const f of (HAS_SNAPFX ? SnapFX.filters : [{ id: "none", name: "Original" }])) list.push({ group: "color", id: f.id, name: f.name });
+    for (const f of FX_INFOS) list.push({ group: "info", id: f.id, name: f.name, needs: !!f.needs, fresh: !!f.fresh });
+    if (c.captured && c.captured.kind === "video") for (const s of FX_SPEEDS) list.push({ group: "speed", id: s.id, name: s.name });
+    return list;
+  }
+  // what's applied with the carousel on entry i: the locked filters, with entry i replacing its own kind
+  function fxPickAt(car, i) {
+    const pick = { color: "none", info: null, speed: null };
+    for (const g of ["color", "info", "speed"]) if (car.locks[g]) pick[g] = car.locks[g].id;
+    const cur = car.entries[i];
+    if (cur) {
+      if (cur.group === "color" && cur.id === "none") return { color: "none", info: null, speed: null }; // Original = clean
+      pick[cur.group] = cur.id;
+    }
+    return pick;
+  }
+  function fxHasEdits(ed) { return !!(ed.fx && (ed.fx.color !== "none" || ed.fx.info || ed.fx.speed)) || !!ed.bg; }
+  // the "fx" argument for galleryRender / vaultRender (SnapFX.swift), or null when the video/photo needs nothing native
+  function fxNativeArgs(ed) {
+    if (!ed || !ed.fx) return null;
+    const out = {};
+    const look = HAS_SNAPFX ? SnapFX.nativeParams(ed.fx.color) : null;
+    if (look) Object.assign(out, look);
+    const sp = FX_SPEEDS.find((s) => s.id === ed.fx.speed);
+    if (sp && sp.speed) out.speed = sp.speed;
+    if (sp && sp.reverse) out.reverse = true;
+    return Object.keys(out).length ? out : null;
+  }
+  function fxOverlayHasContent(ed) { return ed.strokes.length > 0 || ed.items.length > 0 || !!(ed.fx && ed.fx.info); }
+
+  function fxReset(ctx, c) {
+    const ed = c.editor;
+    fxStopLoops(ed);
+    if (ed.fxRenderer) { ed.fxRenderer.dispose(); ed.fxRenderer = null; }
+    ed.fxCanvas = null;
+    ed.car = { entries: fxEntries(c), idx: 0, locks: {}, swallowTap: false };
+    ed.fx = { color: "none", info: null, speed: null };
+    ed.bg = null; ed.bgBusy = false;
+    ed.capturedAt = c.captured && c.captured.at; // Time/Date info filters show when the snap was taken
+    for (const l of ed.fxInfoLayers) { l.style.display = "none"; l.style.transform = ""; l._key = ""; }
+    ed.fxName.dataset.show = "0";
+    if (ed.bgPanel) { ed.bgPanel.dataset.open = "0"; ed.bgPanel.dataset.mode = "off"; ed.bgPanel.dataset.busy = "0"; }
+    if (ed.railBg) { ed.railBg.dataset.on = "0"; ed.railBg.style.display = c.captured && c.captured.kind !== "video" && !c.editSource ? "" : "none"; }
+  }
+  function fxStopLoops(ed) {
+    if (!ed) return;
+    cancelAnimationFrame(ed.fxRaf || 0); ed.fxRaf = 0;
+    cancelAnimationFrame(ed.fxRewindRaf || 0); ed.fxRewindRaf = 0;
+  }
+  function fxTeardown(ctx, c) {
+    const ed = c.editor;
+    if (!ed) return;
+    fxStopLoops(ed);
+    if (ed.fxRenderer) { ed.fxRenderer.dispose(); ed.fxRenderer = null; }
+    ed.fxCanvas = null;
+    for (const l of ed.fxInfoLayers) { l.style.display = "none"; l._key = ""; }
+    if (ed.bgPanel) ed.bgPanel.dataset.open = "0";
+  }
+  function fxMediaEl(c) { return c.reviewMedia.querySelector("img, video"); }
+  function fxMediaReady(m) {
+    if (!m) return false;
+    if (m.tagName === "VIDEO") return m.readyState >= 2 && m.videoWidth > 0;
+    return m.complete && m.naturalWidth > 0;
+  }
+
+  // ---- colour: a WebGL canvas over the photo/video, same object-fit, drawing lookL left of `split`, lookR right --
+  function fxPaintColor(ctx, c, lookL, lookR, split) {
+    const ed = c.editor;
+    if (!HAS_SNAPFX || (SnapFX.isNone(lookL) && (split == null || SnapFX.isNone(lookR)))) {
+      if (ed.fxCanvas) ed.fxCanvas.style.display = "none";
+      cancelAnimationFrame(ed.fxRaf || 0); ed.fxRaf = 0;
+      return;
+    }
+    const m = fxMediaEl(c);
+    if (!m) return;
+    if (!ed.fxCanvas || !ed.fxCanvas.isConnected) {
+      if (ed.fxRenderer) { ed.fxRenderer.dispose(); ed.fxRenderer = null; }
+      ed.fxCanvas = el("canvas", "gh-fx-canvas");
+      c.reviewMedia.appendChild(ed.fxCanvas);
+    }
+    ed.fxLook = { l: lookL, r: lookR, split };
+    const draw = () => {
+      const media = fxMediaEl(c);
+      if (!ed.fxCanvas || !fxMediaReady(media)) return false;
+      const nw = media.videoWidth || media.naturalWidth, nh = media.videoHeight || media.naturalHeight;
+      const k = Math.min(1, (media.tagName === "VIDEO" ? 1280 : 1800) / Math.max(nw, nh));
+      const cw = Math.max(1, Math.round(nw * k)), ch = Math.max(1, Math.round(nh * k));
+      if (ed.fxCanvas.width !== cw || ed.fxCanvas.height !== ch) {
+        ed.fxCanvas.width = cw; ed.fxCanvas.height = ch;
+        if (ed.fxRenderer) { ed.fxRenderer.dispose(); ed.fxRenderer = null; }
+      }
+      if (!ed.fxRenderer) ed.fxRenderer = SnapFX.createRenderer(ed.fxCanvas);
+      if (!ed.fxRenderer) { ed.fxCanvas.style.display = "none"; return false; }
+      const L = ed.fxLook;
+      const ok = ed.fxRenderer.draw(media, L.l, L.r, L.split == null ? null : fxSplitToCanvas(ed, c, L.split, cw, ch), media.tagName === "VIDEO" ? (nowMs() % 997) : 0);
+      ed.fxCanvas.style.display = ok ? "" : "none";
+      return ok;
+    };
+    const drawn = draw();
+    if (!drawn && m.tagName !== "VIDEO") m.addEventListener("load", () => { if (ed.fxLook) draw(); }, { once: true });
+    if (m.tagName === "VIDEO" && !ed.fxRaf) {
+      const loop = () => { ed.fxRaf = 0; if (!ed.fxCanvas || !c.captured) return; draw(); ed.fxRaf = requestAnimationFrame(loop); };
+      ed.fxRaf = requestAnimationFrame(loop);
+    }
+  }
+  // a finger x in the review box -> x fraction of the canvas (which is shown object-fit cover/contain)
+  function fxSplitToCanvas(ed, c, x, cw, ch) {
+    const vw = c.review.offsetWidth || ed.viewport.w, vh = c.review.offsetHeight || ed.viewport.h;
+    const t = (ed.fit === "contain" ? containTransform : coverTransform)(vw, vh, cw, ch);
+    return clamp((x - t.ox) / (cw * t.scale), -0.01, 1.01);
+  }
+
+  // ---- info filters: drawn at review-box size (css px), mapped onto the media for the sent snap ------------
+  function fxInfoData(kind) { return fxContext ? fxContext.data : null; }
+  function fxFitFont(g, text, weight, px, maxW) {
+    g.font = `${weight} ${px}px -apple-system, "SF Pro Display", sans-serif`;
+    const w = g.measureText(text).width;
+    if (w > maxW) { px = Math.floor(px * maxW / w); g.font = `${weight} ${px}px -apple-system, "SF Pro Display", sans-serif`; }
+    return px;
+  }
+  function paintInfoFilter(g, kind, data, vw, vh, at) {
+    const d = new Date(at || Date.now());
+    g.save();
+    g.textAlign = "center"; g.textBaseline = "middle"; g.fillStyle = "#ffffff";
+    g.shadowColor = "rgba(0,0,0,0.45)"; g.shadowBlur = vw * 0.03; g.shadowOffsetY = vw * 0.005;
+    const cx = vw / 2, maxW = vw * 0.88;
+    const big = (text, y, px, weight) => { fxFitFont(g, text, weight || 800, px, maxW); g.fillText(text, cx, y); };
+    if (kind === "time") {
+      const parts = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).split(/\s+/);
+      big(parts[0], vh * 0.4, vw * 0.27);
+      if (parts[1]) big(parts[1].toUpperCase(), vh * 0.4 + vw * 0.18, vw * 0.07, 700);
+    } else if (kind === "date") {
+      big(d.toLocaleDateString([], { weekday: "long" }), vh * 0.36, vw * 0.075, 600);
+      big(d.toLocaleDateString([], { month: "long", day: "numeric" }), vh * 0.36 + vw * 0.15, vw * 0.13);
+    } else if (kind === "temp" && data) {
+      const f = useFahrenheit();
+      big(WEATHER_EMOJI(data.code || 0, data.isDay !== false), vh * 0.3, vw * 0.16);
+      big(Math.round(f ? data.tempF : data.tempC) + "°" + (f ? "F" : "C"), vh * 0.3 + vw * 0.24, vw * 0.24);
+    } else if (kind === "speed" && data) {
+      const mph = useFahrenheit();
+      const v = Math.max(0, Number(data.speed) || 0) * (mph ? 2.23694 : 3.6);
+      big(String(Math.round(v)), vh * 0.4, vw * 0.3);
+      big(mph ? "MPH" : "KM/H", vh * 0.4 + vw * 0.2, vw * 0.075, 700);
+    } else if (kind === "place" && data) {
+      const name = data.city || data.place || "";
+      const px = fxFitFont(g, name, 800, vw * 0.12, maxW);
+      const y = vh * 0.8;
+      g.shadowColor = "transparent";
+      const tw = g.measureText(name).width;
+      g.fillStyle = "rgba(0,0,0,0.35)";
+      roundRectPath(g, cx - tw / 2 - px * 0.5, y - px * 0.75, tw + px, px * 1.5, px * 0.3); g.fill();
+      g.fillStyle = SNAP_YELLOW; g.fillText(name, cx, y);
+      const sub = "\uD83D\uDCCD " + [data.place && data.place !== name ? data.place : "", data.region || ""].filter(Boolean).join(", ");
+      if (sub.length > 3) { g.fillStyle = "#ffffff"; g.shadowColor = "rgba(0,0,0,0.5)"; g.shadowBlur = vw * 0.02; fxFitFont(g, sub, 600, vw * 0.042, maxW); g.fillText(sub, cx, y + px * 1.1); }
+    }
+    g.restore();
+  }
+  function fxInfoReady(kind) {
+    const data = fxInfoData(kind);
+    if (kind === "time" || kind === "date") return true;
+    if (!data) return false;
+    if (kind === "temp") return data.tempF != null || data.tempC != null;
+    if (kind === "speed") return typeof data.speed === "number" && data.speed >= 0;
+    if (kind === "place") return !!(data.city || data.place);
+    return false;
+  }
+  // slot 0 = the applied info filter, slot 1 = the one sliding in during a swipe
+  function fxPaintInfoLayer(c, slot, kind, offsetX) {
+    const ed = c.editor, layer = ed.fxInfoLayers[slot];
+    if (!kind || !fxInfoReady(kind)) { layer.style.display = "none"; layer._key = ""; return; }
+    const vw = c.review.offsetWidth || ed.viewport.w, vh = c.review.offsetHeight || ed.viewport.h;
+    const key = kind + ":" + vw + "x" + vh + ":" + (kind === "time" ? Math.floor((c.captured && c.captured.at || 0) / 60000) : "") + ":" + (fxContext ? fxContext.at : 0);
+    if (layer._key !== key) {
+      const dpr = Math.min(3, window.devicePixelRatio || 1);
+      layer.width = Math.round(vw * dpr); layer.height = Math.round(vh * dpr);
+      const g = layer.getContext("2d");
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, vw, vh);
+      paintInfoFilter(g, kind, fxInfoData(kind), vw, vh, c.captured && c.captured.at);
+      layer._key = key;
+    }
+    layer.style.display = "block"; // (hidden by default in ui.css)
+    layer.style.transform = offsetX ? `translateX(${offsetX}px)` : "";
+  }
+  // the sent snap: the info filter painted in review-box space onto the media's own pixels (same mapping as edits)
+  function paintInfoFilterFinal(ed, octx, t, vw, vh, at) {
+    if (!ed.fx || !ed.fx.info || !fxInfoReady(ed.fx.info)) return;
+    octx.save();
+    octx.scale(1 / t.scale, 1 / t.scale);
+    octx.translate(-t.ox, -t.oy);
+    paintInfoFilter(octx, ed.fx.info, fxInfoData(ed.fx.info), vw, vh, at);
+    octx.restore();
+  }
+
+  // ---- speed (videos): the review plays at that speed; rewind steps the video backwards ------------------
+  function fxApplySpeed(c) {
+    const ed = c.editor, v = fxMediaEl(c);
+    if (!v || v.tagName !== "VIDEO") return;
+    cancelAnimationFrame(ed.fxRewindRaf || 0); ed.fxRewindRaf = 0;
+    const sp = FX_SPEEDS.find((s) => s.id === ed.fx.speed);
+    try { v.playbackRate = sp && sp.speed ? sp.speed : 1; } catch (e) {}
+    if (sp && sp.reverse) {
+      try { v.pause(); } catch (e) {}
+      let last = nowMs();
+      const step = () => {
+        ed.fxRewindRaf = 0;
+        if (!c.captured || ed.fx.speed !== "rewind") return;
+        const now = nowMs(), dt = (now - last) / 1000; last = now;
+        const dur = v.duration;
+        if (isFinite(dur) && dur > 0) { let tt = v.currentTime - dt; if (tt <= 0.02) tt = dur - 0.02; try { v.currentTime = tt; } catch (e) {} }
+        ed.fxRewindRaf = requestAnimationFrame(step);
+      };
+      ed.fxRewindRaf = requestAnimationFrame(step);
+    } else if (v.paused) { const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+  }
+
+  function fxApply(ctx, c) {
+    const ed = c.editor, car = ed.car;
+    ed.fx = fxPickAt(car, car.idx);
+    fxPaintColor(ctx, c, ed.fx.color, ed.fx.color, null);
+    fxPaintInfoLayer(c, 0, ed.fx.info, 0);
+    fxPaintInfoLayer(c, 1, null, 0);
+    fxApplySpeed(c);
+  }
+  function fxNameOf(car, pick) {
+    const names = [];
+    const nm = (g, id) => { const e = car.entries.find((x) => x.group === g && x.id === id) || (car.locks[g] && car.locks[g].id === id ? car.locks[g] : null); return e ? e.name : id; };
+    if (pick.color !== "none") names.push(nm("color", pick.color));
+    if (pick.info) names.push(nm("info", pick.info));
+    if (pick.speed) names.push(nm("speed", pick.speed));
+    return names.length ? names.join(" + ") : "Original";
+  }
+  function fxShowName(c, text) {
+    const ed = c.editor;
+    ed.fxName.textContent = text;
+    ed.fxName.dataset.show = "0"; void ed.fxName.offsetWidth; ed.fxName.dataset.show = "1";
+    clearTimeout(ed.fxNameTimer);
+    ed.fxNameTimer = setTimeout(() => { ed.fxName.dataset.show = "0"; }, 1200);
+  }
+  function fxLock(ctx, c) {
+    const ed = c.editor, car = ed.car, cur = car.entries[car.idx];
+    if (!cur || (cur.group === "color" && cur.id === "none")) return;
+    car.locks[cur.group] = cur;
+    haptic("medium");
+    fxShowName(c, "🔒 " + fxNameOf(car, fxPickAt(car, car.idx)) + " — swipe to add");
+  }
+  function fxTargetIdx(car, dir) { const n = car.entries.length; return ((car.idx + dir) % n + n) % n; }
+  function fxDragPreview(ctx, c, dx) {
+    const ed = c.editor, car = ed.car;
+    const vw = c.review.offsetWidth || ed.viewport.w;
+    const dir = dx < 0 ? 1 : -1;
+    const A = fxPickAt(car, car.idx), B = fxPickAt(car, fxTargetIdx(car, dir));
+    if (A.color !== B.color) {
+      if (dir > 0) fxPaintColor(ctx, c, A.color, B.color, vw + dx); // the new look comes in from the right
+      else fxPaintColor(ctx, c, B.color, A.color, dx);               // ... or from the left
+    } else fxPaintColor(ctx, c, A.color, A.color, null);
+    if (A.info !== B.info) {
+      fxPaintInfoLayer(c, 0, A.info, dx);
+      fxPaintInfoLayer(c, 1, B.info, dx + (dir > 0 ? vw : -vw));
+    }
+  }
+  function fxDragEnd(ctx, c, dx, commit) {
+    const ed = c.editor, car = ed.car;
+    if (!commit) { fxApply(ctx, c); return; }
+    const dir = dx < 0 ? 1 : -1;
+    fxGo(ctx, c, fxTargetIdx(car, dir), dir);
+  }
+  // land on entry i (dir: the swipe direction, to skip entries that turn out to be unavailable)
+  function fxGo(ctx, c, i, dir) {
+    const ed = c.editor, car = ed.car;
+    car.idx = i;
+    const cur = car.entries[i];
+    haptic("light");
+    if (cur.group === "color" && cur.id === "none") car.locks = {};
+    const stale = cur.fresh && (!fxContext || nowMs() - fxContext.at > 15000); // speed: only a recent reading
+    if (cur.needs && (stale || !fxInfoReady(cur.id))) {
+      fxApply(ctx, c);
+      fxShowName(c, cur.name + "…");
+      const gen = car;
+      fxLoadContext(cur.fresh).then(() => {
+        if (ed.car !== gen || car.entries[car.idx] !== cur) return;
+        if (fxInfoReady(cur.id)) { fxApply(ctx, c); fxShowName(c, fxNameOf(car, ed.fx)); } else fxDrop(ctx, c, cur, dir);
+      }, () => { if (ed.car === gen) fxDrop(ctx, c, cur, dir); });
+      return;
+    }
+    fxApply(ctx, c);
+    fxShowName(c, fxNameOf(car, ed.fx));
+    fxHintOnce(ctx, cur);
+  }
+  // an info filter with nothing to show (no location, no speed): it leaves the carousel for this snap
+  function fxDrop(ctx, c, entry, dir) {
+    const ed = c.editor, car = ed.car;
+    const i = car.entries.indexOf(entry);
+    if (i < 0) return;
+    car.entries.splice(i, 1);
+    for (const g of Object.keys(car.locks)) if (car.locks[g] === entry) delete car.locks[g];
+    const n = car.entries.length;
+    const next = dir > 0 ? i % n : ((i - 1) % n + n) % n;
+    if (car.idx === i || car.idx >= n) fxGo(ctx, c, next, dir);
+    else { if (car.idx > i) car.idx--; fxApply(ctx, c); }
+  }
+  async function fxLoadContext(fresh) {
+    if (fxContext && nowMs() - fxContext.at < (fresh ? 15000 : 600000)) return fxContext.data;
+    const data = await dgPost("contextInfo", fresh ? { fresh: true } : {});
+    if (!data || typeof data !== "object") throw new Error("unavailable");
+    fxContext = { at: nowMs(), data };
+    return data;
+  }
+  function fxHintOnce(ctx, cur) {
+    if (!cur || (cur.group === "color" && cur.id === "none")) return;
+    try {
+      if (localStorage.getItem("ghost.fxHint") === "1") return;
+      localStorage.setItem("ghost.fxHint", "1");
+    } catch (e) { return; }
+    setTimeout(() => ctx.showToast("Hold the screen, then swipe to stack another filter"), 1300);
+  }
+  function fxInitSwipe(ctx, c, target) {
+    const ed = c.editor;
+    let g = null;
+    const findTouch = (list, id) => { for (let k = 0; k < (list ? list.length : 0); k++) if (list[k].identifier === id) return list[k]; return null; };
+    target.addEventListener("touchstart", (e) => {
+      if (!ed.car || !c.captured || ed.tool || ed.editingText) { g = null; return; }
+      const t = e.changedTouches && e.changedTouches[e.changedTouches.length - 1];
+      if (!t) return;
+      const p = toLocal(c.review, t.clientX, t.clientY);
+      if (g && e.touches && e.touches.length >= 2) { // a second finger while one is down: lock, swipe with the new one
+        clearTimeout(g.holdTimer);
+        if (!g.active && !g.locked) fxLock(ctx, c);
+        g = { id: t.identifier, x0: p.x, y0: p.y, t0: nowMs(), active: false, locked: true };
+        ed.car.swallowTap = true;
+        return;
+      }
+      g = { id: t.identifier, x0: p.x, y0: p.y, t0: nowMs(), active: false, locked: false };
+      const mine = g;
+      g.holdTimer = setTimeout(() => { if (g === mine && !mine.active) { mine.locked = true; ed.car.swallowTap = true; fxLock(ctx, c); } }, 480);
+    }, { passive: true });
+    target.addEventListener("touchmove", (e) => {
+      if (!g || !ed.car) return;
+      const t = findTouch(e.touches, g.id) || findTouch(e.changedTouches, g.id);
+      if (!t) return;
+      const p = toLocal(c.review, t.clientX, t.clientY);
+      const dx = p.x - g.x0, dy = p.y - g.y0;
+      if (!g.active) {
+        if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.2) { g.active = true; clearTimeout(g.holdTimer); g.x0 = p.x - Math.sign(dx) * 14; }
+        else { if (Math.hypot(dx, dy) > 14) clearTimeout(g.holdTimer); return; }
+      }
+      g.dx = p.x - g.x0;
+      fxDragPreview(ctx, c, g.dx);
+    }, { passive: true });
+    const end = (e, cancelled) => {
+      if (!g) return;
+      const t = findTouch(e.changedTouches, g.id);
+      if (!t) return;
+      const was = g; g = null;
+      clearTimeout(was.holdTimer);
+      if (!was.active || !ed.car) return;
+      const p = toLocal(c.review, t.clientX, t.clientY);
+      const dx = p.x - was.x0, vw = c.review.offsetWidth || ed.viewport.w;
+      const fast = Math.abs(dx) / Math.max(1, nowMs() - was.t0) > 0.45 && Math.abs(dx) > 30;
+      fxDragEnd(ctx, c, dx, !cancelled && (Math.abs(dx) > vw * 0.22 || fast));
+    };
+    target.addEventListener("touchend", (e) => end(e, false), { passive: true });
+    target.addEventListener("touchcancel", (e) => end(e, true), { passive: true });
+  }
+
+  // ---- background: portrait blur / new background (camera photos) ------------------------------------------
+  function fxBuildBgPanel(ctx, c) {
+    const ed = c.editor;
+    const panel = el("div", "gh-fx-bg");
+    panel.dataset.open = "0"; panel.dataset.mode = "off"; panel.dataset.busy = "0";
+    panel.innerHTML = `<div class="gh-fx-bg-row"></div><div class="gh-fx-bg-slider"><span>Blur</span><input type="range" min="0" max="100" value="50"></div><div class="gh-fx-bg-busy">Finding you…</div><input type="file" accept="image/*" hidden>`;
+    const row = panel.querySelector(".gh-fx-bg-row"), slider = panel.querySelector('input[type="range"]'), file = panel.querySelector('input[type="file"]');
+    const chip = (key, label, bgCss) => {
+      const b = el("button", "gh-fx-bg-chip gh-press");
+      b.dataset.key = key; b.setAttribute("aria-label", label);
+      const sw = el("i"); if (bgCss) sw.style.background = bgCss; b.appendChild(sw);
+      const cap = el("span"); cap.textContent = label; b.appendChild(cap);
+      row.appendChild(b);
+      return b;
+    };
+    chip("off", "Off", "linear-gradient(135deg,#3a3a3c,#1c1c1e)");
+    chip("blur", "Blur", "radial-gradient(circle at 50% 40%, #9aa4b1, #3d4450)");
+    for (const b of FX_BACKDROPS) chip("bd:" + b.id, b.name, `linear-gradient(160deg, ${b.stops.join(",")})`);
+    chip("photo", "Photo", "linear-gradient(135deg,#0a84ff,#5e5ce6)");
+    row.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-key]");
+      if (!b || ed.bgBusy) return;
+      haptic("light");
+      const key = b.dataset.key;
+      if (key === "off") fxBgOff(ctx, c);
+      else if (key === "blur") fxBgApply(ctx, c, { mode: "blur", strength: Number(slider.value) / 100, key });
+      else if (key === "photo") file.click();
+      else fxBgApply(ctx, c, { mode: "replace", backdrop: key.slice(3), key });
+    });
+    slider.addEventListener("change", () => { if (ed.bg && ed.bg.mode === "blur") fxBgApply(ctx, c, { mode: "blur", strength: Number(slider.value) / 100, key: "blur" }); });
+    file.addEventListener("change", () => {
+      const f = file.files && file.files[0];
+      file.value = "";
+      if (f) fxBgApply(ctx, c, { mode: "replace", photo: f, key: "photo" });
+    });
+    // taps on the panel must not reach the snap underneath (a tap there starts a caption)
+    for (const ev of ["touchstart", "touchend", "mousedown", "click"]) panel.addEventListener(ev, (e) => e.stopPropagation());
+    c.review.appendChild(panel);
+    ed.bgPanel = panel; ed.bgSlider = slider;
+  }
+  function fxToggleBgPanel(ctx, c) {
+    const ed = c.editor;
+    if (!ed.bgPanel) return;
+    const open = ed.bgPanel.dataset.open !== "1";
+    if (open) setTool(ctx, c, null);
+    ed.bgPanel.dataset.open = open ? "1" : "0";
+    ed.railBg.dataset.on = open || ed.bg ? "1" : "0";
+  }
+  function fxBackdropB64(id) {
+    const b = FX_BACKDROPS.find((x) => x.id === id) || FX_BACKDROPS[0];
+    const cv = document.createElement("canvas");
+    cv.width = 1080; cv.height = 1920;
+    const g = cv.getContext("2d");
+    const grad = g.createLinearGradient(0, 0, 1080 * 0.35, 1920);
+    b.stops.forEach((s, i) => grad.addColorStop(i / (b.stops.length - 1), s));
+    g.fillStyle = grad; g.fillRect(0, 0, 1080, 1920);
+    const glow = g.createRadialGradient(540, 700, 60, 540, 700, 900);
+    glow.addColorStop(0, "rgba(255,255,255,0.22)"); glow.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = glow; g.fillRect(0, 0, 1080, 1920);
+    return cv.toDataURL("image/jpeg", 0.9).split(",")[1];
+  }
+  function fxSetBase(c, blob) {
+    const cap = c.captured, m = fxMediaEl(c);
+    if (!cap || !m) return;
+    const url = blob === cap.origBlob ? cap.origUrl : URL.createObjectURL(blob);
+    const old = m.src && cap.fxUrls && cap.fxUrls.includes(m.src) ? m.src : null; // the previous background version
+    if (url !== cap.origUrl) (cap.fxUrls = cap.fxUrls || []).push(url);
+    if (old) m.addEventListener("load", () => { URL.revokeObjectURL(old); cap.fxUrls = cap.fxUrls.filter((u) => u !== old); }, { once: true });
+    cap.blob = blob;
+    m.addEventListener("load", () => { const ed = c.editor; if (ed && ed.fx) fxPaintColor(null, c, ed.fx.color, ed.fx.color, null); }, { once: true });
+    m.src = url;
+  }
+  async function fxBgApply(ctx, c, opt) {
+    const ed = c.editor, cap = c.captured;
+    if (!cap || cap.kind === "video" || ed.bgBusy) return;
+    if (!cap.origBlob) { cap.origBlob = cap.blob; cap.origUrl = cap.url; }
+    ed.bgBusy = true; ed.bgPanel.dataset.busy = "1";
+    try {
+      const args = { image: await blobToB64(cap.origBlob), mode: opt.mode, strength: opt.strength != null ? opt.strength : 0.5 };
+      if (opt.backdrop) args.background = fxBackdropB64(opt.backdrop);
+      if (opt.photo) args.background = await blobToB64(opt.photo);
+      const res = await dgPost("snapBackground", args);
+      if (!res || !res.data) throw new Error("no result");
+      if (c.captured !== cap) return;
+      fxSetBase(c, b64ToBlob(res.data, res.mime || "image/jpeg"));
+      ed.bg = { mode: opt.mode, strength: args.strength, key: opt.key };
+      ed.bgPanel.dataset.mode = opt.key;
+      for (const b of ed.bgPanel.querySelectorAll("[data-key]")) b.dataset.on = b.dataset.key === opt.key ? "1" : "0";
+      ed.railBg.dataset.on = "1";
+      haptic("success");
+    } catch (e) {
+      gtrail("background effect failed " + (e && e.message || e));
+      const m = String(e && e.message || "");
+      ctx.showToast(/no people/i.test(m) ? "Couldn't find anyone in this photo" : "Couldn't change the background");
+    } finally { ed.bgBusy = false; if (ed.bgPanel) ed.bgPanel.dataset.busy = "0"; }
+  }
+  function fxBgOff(ctx, c) {
+    const ed = c.editor, cap = c.captured;
+    if (cap && cap.origBlob) fxSetBase(c, cap.origBlob);
+    ed.bg = null;
+    ed.bgPanel.dataset.mode = "off";
   }
 
   // =====================================================================================================
@@ -12457,7 +12988,7 @@
     const c = ctx.camera, src = c.editSource;
     if (!src || c.saving) return;
     commitPendingEdits(ctx, c);
-    if (!c.editor || !c.editor.hasEdits()) { ctx.showToast("Draw, add text or a sticker first"); return; }
+    if (!c.editor || !c.editor.hasEdits()) { ctx.showToast("Add a filter, drawing, text or a sticker first"); return; }
     const choice = await choiceSheet(ctx, "Save your edit", [
       { key: "replace", label: src.type === "vault" ? "Replace the copy in My Eyes Only" : "Replace original" },
       { key: "copy", label: "Save as new copy" },
@@ -12467,7 +12998,8 @@
     ctx.showToast("Saving…");
     try {
       const overlay = await renderGalOverlayB64(c.editor, src.item.width, src.item.height);
-      await dgPost(galRenderOp(src), { source: { type: src.type, id: src.id }, overlay, mode: choice });
+      const fx = fxNativeArgs(c.editor);
+      await dgPost(galRenderOp(src), Object.assign({ source: { type: src.type, id: src.id }, overlay, mode: choice }, fx ? { fx } : {}));
       if (choice === "replace") galVersions.set(src.id, Date.now()); // the file changed even if the editor was closed
       if (c.editSource !== src) return;
       haptic("success");
@@ -12491,7 +13023,8 @@
         const item = Object.assign({}, src.item, { loop: !!(c.editor && c.editor.loop) });
         if (c.editor && c.editor.hasEdits()) {
           const overlay = await renderGalOverlayB64(c.editor, item.width, item.height);
-          const res = await dgPost(galRenderOp(src), { source: { type: src.type, id: src.id }, overlay, mode: "send" });
+          const fx = fxNativeArgs(c.editor);
+          const res = await dgPost(galRenderOp(src), Object.assign({ source: { type: src.type, id: src.id }, overlay, mode: "send" }, fx ? { fx } : {}));
           if (!res || !res.data) throw new Error("render failed");
           item.blob = b64ToBlob(res.data, res.mime || (item.mediaType === "video" ? "video/mp4" : "image/jpeg"));
           if (item.mediaType !== "video" && item.width && item.height) { // native caps a sent photo at 2560 px

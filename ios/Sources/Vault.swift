@@ -696,6 +696,7 @@ final class GhostVault: NSObject, WKURLSchemeHandler, UIDocumentPickerDelegate {
         guard key != nil, let source = body["source"] as? [String: Any], let id = source["id"] as? String,
               let entry = entry(id), let mode = body["mode"] as? String else { return reply(nil, "not found") }
         let overlay: UIImage? = (body["overlay"] as? String).flatMap { Data(base64Encoded: $0) }.flatMap { UIImage(data: $0) }
+        let fx = body["fx"] as? [String: Any] // snap filter (SnapFX.swift)
         let file: URL
         do { file = try originalFile(entry) } catch { return reply(nil, "couldn't open that item") }
         let isVideo = (entry["mediaType"] as? String) == "video"
@@ -727,7 +728,7 @@ final class GhostVault: NSObject, WKURLSchemeHandler, UIDocumentPickerDelegate {
         if isVideo {
             let out = Self.tempFile(mode == "send" ? "mp4" : "mov")
             let preset = mode == "send" ? AVAssetExportPresetMediumQuality : AVAssetExportPresetHighestQuality
-            GhostGallery.compositeVideo(asset: AVURLAsset(url: file), overlay: overlay, preset: preset, fileType: mode == "send" ? .mp4 : .mov, outputURL: out) { ok in
+            GhostGallery.compositeVideo(asset: AVURLAsset(url: file), overlay: overlay, preset: preset, fileType: mode == "send" ? .mp4 : .mov, outputURL: out, fx: fx) { ok in
                 try? FileManager.default.removeItem(at: file)
                 guard ok else { try? FileManager.default.removeItem(at: out); return reply(nil, "couldn't render that video") }
                 if mode == "send" {
@@ -740,7 +741,7 @@ final class GhostVault: NSObject, WKURLSchemeHandler, UIDocumentPickerDelegate {
         } else {
             defer { try? FileManager.default.removeItem(at: file) }
             guard let data = try? Data(contentsOf: file), let image = UIImage(data: data),
-                  let jpeg = GhostGallery.composite(image: image, overlay: overlay, maxEdge: mode == "send" ? 2560 : nil) else { return reply(nil, "couldn't draw that photo") }
+                  let jpeg = GhostGallery.composite(image: image, overlay: overlay, maxEdge: mode == "send" ? 2560 : nil, fx: fx) else { return reply(nil, "couldn't draw that photo") }
             if mode == "send" { return reply(["data": jpeg.base64EncodedString(), "mime": "image/jpeg"], nil) }
             let out = Self.tempFile("jpg")
             do { try jpeg.write(to: out, options: .completeFileProtection) } catch { return reply(nil, "couldn't save the edit") }

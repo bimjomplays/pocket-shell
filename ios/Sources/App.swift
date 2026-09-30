@@ -856,7 +856,9 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             guard let gallery else { return replyHandler(nil, "unavailable") }
             gallery.handle(op: galleryOp, body: body, reply: replyHandler)
         case "contextInfo": // snap editor weather/location stickers (GhostContext.swift)
-            context.info(reply: replyHandler)
+            context.info(maxAge: body["fresh"] as? Bool == true ? 5 : 600, reply: replyHandler)
+        case "snapBackground": // snap editor background blur / swap on a photo (SnapFX.swift, Vision person segmentation)
+            SnapFX.background(body: body, reply: replyHandler)
         case "notifyMessage": // new-message notification while in the background (GhostNotifications.swift)
             guard let notifications, let id = body["id"] as? String else { return replyHandler(nil, "unavailable") }
             notifications.post(id: id, title: body["title"] as? String ?? "Ghost", body: body["body"] as? String ?? "New Chat", reply: replyHandler)

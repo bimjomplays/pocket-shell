@@ -352,10 +352,14 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
     /// full-resolution composite happens here, so 48 MP photos never go through a WebKit canvas and big videos never
     /// go through JS. send -> {data, mime} (photo ≤ 2560 px, medium video); copy -> new library item;
     /// replace -> PHContentEditingOutput on the original (library only; revertible in Photos).
+    /// fx (optional, ghost/snapfx.js): the snap filter - colour look {matrix, fade, vignette, grain}, video speed/reverse
+    /// (SnapFX.swift). full: a camera snap's video is sent at full quality (it went out untouched before 1.12).
     private func render(body: [String: Any], reply: @escaping (Any?, String?) -> Void) {
         guard let source = body["source"] as? [String: Any], let type = source["type"] as? String,
               let mode = body["mode"] as? String else { return reply(nil, "bad args") }
         let overlay: UIImage? = (body["overlay"] as? String).flatMap { Data(base64Encoded: $0) }.flatMap { UIImage(data: $0) }
+        let fx = body["fx"] as? [String: Any]
+        let full = body["full"] as? Bool ?? false
         let done: (Any?, String?) -> Void = { value, error in DispatchQueue.main.async { reply(value, error) } }
         if type == "data" {
             guard let b64 = source["data"] as? String, let data = Data(base64Encoded: b64) else { return reply(nil, "no data") }
@@ -364,19 +368,19 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
                 if isVideo {
                     let inURL = GhostGallery.tempRoot.appendingPathComponent("in-\(UUID().uuidString).mp4")
                     do { try data.write(to: inURL) } catch { return done(nil, "couldn't read that video") }
-                    self.finishVideo(asset: AVURLAsset(url: inURL), overlay: overlay, mode: mode) { value, error in
+                    self.finishVideo(asset: AVURLAsset(url: inURL), overlay: overlay, mode: mode, fx: fx, full: full) { value, error in
                         try? FileManager.default.removeItem(at: inURL)
                         done(value, error)
                     }
                 } else {
                     guard let image = UIImage(data: data) else { return done(nil, "couldn't read that photo") }
-                    self.finishPhoto(image: image, overlay: overlay, mode: mode, reply: done)
+                    self.finishPhoto(image: image, overlay: overlay, mode: mode, fx: fx, reply: done)
                 }
             }
             return
         }
         guard type == "library", let id = source["id"] as? String, let asset = asset(id) else { return reply(nil, "not found") }
-        if mode == "replace" { return replace(asset: asset, overlay: overlay, reply: done) }
+        if mode == "replace" { return replace(asset: asset, overlay: overlay, fx: fx, reply: done) }
         if asset.mediaType == .video {
             let options = PHVideoRequestOptions()
             options.isNetworkAccessAllowed = true
@@ -385,7 +389,7 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
             options.progressHandler = { [weak self] progress, _, _, _ in self?.reportProgress(id: id, progress) }
             PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { av, _, _ in
                 guard let av else { return done(nil, "couldn't open that video") }
-                self.finishVideo(asset: av, overlay: overlay, mode: mode, reply: done)
+                self.finishVideo(asset: av, overlay: overlay, mode: mode, fx: fx, full: false, reply: done)
             }
         } else {
             let options = PHImageRequestOptions()
@@ -397,14 +401,14 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
             PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let data, let image = UIImage(data: data) else { return done(nil, "couldn't open that photo") }
-                    self.finishPhoto(image: image, overlay: overlay, mode: mode, reply: done)
+                    self.finishPhoto(image: image, overlay: overlay, mode: mode, fx: fx, reply: done)
                 }
             }
         }
     }
 
-    /// Draws the photo (EXIF orientation applied by UIImage) and the overlay stretched over it, as a JPEG.
-    static func composite(image: UIImage, overlay: UIImage?, maxEdge: CGFloat?) -> Data? {
+    /// Draws the photo (EXIF orientation applied by UIImage), its snap filter (fx) and the overlay stretched over it, as a JPEG.
+    static func composite(image: UIImage, overlay: UIImage?, maxEdge: CGFloat?, fx: [String: Any]? = nil) -> Data? {
         var size = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
         if let maxEdge, max(size.width, size.height) > maxEdge {
             let k = maxEdge / max(size.width, size.height)
@@ -415,15 +419,20 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
         format.scale = 1
         format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let rect = CGRect(origin: .zero, size: size)
+        var base = image
+        if let look = SnapFX.look(fx) { // filter the photo at its final size, then draw the overlay on top
+            let plain = renderer.image { _ in image.draw(in: rect) }
+            if let filtered = SnapFX.filtered(plain, look: look) { base = filtered }
+        }
         return renderer.jpegData(withCompressionQuality: 0.92) { _ in
-            let rect = CGRect(origin: .zero, size: size)
-            image.draw(in: rect)
+            base.draw(in: rect)
             overlay?.draw(in: rect)
         }
     }
 
-    private func finishPhoto(image: UIImage, overlay: UIImage?, mode: String, reply: @escaping (Any?, String?) -> Void) {
-        guard let jpeg = Self.composite(image: image, overlay: overlay, maxEdge: mode == "send" ? 2560 : nil) else {
+    private func finishPhoto(image: UIImage, overlay: UIImage?, mode: String, fx: [String: Any]?, reply: @escaping (Any?, String?) -> Void) {
+        guard let jpeg = Self.composite(image: image, overlay: overlay, maxEdge: mode == "send" ? 2560 : nil, fx: fx) else {
             return reply(nil, "couldn't draw that photo")
         }
         if mode == "send" { return reply(["data": jpeg.base64EncodedString(), "mime": "image/jpeg"], nil) }
@@ -437,10 +446,10 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
         }
     }
 
-    private func finishVideo(asset: AVAsset, overlay: UIImage?, mode: String, reply: @escaping (Any?, String?) -> Void) {
+    private func finishVideo(asset: AVAsset, overlay: UIImage?, mode: String, fx: [String: Any]?, full: Bool, reply: @escaping (Any?, String?) -> Void) {
         let out = Self.tempRoot.appendingPathComponent("edit-\(UUID().uuidString).mp4")
-        let preset = mode == "send" ? AVAssetExportPresetMediumQuality : AVAssetExportPresetHighestQuality
-        Self.compositeVideo(asset: asset, overlay: overlay, preset: preset, fileType: .mp4, outputURL: out) { ok in
+        let preset = mode == "send" && !full ? AVAssetExportPresetMediumQuality : AVAssetExportPresetHighestQuality
+        Self.compositeVideo(asset: asset, overlay: overlay, preset: preset, fileType: .mp4, outputURL: out, fx: fx) { ok in
             guard ok else { try? FileManager.default.removeItem(at: out); return reply(nil, "couldn't render that video") }
             if mode == "send" {
                 defer { try? FileManager.default.removeItem(at: out) }
@@ -458,8 +467,12 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
 
     /// Video + full-frame overlay via AVVideoCompositionCoreAnimationTool, honouring the track's preferredTransform
     /// (portrait iPhone video is stored landscape + a rotation). Without an overlay it's a plain (re-)export.
+    /// A snap filter or speed change (fx) goes through SnapFX.renderVideo instead (Core Image per frame).
     static func compositeVideo(asset: AVAsset, overlay: UIImage?, preset: String, fileType: AVFileType, outputURL: URL,
-                               completion: @escaping (Bool) -> Void) {
+                               fx: [String: Any]? = nil, completion: @escaping (Bool) -> Void) {
+        if SnapFX.changesVideo(fx) {
+            return SnapFX.renderVideo(asset: asset, overlay: overlay, fx: fx ?? [:], preset: preset, fileType: fileType, outputURL: outputURL, completion: completion)
+        }
         guard let srcVideo = asset.tracks(withMediaType: .video).first else { return completion(false) }
         let composition = AVMutableComposition()
         let range = CMTimeRange(start: .zero, duration: asset.duration)
@@ -506,7 +519,7 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
     }
 
     /// "Replace original": a real Photos edit (PHContentEditingOutput) so the Photos app can still Revert it.
-    private func replace(asset: PHAsset, overlay: UIImage?, reply: @escaping (Any?, String?) -> Void) {
+    private func replace(asset: PHAsset, overlay: UIImage?, fx: [String: Any]?, reply: @escaping (Any?, String?) -> Void) {
         let options = PHContentEditingInputRequestOptions()
         options.isNetworkAccessAllowed = true
         options.canHandleAdjustmentData = { _ in false }
@@ -525,12 +538,12 @@ final class GhostGallery: NSObject, PHPhotoLibraryChangeObserver {
                 if asset.mediaType == .video {
                     guard let av = input.audiovisualAsset else { return reply(nil, "couldn't open the original video") }
                     Self.compositeVideo(asset: av, overlay: overlay, preset: AVAssetExportPresetHighestQuality, fileType: .mov,
-                                        outputURL: output.renderedContentURL) { ok in
+                                        outputURL: output.renderedContentURL, fx: fx) { ok in
                         ok ? commit() : reply(nil, "couldn't render that video")
                     }
                 } else {
                     guard let url = input.fullSizeImageURL, let data = try? Data(contentsOf: url), let image = UIImage(data: data),
-                          let jpeg = Self.composite(image: image, overlay: overlay, maxEdge: nil) else {
+                          let jpeg = Self.composite(image: image, overlay: overlay, maxEdge: nil, fx: fx) else {
                         return reply(nil, "couldn't open the original photo")
                     }
                     do { try jpeg.write(to: output.renderedContentURL) } catch { return reply(nil, error.localizedDescription) }

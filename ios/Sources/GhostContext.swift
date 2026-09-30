@@ -15,12 +15,14 @@ final class GhostContext: NSObject, CLLocationManagerDelegate {
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
     }
 
-    /// op "contextInfo" -> {city, place, tempF, tempC, code (WMO weather code), isDay}
-    func info(reply: @escaping (Any?, String?) -> Void) {
-        locate { [weak self] location, error in
+    /// op "contextInfo" -> {city, place, tempF, tempC, code (WMO weather code), isDay, speed (m/s, -1 = unknown)}
+    /// maxAge: how old a remembered position may be (the speed filter asks for a fresh one)
+    func info(maxAge: TimeInterval = 600, reply: @escaping (Any?, String?) -> Void) {
+        locate(maxAge: maxAge) { [weak self] location, error in
             guard let self, let location else { return reply(nil, error ?? "location unavailable") }
             let group = DispatchGroup()
-            var out: [String: Any] = ["lat": location.coordinate.latitude, "lon": location.coordinate.longitude]
+            var out: [String: Any] = ["lat": location.coordinate.latitude, "lon": location.coordinate.longitude,
+                                      "speed": location.speed >= 0 ? location.speed : -1] // the snap editor's speed filter
             group.enter()
             CLGeocoder().reverseGeocodeLocation(location) { marks, _ in
                 if let m = marks?.first {
@@ -56,8 +58,8 @@ final class GhostContext: NSObject, CLLocationManagerDelegate {
         }.resume()
     }
 
-    private func locate(_ done: @escaping (CLLocation?, String?) -> Void) {
-        if let last, Date().timeIntervalSince(last.at) < 600 { return done(last.location, nil) }
+    private func locate(maxAge: TimeInterval = 600, _ done: @escaping (CLLocation?, String?) -> Void) {
+        if let last, Date().timeIntervalSince(last.at) < maxAge { return done(last.location, nil) }
         switch manager.authorizationStatus {
         case .denied, .restricted: return done(nil, "Location is off for Ghost")
         default: break
