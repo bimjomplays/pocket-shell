@@ -830,9 +830,13 @@
       tabTikTok.dataset.active = "1";
       // the tab always lands on the main For You feed (search / profiles / messages close); tapping it while already
       // on TikTok also refreshes the feed, like TikTok's Home button (user request 2026-09-29)
-      if (T) { if (T.comments && T.comments.it) T.comments.close(); closeTTSearchAll(ctx, !already); }
+      if (T && !ttFeedOn()) {
+        // search & messages only: coming back from another tab keeps where you were; tapping it while already on
+        // TikTok goes back to the search home (user 2026-09-29)
+        if (already) { if (T.comments && T.comments.it) T.comments.close(); ttPopToRoot(ctx); }
+      } else if (T) { if (T.comments && T.comments.it) T.comments.close(); closeTTSearchAll(ctx, !already); }
       openTikTok(ctx);
-      if (already && T) ttRefresh(ctx);
+      if (already && T && ttFeedOn()) ttRefresh(ctx);
     });
     tabSettings.addEventListener("click", () => {
       haptic();
@@ -10130,6 +10134,15 @@
     for (const L of pg.lazies || []) L.destroy();
     if (pg.onDestroy) pg.onDestroy();
     pg.el.remove();
+  }
+  // every page above the search home closes (search & messages only mode)
+  function ttPopToRoot(ctx) {
+    const T = ctx.tiktok;
+    if (!T) return;
+    const keep = T.search.stack.length && T.search.stack[0].root ? 1 : 0;
+    while (T.search.stack.length > keep) { const pg = T.search.stack.pop(); if (pg.player) syncTikTokPlayer(pg.player, true); pg.el.dataset.anim = "1"; pg.el.dataset.in = "0"; setTimeout(() => destroyTTPage(pg), 280); }
+    const root = T.search.stack[0];
+    if (root) { root.el.dataset.hidden = "0"; if (root.input) { root.input.value = ""; root.input.dispatchEvent(new Event("input", { bubbles: true })); } }
   }
   function closeTTSearchAll(ctx, now) {
     const T = ctx.tiktok;
