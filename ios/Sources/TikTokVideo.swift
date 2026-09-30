@@ -161,7 +161,11 @@ final class GhostTikTokVideo: NSObject, WKNavigationDelegate, WKUIDelegate {
                     }
                     done(value, nil)
                 case .failure(let error):
-                    done(nil, error.localizedDescription)
+                    // the first action on a video starts loading its page, and a call that lands while the old page
+                    // is being replaced fails ("navigated"/"unloaded") - that's "not ready yet", not a failed like
+                    // (phone 2026-09-29: every first like/comments said "Couldn't ... on TikTok")
+                    if n < 50 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { attempt(n + 1) } }
+                    else { done(nil, error.localizedDescription) }
                 }
             }
         }
@@ -201,7 +205,10 @@ final class GhostTikTokVideo: NSObject, WKNavigationDelegate, WKUIDelegate {
                         return
                     }
                     done(value, nil)
-                case .failure(let error): done(nil, error.localizedDescription)
+                case .failure(let error):
+                    // same as run(): a call landing while the page is being replaced is "not ready yet"
+                    if n < 50 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { attempt(n + 1) } }
+                    else { done(nil, error.localizedDescription) }
                 }
             }
         }

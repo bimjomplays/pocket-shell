@@ -9696,6 +9696,7 @@
     }, (e) => { it._busy[what] = false; apply(prev.v, prev.n); ctx.showToast(ttActionError(what, e && e.message)); });
   }
   function ttActionError(what, err) {
+    gtrail("TT action " + what + " failed: " + String(err || "no answer").slice(0, 160)); // reason only, no content
     const verb = { like: "like that", save: "save that", follow: "change following", comment: "post that comment", notInterested: "tell TikTok that" }[what] || "do that";
     if (/signed out|sign in/i.test(String(err || ""))) return "Couldn't " + verb + ": sign in to TikTok again (Settings > TikTok)";
     return "Couldn't " + verb + " on TikTok";
@@ -9824,6 +9825,7 @@
     const gen = C.gen, it = C.it;
     let r = null;
     try { r = await ttVP("comments", it, { more: !!more }); } catch (e) { r = { error: e && e.message }; }
+    if (!r || r.error) gtrail("TT comments failed: " + String((r && r.error) || "no answer").slice(0, 160));
     C.loading = false;
     if (gen !== C.gen) return;
     if (!r || r.error) {
