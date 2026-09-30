@@ -119,6 +119,7 @@
     arrowUpLeft: '<path d="M17 17L7 7"/><path d="M7 15V7h8"/>',
     hash: '<path d="M9.5 4L7.5 20"/><path d="M16.5 4l-2 16"/><path d="M4.5 9h15"/><path d="M4 15h15"/>',
     playOutline: '<path d="M8 5.5v13l10.5-6.5z"/>',
+    games: '<rect x="2.5" y="7" width="19" height="11" rx="5.5"/><path d="M7.5 10.5v4M5.5 12.5h4"/><circle cx="15.5" cy="11.5" r=".9" fill="currentColor"/><circle cx="17.8" cy="13.8" r=".9" fill="currentColor"/>',
   };
   function icon(name, size, extraClass) {
     const wrap = document.createElement("span");
@@ -1984,7 +1985,7 @@
       if (g.unreadDivider) { frag.appendChild(unreadSepEl()); continue; }
       if (g.daySep) frag.appendChild(sepEl(g.daySep));
       if (g.system) { frag.appendChild(systemLineEl(g.system, ctx)); continue; }
-      if (g.ghost) { frag.appendChild(g.ghost.kind === "poll" ? gxPollCardEl(ctx, gxConv, g.ghost.pid, g.ghost.it, conv._gx.votes.get(g.ghost.pid)) : gxPinLineEl(ctx, gxConv, g.ghost.it)); continue; }
+      if (g.ghost) { frag.appendChild(g.ghost.kind === "game" ? ggCardEl(ctx, g.ghost.it) : g.ghost.kind === "poll" ? gxPollCardEl(ctx, gxConv, g.ghost.pid, g.ghost.it, conv._gx.votes.get(g.ghost.pid)) : gxPinLineEl(ctx, gxConv, g.ghost.it)); continue; }
       const isMe = g.from && meId && g.from.id === meId;
       const groupEl = el("div", "gh-group");
       groupEl.dataset.me = isMe ? "1" : "0";
@@ -13268,8 +13269,11 @@
       save: (s) => storage.set("ghostNet", s),
       picGet: (k) => wallDB.get("gn:" + k), picPut: (k, b) => wallDB.put("gn:" + k, b), picDel: (k) => wallDB.del("gn:" + k),
       me: () => ctx.state.me, log: gnTrail,
-      stickerBlob: (sid) => wallDB.get("gxstk:" + sid), // (chat extras: a friend asks again for a picture sticker you put on)
+      stickerBlob: (sid) => wallDB.get("gxstk:" + sid),
+      // Ghost games: a friend's new version of a match must follow from its moves (GhostGames.check)
+      itemCheck: (kind, cur, inc) => kind !== "game" || typeof GhostGames === "undefined" || GhostGames.check(cur && cur.data, cur ? cur.v : 0, inc.data, inc.v).ok, // (chat extras: a friend asks again for a picture sticker you put on)
       onChange: (what, d) => {
+        if (what === "item") { if (d && d.kind === "game") ggOnItem(ctx, d); return; } // Ghost games (names/pictures didn't change)
         if (what === "extras") { if (d && d.snap) gxChangedSnap(ctx, d.snap); return; }
         if (d && d.keyChanged) { const cd = Array.from(ctx.state.convById.values()).find((c) => !c.isGroup && c.participants && c.participants[0] && c.participants[0].id === d.snap); ctx.showToast(((cd && cd.title) || "A friend") + "'s Ghost has new keys (reinstalled?) · reconnected"); }
         gnChanged(ctx);
@@ -13367,6 +13371,7 @@
     const f = gnFriend(other.id);
     if (f) {
       setRow(group, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Ghost Profile", onClick: () => { done(); ctx.settings.friendTarget = other; openSettingsAt(ctx, "friend"); } });
+      ggChatSheetRow(ctx, group, cd, f, other, done); // Ghost games
       return;
     }
     const pending = gn.net.inviteFor(cd.id);
@@ -13388,6 +13393,212 @@
         done(); ctx.showToast("Invite sent");
       } catch (e) { ctx.showToast(String(e && e.message || "Couldn't send the invite")); }
     } });
+  }
+
+  // =====================================================================================================
+  // Ghost games (ghost/games.js + ghost/games/*.js; ghost/GAMES.md). A match is a network.js item (kind "game") shared
+  // with one connected Ghost friend: every move bumps its version and goes to their Ghost, which re-plays the move to
+  // check it. Each match is a card in the chat timeline (with 1.10's chat extras: gxTimeline asks ggTimeline), placed at
+  // its latest move like GamePigeon; tapping it opens the full-screen game view.
+  // =====================================================================================================
+  const gg = { view: null, fast: null, lastTurn: new Map() };
+  gn.gg = gg; // (tests reach the open game through ctx.gn.gg)
+  const ggOn = () => gnOn() && typeof GhostGames !== "undefined" && GhostGames.list().length > 0;
+  const ggMe = () => (gn.net && gn.net.myId()) || "";
+  // the Ghost friend of the 1:1 chat on screen, if connected
+  function ggChatFriend(ctx, convData) {
+    const cd = convData || ctx.state.convById.get(ctx.state.currentConvId);
+    const other = cd && !cd.isGroup && cd.participants && cd.participants[0];
+    const f = other && gnFriend(other.id);
+    return f ? { f, other, cd } : null;
+  }
+  function ggMatches(friendId) {
+    if (!gn.net) return [];
+    return gn.net.items("game").filter((it) => it.with === friendId && it.data && it.data.g).sort((a, b) => (b.at || 0) - (a.at || 0));
+  }
+  function ggNames(ctx, it) {
+    const f = gn.net.friends().find((x) => x.id === it.with);
+    const cd = f && Array.from(ctx.state.convById.values()).find((c) => !c.isGroup && c.participants && c.participants[0] && c.participants[0].id === f.snap);
+    const them = (f && gnNameFor(f.snap)) || (cd && cd.title) || "Your friend";
+    const out = {};
+    (it.data.p || []).forEach((id, i) => { const nm = id === ggMe() ? "You" : them; out[i] = nm; out[id] = nm; });
+    return { names: out, them };
+  }
+  // "Your turn" / "Jacob's turn" / "You won" / "Draw by stalemate"
+  function ggStatusText(ctx, it) {
+    const st = GhostGames.status(it.data);
+    const me = it.data.p.indexOf(ggMe());
+    const { them } = ggNames(ctx, it);
+    if (!GhostGames.get(it.data.g)) return { text: "Needs a newer Ghost", mine: false, over: false };
+    if (st.turn != null) return { text: st.turn === me ? "Your turn" : them + "'s turn", mine: st.turn === me, over: false };
+    // (games that name players by Ghost id say who won in their own view: their text would show raw ids)
+    const why = st.reason === "resign" ? (st.winner === me ? them + " resigned" : "You resigned") : GhostGames.get(it.data.g).playerIds ? "" : st.text;
+    if (st.draw) return { text: why || "Draw", mine: false, over: true };
+    return { text: (st.winner === me ? "You won" : them + " won") + (why && why !== "Resigned" ? " · " + why : ""), mine: false, over: true, won: st.winner === me };
+  }
+  // ---- the chat sheet's "Play a Game" row, and the picker ----
+  function ggChatSheetRow(ctx, group, cd, f, other, done) {
+    if (!ggOn()) return;
+    setRow(group, { icon: "games", tint: "linear-gradient(135deg,#34c759,#20a0c8)", label: "Play a Game", onClick: () => { done(); ggPick(ctx, f); } });
+  }
+  function ggPick(ctx, f) {
+    const ov = el("div", "gh-gg-pick");
+    ov.innerHTML = '<div class="gh-gg-pick-box"><div class="gh-gg-pick-title">Play a Game</div><div class="gh-gg-pick-list"></div><button class="gh-gg-pick-cancel gh-press">Cancel</button></div>';
+    const list = ov.querySelector(".gh-gg-pick-list");
+    for (const def of GhostGames.list()) {
+      const b = el("button", "gh-gg-pick-item gh-press"); b.dataset.game = def.id;
+      const ic = el("span", "gh-gg-icon"); ic.innerHTML = def.icon;
+      const nm = el("span", "gh-gg-pick-name"); nm.textContent = def.name;
+      b.append(ic, nm);
+      b.addEventListener("click", async () => { haptic("light"); ov.remove(); await ggStart(ctx, f, def.id); });
+      list.appendChild(b);
+    }
+    ov.querySelector(".gh-gg-pick-cancel").addEventListener("click", () => ov.remove());
+    ov.addEventListener("click", (e) => { if (e.target === ov) ov.remove(); });
+    ctx.root.appendChild(ov);
+  }
+  async function ggStart(ctx, f, gameId, rematchOf) {
+    try {
+      const key = gn.net.newItemKey("game");
+      const data = GhostGames.newMatch(gameId, [ggMe(), f.id], { rematchOf: rematchOf || null });
+      const it = await gn.net.putItem({ key, kind: "game", with: f.id, v: 1, data });
+      if (rematchOf) { // the old match points at the new one, so their card offers it
+        const old = gn.net.item(rematchOf);
+        if (old && !old.data.re) { const d = JSON.parse(JSON.stringify(old.data)); d.re = key; await gn.net.putItem({ key: rematchOf, kind: "game", with: f.id, v: old.v + 1, data: d }).catch(() => {}); }
+      }
+      ggOpen(ctx, it.key);
+    } catch (e) { gnTrail("game start: " + (e && e.message)); ctx.showToast("Couldn't start the game"); }
+  }
+  async function ggMove(ctx, key, move) {
+    const it = gn.net.item(key);
+    if (!it) return;
+    const me = it.data.p.indexOf(ggMe());
+    let data;
+    try { data = GhostGames.play(it.data, move, me, it.v); }
+    catch (e) { ctx.showToast(/turn/.test(e.message) ? "Not your turn" : /over/.test(e.message) ? "The game is over" : "That move isn't allowed"); if (gg.view && gg.view.key === key) gg.view.game.update(it.data.s); return; }
+    haptic("light");
+    if (gg.view && gg.view.key === key) { try { gg.view.game.update(data.s); } catch (e) {} } // show it now, not after the save
+    try { await gn.net.putItem({ key, kind: "game", with: it.with, v: it.v + 1, data }); }
+    catch (e) {
+      gnTrail("game move: " + (e && e.message)); ctx.showToast("Couldn't send that move");
+      const now = gn.net.item(key); if (now && gg.view && gg.view.key === key) ggPaintView(ctx, now);
+    }
+    gn.round && gn.round(); // pick up anything waiting
+  }
+  // ---- a match changed (ours or theirs) ----
+  function ggOnItem(ctx, d) {
+    if (!d || d.kind !== "game") return;
+    const it = gn.net.item(d.key);
+    if (it && !d.local && d.prev) { // their move: replay it on our copy to check both Ghosts agree
+      const chk = GhostGames.verify(d.prev.data, d.prev.v, it.data, it.v);
+      if (!chk.ok) gnTrail("game " + d.key.slice(5, 11) + " mismatch v" + it.v + (chk.stale ? " (stale move)" : "") + (chk.error ? " " + chk.error : ""));
+    }
+    if (it && !d.local) {
+      const st = ggStatusText(ctx, it);
+      const was = gg.lastTurn.get(d.key);
+      const viewing = gg.view && gg.view.key === d.key;
+      if (!viewing && (st.mine || st.over) && was !== st.text) {
+        const def = GhostGames.get(it.data.g);
+        ctx.showToast((def ? def.name + ": " : "") + (st.mine ? ggNames(ctx, it).them + " made a move" : st.text));
+      }
+      gg.lastTurn.set(d.key, st.text);
+    }
+    if (gg.view && gg.view.key === d.key && it) ggPaintView(ctx, it);
+    ggRefreshChat(ctx);
+  }
+  // ---- the chat timeline: one card per match, at the time of its latest move ----
+  function ggTimeline(ctx, convId) {
+    if (!ggOn()) return [];
+    const snap = gxFriendSnap(ctx, convId);
+    const f = snap && gn.net.friendBySnap(snap);
+    return f ? ggMatches(f.id).map((it) => ({ ts: it.at || 0, kind: "game", it })) : [];
+  }
+  function ggCardEl(ctx, it) {
+    const def = GhostGames.get(it.data.g);
+    const st = ggStatusText(ctx, it);
+    const card = el("button", "gh-gg-card gh-gg-tl gh-press"); card.dataset.key = it.key; card.dataset.mine = st.mine ? "1" : "0"; card.dataset.over = st.over ? "1" : "0";
+    const ic = el("span", "gh-gg-icon"); ic.innerHTML = def ? def.icon : "";
+    const txt = el("span", "gh-gg-card-text");
+    const t1 = el("span", "gh-gg-card-title"); t1.textContent = def ? def.name : "Game";
+    const t2 = el("span", "gh-gg-card-sub"); t2.textContent = st.text + (st.over ? "" : (GhostGames.preview(it.data) ? " · " + GhostGames.preview(it.data) : ""));
+    txt.append(t1, t2);
+    const go = el("span", "gh-gg-card-go"); go.textContent = st.mine ? "Play" : "Open";
+    card.append(ic, txt, go);
+    card.addEventListener("click", () => { haptic("light"); ggOpen(ctx, it.key); });
+    if (!gg.lastTurn.has(it.key)) gg.lastTurn.set(it.key, st.text);
+    return card;
+  }
+  const ggRefreshChat = (ctx) => { if (ctx.state.currentConvId) gxChanged(ctx, ctx.state.currentConvId); };
+  // ---- the full-screen game view ----
+  function ggTheme(ctx) {
+    const cs = getComputedStyle(ctx.host || document.documentElement);
+    const v = (n) => cs.getPropertyValue(n).trim();
+    return { bg: v("--gh-bg-app"), panel: v("--gh-bg-panel"), text: v("--gh-text"), muted: v("--gh-text-secondary"), accent: v("--gh-accent") };
+  }
+  function ggOpen(ctx, key) {
+    const it = gn.net.item(key);
+    const def = it && GhostGames.get(it.data.g);
+    if (!it) return;
+    ggClose(ctx);
+    const wrap = el("div", "gh-gg-view");
+    wrap.innerHTML = `<div class="gh-gg-head"><button class="gh-gg-back gh-press" aria-label="Close"></button><div class="gh-gg-head-text"><div class="gh-gg-title"></div><div class="gh-gg-status"></div></div><span class="gh-gg-head-icon gh-gg-icon"></span></div>
+      <div class="gh-gg-body"></div>
+      <div class="gh-gg-foot"><button class="gh-gg-btn gh-gg-resign gh-press">Resign</button><button class="gh-gg-btn gh-gg-rematch gh-press">Rematch</button><button class="gh-gg-btn gh-gg-close gh-press">Close</button></div>`;
+    wrap.querySelector(".gh-gg-back").appendChild(icon("back", 24));
+    wrap.querySelector(".gh-gg-head-icon").innerHTML = def ? def.icon : "";
+    ctx.root.appendChild(wrap);
+    const body = wrap.querySelector(".gh-gg-body");
+    const me = it.data.p.indexOf(ggMe());
+    const { names, them } = ggNames(ctx, it);
+    wrap.querySelector(".gh-gg-title").textContent = (def ? def.name : "Game") + " with " + them;
+    let game = null;
+    if (def) {
+      try { game = def.view(body, { state: it.data.s, me: me < 0 ? null : def.playerIds ? ggMe() : me, players: it.data.p.slice(), names, theme: ggTheme(ctx), onMove: (move) => ggMove(ctx, key, move), onClose: () => ggClose(ctx), embedded: true }); }
+      catch (e) { gnTrail("game view: " + (e && e.message)); body.textContent = "Couldn't show this game."; }
+    } else body.textContent = "This game needs a newer Ghost.";
+    gg.view = { key, wrap, game: game || { update() {}, destroy() {} }, def };
+    if (ctx.host) ctx.host.setAttribute("data-game", "1"); // toasts show above the game
+    const close = () => ggClose(ctx);
+    wrap.querySelector(".gh-gg-back").addEventListener("click", close);
+    wrap.querySelector(".gh-gg-close").addEventListener("click", close);
+    wrap.querySelector(".gh-gg-resign").addEventListener("click", async () => {
+      if (!(await confirmSheet(ctx, "Resign this game? " + them + " wins.", "Resign"))) return;
+      await ggMove(ctx, key, { resign: true });
+    });
+    wrap.querySelector(".gh-gg-rematch").addEventListener("click", async () => {
+      const cur = gn.net.item(key);
+      if (!cur) return;
+      if (cur.data.re && gn.net.item(cur.data.re)) { ggOpen(ctx, cur.data.re); return; }
+      const f = gn.net.friends().find((x) => x.id === cur.with);
+      if (f) await ggStart(ctx, f, cur.data.g, key);
+    });
+    ggPaintView(ctx, it);
+    // while a game is open, check for the friend's move every few seconds instead of every 20
+    clearInterval(gg.fast);
+    gg.fast = setInterval(() => { if (gn.round) gn.round(); }, window.__ghostMockFast ? 400 : 4000);
+    if (gn.round) gn.round();
+  }
+  function ggPaintView(ctx, it) {
+    const v = gg.view;
+    if (!v || v.key !== it.key) return;
+    const st = ggStatusText(ctx, it);
+    const s = v.wrap.querySelector(".gh-gg-status");
+    s.textContent = st.text; s.dataset.mine = st.mine ? "1" : "0";
+    v.wrap.dataset.over = st.over ? "1" : "0";
+    const re = it.data.re && gn.net.item(it.data.re);
+    v.wrap.querySelector(".gh-gg-rematch").textContent = re ? "Open Rematch" : "Rematch";
+    // always the framework's copy (after our own move too): the view never keeps a state the rules didn't produce
+    try { v.game.update(it.data.s); } catch (e) { gnTrail("game update: " + (e && e.message)); }
+    gg.lastTurn.set(it.key, st.text);
+  }
+  function ggClose(ctx) {
+    clearInterval(gg.fast); gg.fast = null;
+    if (!gg.view) return;
+    if (ctx.host) ctx.host.removeAttribute("data-game");
+    try { gg.view.game.destroy(); } catch (e) {}
+    gg.view.wrap.remove();
+    gg.view = null;
+    ggRefreshChat(ctx);
   }
 
   // ---- pictures for My Ghost Profile ----
@@ -13744,6 +13955,7 @@
     const out = [];
     for (const p of ix.pins) if (p.shared) out.push({ ts: p.v, kind: "pinline", it: p });
     for (const [pid, p] of ix.polls) out.push({ ts: p.d.at || p.v, kind: "poll", pid, it: p });
+    for (const g of ggTimeline(ctx, convId)) out.push(g); // Ghost games
     return out.sort((a, b) => a.ts - b.ts);
   }
   function gxPreview(m) {

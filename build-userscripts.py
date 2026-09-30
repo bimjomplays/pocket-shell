@@ -82,7 +82,13 @@ if (ghost / 'ui.js').exists():
     gifanim = 'window.__ghostNoGifScan = true;\n' + read('gif-anim.js') + '\n'
     # network.js (Ghost accounts core) defines GhostNetCore at the top of the same script, before ui.js reads it
     net = (ghost / 'network.js').read_text() + '\n' if (ghost / 'network.js').exists() else ''
-    (app / 'ghost-ui.js').write_text(gifanim + 'const GHOST_CSS = ' + json.dumps(css) + ';\n' + net + (ghost / 'ui.js').read_text())
+    # Ghost games (ghost/GAMES.md): the framework, then each game's libraries/engines, then the game modules
+    games = ''
+    if (ghost / 'games.js').exists():
+        mods = sorted((ghost / 'games').glob('*.js')) if (ghost / 'games').exists() else []
+        first = [m for m in mods if m.stem.endswith('-lib') or m.stem.endswith('-engine')]
+        games = ''.join(f.read_text() + '\n' for f in [ghost / 'games.js'] + first + [m for m in mods if m not in first])
+    (app / 'ghost-ui.js').write_text(gifanim + 'const GHOST_CSS = ' + json.dumps(css) + ';\n' + net + games + (ghost / 'ui.js').read_text())
 # the TikTok tab's hidden TikTok page script (runs in TikTokFeed.swift's own web view, never in Snapchat's page)
 if (ghost / 'tiktok-page.js').exists():
     (app / 'ghost-tiktok.js').write_text((ghost / 'tiktok-page.js').read_text())
