@@ -33,9 +33,17 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let scene = scene as? UIWindowScene else { return }
         let window = TouchWindow(windowScene: scene)
         window.overrideUserInterfaceStyle = .dark
-        window.rootViewController = WebViewController()
+        let vc = WebViewController()
+        window.rootViewController = vc
         window.makeKeyAndVisible()
         self.window = window
+        // opened by a dltnpghost:// link (the notification relay's pairing QR, or an ntfy notification's click)
+        if let url = options.urlContexts.first?.url { vc.handleOpenURL(url) }
+    }
+
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        guard let url = URLContexts.first?.url else { return }
+        (window?.rootViewController as? WebViewController)?.handleOpenURL(url)
     }
 }
 
@@ -66,6 +74,16 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private static let background = UIColor(red: 0x12 / 255, green: 0x12 / 255, blue: 0x12 / 255, alpha: 1)
 
     private let world = WKContentWorld.world(name: "darkmobile")
+    /// A dltnpghost:// link (notification pairing, "open this chat") waiting for ui.js: it asks with "takeOpenURL"
+    /// when it starts, and is told directly when it's already running. Only the Ghost scheme, only two short shapes.
+    private var pendingOpenURL: String?
+    func handleOpenURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "dltnpghost", url.absoluteString.count <= 8192 else { return }
+        let text = url.absoluteString
+        pendingOpenURL = text
+        guard let data = try? JSONSerialization.data(withJSONObject: [text]), let json = String(data: data, encoding: .utf8) else { return }
+        webView?.ghostEval("window.__ghostOpenURL && window.__ghostOpenURL(\(json)[0])")
+    }
     private var webView: WKWebView!
     // starts true because the app opens /web: laying the page out at the login width first and then
     // switching once the URL arrived sometimes left Snapchat's grid at a stale height, which also kept
@@ -749,6 +767,10 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             tiktok.handle(body, reply: replyHandler)
         case "gnet", "gnKeys": // Ghost network: ntfy.sh inbox requests + this Ghost's keys (GhostNet.swift)
             GhostNet.handle(op, body) { value, error in replyHandler(value, error) }
+        case "takeOpenURL": // Ghost: the dltnpghost:// link Ghost was opened with (once), for ui.js to act on
+            let url = pendingOpenURL
+            pendingOpenURL = nil
+            replyHandler(url, nil)
         case "openURL": // Ghost: tapping a link in a message opens Safari (or the app that owns the link)
             guard let str = body["url"] as? String, let url = URL(string: str), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return replyHandler(nil, "bad url") }
             UIApplication.shared.open(url)

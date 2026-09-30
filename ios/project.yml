@@ -14,7 +14,7 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: Ghost
-        CFBundleShortVersionString: "1.7.6"
+        CFBundleShortVersionString: "1.8.0"
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         UILaunchScreen:
@@ -27,6 +27,9 @@ targets:
                 UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
         UIUserInterfaceStyle: Dark
         GhostMode: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.dltnp.ghost
+            CFBundleURLSchemes: [dltnpghost]
         CADisableMinimumFrameDurationOnPhone: true
         UIStatusBarStyle: UIStatusBarStyleLightContent
         UIViewControllerBasedStatusBarAppearance: true

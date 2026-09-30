@@ -55,6 +55,7 @@
     back: '<path d="M15 18l-6-6 6-6"/>',
     addFriend: '<circle cx="10" cy="8" r="4"/><path d="M3 20c.8-3.6 3.6-6 7-6s6.2 2.4 7 6"/><path d="M19 8v6M16 11h6"/>',
     bookmark: '<path d="M6.5 3.5h11v17l-5.5-4-5.5 4z"/>',
+    bell: '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>',
     person: '<circle cx="12" cy="8" r="4"/><path d="M4.5 20c.8-3.6 3.9-6 7.5-6s6.7 2.4 7.5 6"/>',
     flame: '<path d="M12 3c1 3.5 5 5.5 5 10a5 5 0 01-10 0c0-2 1-3.5 2-4.5.3 1.6 1.2 2.5 2 2.5-.6-2.8 0-5.5 1-8z"/>',
     pin: '<path d="M9 4h6l-1 6 3 3H7l3-3-1-6z"/><path d="M12 13v7"/>',
@@ -242,6 +243,10 @@
     listStories: () => bridge.call("listStories"),
     openStory: (userId) => bridge.call("openStory", [userId]),
     setChatNotifications: (id, p) => bridge.call("setChatNotifications", [id, p]),
+    pushRegister: (sub) => bridge.call("pushRegister", [sub], 30000),
+    pushClear: () => bridge.call("pushClear", [], 30000),
+    pushSetting: (on) => bridge.call("pushSetting", [on], 30000),
+    pushGetSetting: () => bridge.call("pushGetSetting", [], 30000),
     setRetention: (id, m) => bridge.call("setRetention", [id, m]),
     chatSettings: (id) => bridge.call("chatSettings", [id]),
     clearChat: (id) => bridge.call("clearChat", [id]),
@@ -556,6 +561,7 @@
       startStreakKeeper(ctx);
       initMessageNotifications(ctx);
       gnStart(ctx).catch((e) => gnTrail("start " + (e && e.message)));
+      notifyStart(ctx).catch((e) => uiTrail("notify start " + (e && e.message)));
       bdayStart(ctx);
       api.friendRequests().then((r) => { ctx.friendReqCount = (r || []).length; }).catch(() => {});
       ctx.revealHome = () => { boot.classList.add("gh-boot-fade"); markReady(true); };
@@ -4220,7 +4226,7 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile", gnPreview: "How Friends See You", gnVerify: "Verify Connection", tiktok: "TikTok" };
+  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile", gnPreview: "How Friends See You", gnVerify: "Verify Connection", tiktok: "TikTok", notify: "Notifications", notifySetup: "Set Up on Your PC" };
   const SETTINGS_PAGES = {
     gnProfile(ctx, body) { return GN_SETTINGS.gnProfile(ctx, body); }, // section "Ghost network"
     gnShare(ctx, body) { return GN_SETTINGS.gnShare(ctx, body); },
@@ -4497,6 +4503,7 @@
       g = setGroup(body);
       setRow(g, { icon: "palette", tint: "linear-gradient(135deg,#ff5c9e,#9b59f6)", label: "Appearance", value: (THEMES[pref("theme")] || THEMES.night).name, onClick: () => pushSettingsPage(ctx, "appearance") });
       setRow(g, { icon: "newMsg", tint: "#3e88f7", label: "Chats", onClick: () => pushSettingsPage(ctx, "chats") });
+      setRow(g, { icon: "bell", tint: "linear-gradient(135deg,#ff5c5c,#ff9433)", label: "Notifications", value: notifyValueLabel(), onClick: () => pushSettingsPage(ctx, "notify") });
       setRow(g, { icon: "lock", tint: "#8e8e93", label: "Privacy", onClick: () => pushSettingsPage(ctx, "privacy") });
       setRow(g, { icon: "emoji", tint: "#f0b232", label: "Stickers & GIFs", onClick: () => pushSettingsPage(ctx, "media") });
       setRow(g, { icon: "reels", tint: "linear-gradient(135deg,#25c5e8,#f0366a)", label: "TikTok", value: pref("tiktokTab") !== false ? "On" : "Off", onClick: () => pushSettingsPage(ctx, "tiktok") });
@@ -4508,6 +4515,8 @@
       setRow(g, { icon: "settings", tint: "#636366", label: "Advanced", onClick: () => { try { window.dgOpenSettings && window.dgOpenSettings(); } catch (e) {} } });
       setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "About Ghost", onClick: () => pushSettingsPage(ctx, "about") });
     },
+    notify(ctx, body) { return notifySettingsPage(ctx, body); }, // section "Notifications while Ghost is closed"
+    notifySetup(ctx, body) { return notifySetupPage(ctx, body); },
     tiktok(ctx, body) {
       const g = setGroup(body, null, "Off removes the TikTok tab and Ghost stops loading TikTok completely. Your TikTok sign-in stays until you sign out.");
       setRow(g, { icon: "reels", tint: "linear-gradient(135deg,#25c5e8,#f0366a)", label: "TikTok Tab", toggle: { get: () => pref("tiktokTab") !== false, set: (v) => { setPref(ctx, "tiktokTab", v); paintAcct(); paintDM(); paintFeed(); } } });
@@ -5225,6 +5234,184 @@
     s.el.innerHTML = ""; s.stack = []; s.rootLabel = rootLabel || "Chat";
     s.el.dataset.open = "1";
     pushSettingsPage(ctx, name);
+  }
+
+  // =====================================================================================================
+  // Notifications while Ghost is closed (ghost-notify/ on the user's PC, NOTIFY_PLAN.md). Snapchat Web pushes to a
+  // Mozilla push address the PC relay holds; the relay forwards "Jacob: Sent you a chat" to the ntfy app. Ghost's part:
+  // take the pairing link (dltnpghost://notify-setup?c=...), hand Snapchat that address (bridge pushRegister, the same
+  // RegisterDevice call Snapchat Web makes) and the account's web-push setting, re-register on every launch while on,
+  // and read the relay's private control topic for a new address. Ghost never sends anything to the relay.
+  // Proven on the phone 2026-09-29: pushes arrive within ~1 s with Ghost closed, none while it's open, none for
+  // silenced chats. Contract with the relay: ghost-notify/README.md.
+  // =====================================================================================================
+  const NOTIFY_KEY = "ghostNotify";
+  const NOTIFY_CTL_AAD = "ghost-notify-ctl-v1";
+  let notifyCfg; // undefined = not loaded yet, null = not paired
+  async function notifyLoad() { if (notifyCfg === undefined) { const v = await storage.get(NOTIFY_KEY, null); notifyCfg = v && v.v === 1 && v.sub ? v : null; } return notifyCfg; }
+  async function notifySave() { await storage.set(NOTIFY_KEY, notifyCfg || null); }
+  function notifyValueLabel() { const c = notifyCfg; return !c ? "Not set up" : !c.on ? "Off" : c.status === "repair" ? "Re-pair needed" : "On"; }
+  function b64uBytes(t) {
+    t = String(t || "").replace(/-/g, "+").replace(/_/g, "/"); while (t.length % 4) t += "=";
+    const bin = atob(t), out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  const NOTIFY_TOPIC_RE = /^[A-Za-z0-9_-]{24,64}$/;
+  // the subscription Snapchat will push to: only a Mozilla push address with its two keys (same check as bridge.js)
+  function notifyCheckSub(sub) {
+    const ep = sub && sub.endpoint, k = sub && sub.keys;
+    let u = null; try { u = new URL(ep); } catch (e) {}
+    const b64 = /^[A-Za-z0-9_-]+={0,2}$/;
+    if (!u || u.protocol !== "https:" || u.host !== "updates.push.services.mozilla.com" || !/^\/wpush\/v[12]\/[A-Za-z0-9_\-=]{20,500}$/.test(u.pathname) || u.search || u.hash) throw new Error("bad push address");
+    if (!k || typeof k.p256dh !== "string" || !b64.test(k.p256dh) || k.p256dh.length > 100 || typeof k.auth !== "string" || !b64.test(k.auth) || k.auth.length > 40) throw new Error("bad push keys");
+    return { endpoint: ep, expirationTime: null, keys: { p256dh: k.p256dh, auth: k.auth } };
+  }
+  // dltnpghost://notify-setup?c=<base64url JSON>: everything in it is checked (it's a link anyone could make)
+  function notifyParsePairing(c) {
+    if (typeof c !== "string" || c.length > 6000) throw new Error("bad pairing link");
+    const j = JSON.parse(new TextDecoder().decode(b64uBytes(c)));
+    if (!j || j.v !== 1) throw new Error("this pairing link is from a newer relay - update Ghost");
+    const name = String(j.name || "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 40) || "your PC";
+    const id = String(j.id || "");
+    if (!/^[0-9a-f]{16}$/.test(id)) throw new Error("bad relay id");
+    const sub = notifyCheckSub(j.sub);
+    const nt = j.ntfy || {}, ctl = j.ctl || {};
+    if (nt.server !== "https://ntfy.sh" || !NOTIFY_TOPIC_RE.test(String(nt.topic || ""))) throw new Error("bad ntfy topic");
+    if (!NOTIFY_TOPIC_RE.test(String(ctl.topic || ""))) throw new Error("bad control topic");
+    if (b64uBytes(ctl.key).length !== 32) throw new Error("bad control key");
+    return { v: 1, name, id, sub, ntfy: { server: nt.server, topic: nt.topic }, ctl: { topic: ctl.topic, key: ctl.key }, on: false, since: "", subTs: 0, status: "", lastOk: 0 };
+  }
+  async function handleGhostURL(ctx, text) {
+    let u = null; try { u = new URL(String(text || "")); } catch (e) { return; }
+    if (u.protocol !== "dltnpghost:") return;
+    const host = (u.host || u.hostname || "").toLowerCase();
+    if (host === "chat") {
+      const id = decodeURIComponent(u.pathname.replace(/^\/+/, ""));
+      if (/^[0-9a-fA-F-]{8,64}$/.test(id) && window.__ghostOpenChat) window.__ghostOpenChat(id.toLowerCase());
+      return;
+    }
+    if (host !== "notify-setup") return;
+    let cfg;
+    try { cfg = notifyParsePairing(u.searchParams.get("c")); }
+    catch (e) { ctx.showToast("That pairing link didn't work: " + String(e && e.message || e)); return; }
+    await notifyLoad();
+    const again = notifyCfg && notifyCfg.id === cfg.id;
+    const ok = await confirmSheet(ctx, (again ? "Pair again with “" : "Pair with “") + cfg.name + "”? When Ghost is closed, your Snapchat notifications will come through that PC to the ntfy app (only who it's from, never the message).", "Pair");
+    if (!ok) return;
+    const wasOn = !!(notifyCfg && notifyCfg.on);
+    notifyCfg = cfg;
+    await notifySave();
+    if (wasOn) { try { await notifyTurnOn(ctx); ctx.showToast("Paired with " + cfg.name); } catch (e) { ctx.showToast("Paired - turn it on in Settings > Notifications"); } }
+    else ctx.showToast("Paired with " + cfg.name + " - turn it on in Settings > Notifications");
+    // paired from the Set Up page: back to Notifications, which now shows the switch
+    const st = ctx.settings && ctx.settings.el && ctx.settings.el.dataset.open === "1" && ctx.settings.stack;
+    if (st && st.length && st[st.length - 1].name === "notifySetup") popSettingsPage(ctx);
+    setTimeout(() => notifyRefreshPage(ctx), 350);
+  }
+  async function notifyTurnOn(ctx) {
+    await notifyLoad();
+    if (!notifyCfg) throw new Error("not paired");
+    const set = await api.pushSetting(true);
+    if (!set || !set.ok) throw new Error("Snapchat didn't turn web notifications on");
+    const r = await api.pushRegister(notifyCfg.sub);
+    if (!r || !r.ok) throw new Error("Snapchat didn't take the address");
+    notifyCfg.on = true; notifyCfg.status = "working"; notifyCfg.lastOk = Date.now();
+    await notifySave();
+  }
+  async function notifyTurnOff(ctx) {
+    await notifyLoad();
+    try { await api.pushClear(); } catch (e) { uiTrailN("clear " + (e && e.message)); }
+    try { await api.pushSetting(false); } catch (e) { uiTrailN("setting off " + (e && e.message)); }
+    if (notifyCfg) { notifyCfg.on = false; notifyCfg.status = ""; await notifySave(); }
+  }
+  const uiTrailN = (t) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST notify " + String(t).slice(0, 200) }).catch(() => {}); } catch (e) {} };
+  // the relay's control topic: a newer push address (Mozilla reset the old one). AES-256-GCM, nonce || ciphertext.
+  async function notifyPollControl() {
+    const c = notifyCfg;
+    if (!c || !c.ctl) return false;
+    const url = "https://ntfy.sh/" + c.ctl.topic + "/json?poll=1&since=" + encodeURIComponent(c.since || "all");
+    let r = null; try { r = await dgPost("gnet", { url, method: "GET" }); } catch (e) { return false; }
+    if (!r || r.status !== 200 || typeof r.body !== "string") return false;
+    const text = new TextDecoder().decode(b64uBytes(r.body.replace(/\+/g, "-").replace(/\//g, "_")));
+    const key = await crypto.subtle.importKey("raw", b64uBytes(c.ctl.key), "AES-GCM", false, ["decrypt"]);
+    let changed = false, lastId = c.since;
+    for (const line of text.split("\n")) {
+      let m = null; try { m = JSON.parse(line); } catch (e) { continue; }
+      if (!m || m.event !== "message" || typeof m.message !== "string") continue;
+      if (typeof m.id === "string" && /^[A-Za-z0-9]{6,40}$/.test(m.id)) lastId = m.id;
+      try {
+        const raw = b64uBytes(m.message);
+        if (raw.length < 29 || raw.length > 8192) continue;
+        const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: new TextEncoder().encode(NOTIFY_CTL_AAD) }, key, raw.slice(12));
+        const j = JSON.parse(new TextDecoder().decode(plain));
+        if (j && j.type === "subscription" && Number(j.ts) > (c.subTs || 0)) { c.sub = notifyCheckSub(j.sub); c.subTs = Number(j.ts); changed = true; }
+      } catch (e) { /* not ours / tampered: ignored */ }
+    }
+    if (lastId !== c.since || changed) { c.since = lastId; await notifySave(); }
+    return changed;
+  }
+  // every launch while on: Snapchat Web refreshes its registration on load too; a new address from the relay first
+  async function notifyStart(ctx) {
+    window.__ghostOpenURL = (u) => { dgPost("takeOpenURL", {}).catch(() => {}); handleGhostURL(ctx, u).catch((e) => uiTrailN("url " + (e && e.message))); };
+    ctx.notifyTest = { poll: () => notifyPollControl(), cfg: () => notifyCfg, start: () => notifyStart(ctx) }; // rig only
+    let pending = null; try { pending = await dgPost("takeOpenURL", {}); } catch (e) {}
+    await notifyLoad();
+    if (typeof pending === "string" && pending) setTimeout(() => handleGhostURL(ctx, pending).catch(() => {}), 1200);
+    if (!notifyCfg || !notifyCfg.on) return;
+    await new Promise((r) => setTimeout(r, 6000)); // Snapchat's services are up by then
+    try { await notifyPollControl(); } catch (e) { uiTrailN("control " + (e && e.message)); }
+    try {
+      const r = await api.pushRegister(notifyCfg.sub);
+      notifyCfg.status = r && r.ok ? "working" : "failed";
+      if (r && r.ok) notifyCfg.lastOk = Date.now();
+    } catch (e) { notifyCfg.status = /bad push/.test(String(e && e.message)) ? "repair" : "failed"; uiTrailN("register " + (e && e.message)); }
+    await notifySave();
+    notifyRefreshPage(ctx);
+  }
+  function notifyRefreshPage(ctx) {
+    const top = ctx.settings && ctx.settings.el && ctx.settings.el.dataset.open === "1" && ctx.settings.stack[ctx.settings.stack.length - 1];
+    if (top && top.refresh && /^(notify|main)$/.test(top.name)) top.refresh();
+  }
+  function notifySettingsPage(ctx, body) {
+    if (notifyCfg === undefined) notifyLoad().then(() => notifyRefreshPage(ctx)); // normally loaded at startup
+    const c = notifyCfg || null;
+    const g = setGroup(body, null, "When Ghost is closed, Snapchat's notifications come through the relay on your PC to the ntfy app: who it's from and whether it's a chat or a snap, never the message itself. Nothing arrives while that PC is off or asleep, or while Ghost is open (Snapchat holds them back itself). Snapchat doesn't notify for chats you've set to silent.");
+    if (!c) {
+      setRow(g, { icon: "bell", tint: "linear-gradient(135deg,#ff5c5c,#ff9433)", label: "When Ghost Is Closed", value: "Not set up", onClick: () => pushSettingsPage(ctx, "notifySetup") });
+    } else {
+      setRow(g, { icon: "bell", tint: "linear-gradient(135deg,#ff5c5c,#ff9433)", label: "When Ghost Is Closed", toggle: { get: () => !!(notifyCfg && notifyCfg.on), set: async (v) => {
+        try { if (v) { await notifyTurnOn(ctx); ctx.showToast("On - you'll get notifications while Ghost is closed"); } else { await notifyTurnOff(ctx); ctx.showToast("Off"); } }
+        catch (e) { ctx.showToast("Couldn't change that: " + String(e && e.message || e)); }
+        notifyRefreshPage(ctx);
+      } } });
+      const st = !c.on ? "Off" : c.status === "working" ? "Working" : c.status === "repair" ? "Re-pair needed" : c.status === "failed" ? "Couldn't reach Snapchat" : "Starting";
+      setRow(g, { label: "Status", value: st });
+      const g2 = setGroup(body, "Relay");
+      setRow(g2, { label: "Paired with", value: c.name });
+      // the ntfy iOS app has no subscribe link: copy the topic to paste into ntfy's "Subscribe to topic"
+      if (c.ntfy && c.ntfy.topic) setRow(g2, { label: "Copy ntfy Topic", value: c.ntfy.topic.slice(0, 8) + "…", onClick: () => { copyToClipboard(c.ntfy.topic); ctx.showToast("Copied - in ntfy tap + and paste it (server " + c.ntfy.server.replace(/^https:\/\//, "") + ")"); } });
+      setRow(g2, { label: "Pair Again", onClick: () => pushSettingsPage(ctx, "notifySetup") });
+      setRow(g2, { label: "Unpair", danger: true, onClick: async () => {
+        if (!(await confirmSheet(ctx, "Unpair from “" + c.name + "”? Notifications while Ghost is closed stop.", "Unpair"))) return;
+        await notifyTurnOff(ctx); notifyCfg = null; await notifySave(); ctx.showToast("Unpaired"); notifyRefreshPage(ctx);
+      } });
+    }
+  }
+  function notifySetupPage(ctx, body) {
+    const g = setGroup(body, "On your PC", "The relay is a small program in the Ghost repo (snapchat-ios-app/ghost-notify/README.md has every step, written so your PC's Claude can do it for you).");
+    const steps = [
+      "1. On your PC, run the relay's setup (the README says how). It shows a QR code.",
+      "2. Install the free ntfy app on this iPhone and subscribe to the topic the setup prints.",
+      "3. Scan the QR code with the iPhone camera and tap Pair in Ghost.",
+      "4. Turn on Settings > Notifications > When Ghost Is Closed.",
+    ];
+    for (const t of steps) setRow(g, { label: t });
+    const g2 = setGroup(body, null, "If scanning doesn't open Ghost, copy the link the setup prints and paste it here.");
+    setRow(g2, { label: "Paste Pairing Link", onClick: async () => {
+      const v = await promptSheet(ctx, "Pairing link (starts with dltnpghost://)", "", 6000);
+      if (v) handleGhostURL(ctx, v).catch(() => {});
+    } });
   }
 
   // ---- new-message notifications while Ghost is in the background ----------------------------------------------

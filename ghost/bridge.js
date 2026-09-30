@@ -610,6 +610,65 @@
     });
     return storyThumbFnCache;
   }
+  // ---- notifications while Ghost is closed (ghost-notify/, NOTIFY_PLAN.md) ----
+  // Snapchat Web's push-token service, found by source like everything else: the module with
+  // "PushNotificationDataRegistryService" + "RegisterDevice"; its exported wrappers are recognised by their metric
+  // names (register_device / clear_device_token / get_notification_setting / update_notification_setting). Proven on
+  // the phone 2026-09-29: RegisterDevice with a VAPID-bound Mozilla subscription, DESKTOP_WEB, token type WEB.
+  let pushModCache;
+  function pushModule() {
+    if (pushModCache) return pushModCache;
+    const factories = webpackRequire && webpackRequire.m;
+    if (!factories) throw new Error("Snapchat isn't loaded yet");
+    let modId = null, modSrc = "";
+    for (const id of Object.keys(factories)) {
+      const src = String(factories[id]);
+      if (src.includes("PushNotificationDataRegistryService") && src.includes("RegisterDevice")) { modId = id; modSrc = src; break; }
+    }
+    if (!modId) throw new Error("push service not found");
+    const exp = webpackRequire(modId);
+    const fns = {};
+    for (const k of Object.keys(exp)) {
+      const v = safe("push-export", () => exp[k], null);
+      if (typeof v !== "function") continue;
+      const t = String(v);
+      for (const tag of ["register_device", "clear_device_token", "update_notification_setting", "get_notification_setting"]) if (t.includes(tag)) fns[tag] = v;
+    }
+    // enum values by their own member names; several enums share names, so each is read from the enum body that also
+    // has the listed siblings (values seen 2026-09-29 as fallbacks)
+    const enumVal = (name, siblings, fallback) => {
+      for (const id of Object.keys(factories)) {
+        const src = String(factories[id]);
+        if (!src.includes('"' + name + '"') || !siblings.every((x) => src.includes('"' + x + '"'))) continue;
+        for (const body of src.match(/\{e\[e\.[^}]*\}/g) || []) {
+          if (!siblings.every((x) => body.includes('="' + x + '"'))) continue;
+          const mm = body.match(new RegExp("\\[e\\." + name + "=(\\d+)\\]"));
+          if (mm) return +mm[1];
+        }
+      }
+      trail("push", "enum " + name + " not found, using " + fallback, "error");
+      return fallback;
+    };
+    pushModCache = { fns,
+      DESKTOP_WEB: enumVal("DESKTOP_WEB", ["IOS_BITMOJI", "ANDROID_HMS"], 8),
+      PRODUCTION: enumVal("PRODUCTION", ["UNKNOWN_RELEASE", "PROTOTYPING"], 1),
+      USER_LOGOUT: enumVal("USER_LOGOUT", ["USER_LOGIN", "TOKEN_INVALID"], 2),
+      TOKEN_WEB: enumVal("WEB", ["APNS", "FCM", "VOIP"], 5),
+      APP_WEB: enumVal("WEB", ["BITMOJI", "SNAPCHAT_FEATURE_APP"], 2),
+      WEB_PUSH_SETTING: enumVal("WEB_PUSH_SETTING", ["ENABLED_SETTING", "DEVICE_VOIP_TOKEN"], 7) };
+    trail("push", "module " + modId + " exports " + Object.keys(fns).join(","));
+    return pushModCache;
+  }
+  // a Web Push subscription exactly as PushSubscription.toJSON() gives it, checked (it comes from a pairing link)
+  function checkSubscription(sub) {
+    if (typeof sub === "string") sub = JSON.parse(sub);
+    const ep = sub && sub.endpoint, k = sub && sub.keys;
+    if (typeof ep !== "string" || !/^https:\/\/updates\.push\.services\.mozilla\.com\/wpush\/v[12]\/[A-Za-z0-9_\-=]{20,500}$/.test(ep)) throw new Error("bad push address");
+    const b64 = /^[A-Za-z0-9_\-]+={0,2}$/;
+    if (!k || typeof k.p256dh !== "string" || !b64.test(k.p256dh) || k.p256dh.length > 100 || typeof k.auth !== "string" || !b64.test(k.auth) || k.auth.length > 40) throw new Error("bad push keys");
+    return { endpoint: ep, expirationTime: null, keys: { p256dh: k.p256dh, auth: k.auth } };
+  }
+
   let mediaResolverFn;
   function mediaResolver() {
     if (mediaResolverFn !== undefined) return mediaResolverFn;
@@ -2451,6 +2510,35 @@
 
     // ---- chat settings + groups, all Snapchat's own actions (main.js messaging slice) ----------------------
     // notifications: ChatNotificationPreference ALL_MESSAGES 0 / SILENT 1 / MENTION_ONLY 2 (groups)
+    // notifications while Ghost is closed: hand Snapchat the PC relay's subscription (what Snapchat Web does after
+    // pushManager.subscribe), take it back, and the account's "web push" setting (must be on; muted chats never push)
+    async pushRegister(sub) {
+      requireStore();
+      const p = pushModule(); if (!p.fns.register_device) throw new Error("register_device not found");
+      const clean = checkSubscription(sub);
+      const r = await p.fns.register_device({ token: JSON.stringify(clean), tokenType: p.TOKEN_WEB }, p.DESKTOP_WEB, p.PRODUCTION, {}, p.APP_WEB);
+      return { ok: !!r && (r.statusCode === 1 || r.statusCode === undefined), statusCode: r && r.statusCode };
+    },
+    async pushClear() {
+      requireStore();
+      const p = pushModule(); if (!p.fns.clear_device_token) throw new Error("clear_device_token not found");
+      const r = await p.fns.clear_device_token(p.DESKTOP_WEB, p.USER_LOGOUT);
+      return { ok: !!r && r.statusCode === 1, statusCode: r && r.statusCode };
+    },
+    async pushSetting(on) {
+      requireStore();
+      const p = pushModule(); if (!p.fns.update_notification_setting) throw new Error("update_notification_setting not found");
+      const r = await p.fns.update_notification_setting(on !== false);
+      return { ok: !!r && r.statusCode === 1 };
+    },
+    // 1 = on, 2 = off (seen 2026-09-29)
+    async pushGetSetting() {
+      requireStore();
+      const p = pushModule(); if (!p.fns.get_notification_setting) throw new Error("get_notification_setting not found");
+      const r = await p.fns.get_notification_setting(p.WEB_PUSH_SETTING);
+      const v = r && r.notificationSettingResponse && r.notificationSettingResponse.notificationSetting;
+      return { on: v === 1, value: v === undefined ? null : v };
+    },
     async setChatNotifications(conversationId, pref) { requireStore(); await messaging().updateChatNotificationSettings(convIdObj(conversationId), pref); return true; },
     // when chats delete: IMMEDIATE 0 ("after viewing") / TWENTYFOURHOURS 1; source CHAT_SETTINGS 0
     async setRetention(conversationId, mode) { requireStore(); await messaging().updateConversationRetentionMode(convIdObj(conversationId), mode, 0); return true; },
