@@ -4490,7 +4490,14 @@
     },
     tiktok(ctx, body) {
       const g = setGroup(body, null, "Off removes the TikTok tab and Ghost stops loading TikTok completely. Your TikTok sign-in stays until you sign out.");
-      setRow(g, { icon: "reels", tint: "linear-gradient(135deg,#25c5e8,#f0366a)", label: "TikTok Tab", toggle: { get: () => pref("tiktokTab") !== false, set: (v) => { setPref(ctx, "tiktokTab", v); paintAcct(); paintDM(); } } });
+      setRow(g, { icon: "reels", tint: "linear-gradient(135deg,#25c5e8,#f0366a)", label: "TikTok Tab", toggle: { get: () => pref("tiktokTab") !== false, set: (v) => { setPref(ctx, "tiktokTab", v); paintAcct(); paintDM(); paintFeed(); } } });
+      const feedG = setGroup(body, null, "Off = search and messages only: the TikTok tab opens on search (with your TikTok messages at the top left), with no For You feed.");
+      const paintFeed = () => {
+        feedG.innerHTML = "";
+        if (pref("tiktokTab") === false) { setRow(feedG, { label: "For You Feed", value: "Off" }); return; }
+        setRow(feedG, { icon: "reels", tint: "linear-gradient(135deg,#f0366a,#ff7a45)", label: "For You Feed", toggle: { get: () => pref("tiktokFeed") !== false, set: (v) => { setPref(ctx, "tiktokFeed", v); ttFeedModeChanged(ctx); } } });
+      };
+      paintFeed();
       const dmG = setGroup(body, null, "Your TikTok messages inside Ghost: the inbox button at the top of the TikTok tab, and Send To on a video. Ghost reads them from TikTok's own messages page on this iPhone and sends with TikTok's own message box. Off closes that page.");
       const paintDM = () => {
         dmG.innerHTML = "";
@@ -9063,6 +9070,9 @@
     ttBM.listeners.add(() => { if (g.mode === "tiktok" && g.el.dataset.open === "1") paintGalTikTok(ctx); });
   }
   function galTikTokOn() { return pref("tiktokTab") !== false; }
+  // Settings > TikTok > For You Feed off = "search & messages only": the tab opens on search (with the inbox button),
+  // no For You player, no feed videos downloaded (the hidden TikTok page still loads: search runs through it)
+  function ttFeedOn() { return pref("tiktokFeed") !== false; }
   function setGalMode(ctx, mode) {
     const g = ctx.gallery;
     if (mode === "tiktok" && !galTikTokOn()) mode = "photos";
@@ -9361,10 +9371,25 @@
       ttPost("status").then((s) => ttApplyStatus(ctx, s || {}), () => {});
       armEmptyTimer(ctx);
     }
+    T.el.dataset.feed = ttFeedOn() ? "1" : "0";
+    if (!ttFeedOn()) {
+      T.loading.style.display = "none"; T.empty.style.display = "none"; clearTimeout(T.emptyTimer);
+      if (!T.search.stack.length) openTTSearch(ctx, null, { root: true });
+      return;
+    }
     layoutTikTok(ctx, 0);
     syncTikTokPlayback(ctx);
     clearInterval(T.coverTimer);
     T.coverTimer = setInterval(() => syncTikTokPlayback(ctx), 700);
+  }
+  // For You Feed switched on/off: rebuild the tab in its new mode (feed videos dropped when it goes off)
+  function ttFeedModeChanged(ctx) {
+    const T = ctx.tiktok;
+    if (!T) return;
+    if (!ttFeedOn()) { for (const i of Array.from(T.slides.keys())) dropTikTokSlide(ctx, i); T.items = []; T.index = 0; }
+    closeTTSearchAll(ctx, true);
+    if (T.el.dataset.open === "1") openTikTok(ctx);
+    else T.el.dataset.feed = ttFeedOn() ? "1" : "0";
   }
   function closeTikTok(ctx) {
     const T = ctx.tiktok;
@@ -9406,7 +9431,7 @@
   }
   function ttAddItems(ctx, list) {
     const T = ctx.tiktok;
-    if (!T || !T.started || pref("tiktokTab") === false) return;
+    if (!T || !T.started || pref("tiktokTab") === false || !ttFeedOn()) return;
     const before = ttSeenLoad();
     let added = 0, skipped = 0;
     for (const it of list) {
@@ -9965,7 +9990,7 @@
   // ---- For You: tapping it again is TikTok's refresh ----
   function ttRefresh(ctx) {
     const T = ctx.tiktok;
-    if (!T || !T.started || T.refreshing || T.search.stack.length) return;
+    if (!T || !T.started || T.refreshing || T.search.stack.length || !ttFeedOn()) return;
     T.refreshing = true; T.refreshAt = nowMs();
     haptic("light");
     T.el.dataset.refreshing = "1";
@@ -10084,6 +10109,8 @@
   }
   function popTTPage(ctx) {
     const T = ctx.tiktok;
+    const top = T.search.stack[T.search.stack.length - 1];
+    if (top && top.root && T.search.stack.length === 1) return; // search-only home stays
     const pg = T.search.stack.pop();
     if (!pg) return;
     if (pg.returnTo === "gallery" && !T.search.stack.length) setTimeout(() => { const gt = ctx.home && ctx.home.screen.querySelector('[data-tab="gallery"]'); if (gt) { gt.click(); setGalMode(ctx, "tiktok"); } }, 0);
@@ -10128,11 +10155,13 @@
   // ---- search screen ----
   async function loadTTRecent(T) { if (!T.search.recent) T.search.recent = (await storage.get(TT_RECENT_KEY, [])).filter((x) => typeof x === "string").slice(0, TT_RECENT_MAX); return T.search.recent; }
   function saveTTRecent(T) { storage.set(TT_RECENT_KEY, T.search.recent.slice(0, TT_RECENT_MAX)); }
-  function openTTSearch(ctx, initial) {
+  function openTTSearch(ctx, initial, opts) {
     const T = ctx.tiktok;
     if (!T || pref("tiktokTab") === false) return;
+    const root = !!(opts && opts.root);
     const page = el("div", "gh-tts-page");
     page.dataset.kind = "search";
+    if (root) page.dataset.root = "1";
     page.innerHTML = `
       <div class="gh-tts-bar">
         <button class="gh-tts-back gh-press" aria-label="Back"></button>
@@ -10141,11 +10170,16 @@
       </div>
       <div class="gh-tts-body gh-tts-home"></div>
       <div class="gh-tts-body gh-tts-sugs" style="display:none"></div>`;
-    page.querySelector(".gh-tts-back").appendChild(icon("back", 24));
+    // the search-only home has no Back: its left button is the TikTok inbox (when TikTok Messages is on)
+    if (root) {
+      const b = page.querySelector(".gh-tts-back");
+      if (ttDMOn()) { b.setAttribute("aria-label", "TikTok messages"); b.appendChild(icon("chatsTab", 24)); b.dataset.dm = "1"; }
+      else b.style.visibility = "hidden";
+    } else page.querySelector(".gh-tts-back").appendChild(icon("back", 24));
     page.querySelector(".gh-tts-field").prepend(icon("search", 18));
     page.querySelector(".gh-tts-clear").appendChild(icon("close", 12));
     const input = page.querySelector("input"), home = page.querySelector(".gh-tts-home"), sugs = page.querySelector(".gh-tts-sugs");
-    const pg = { kind: "search", el: page, input, lazies: [] };
+    const pg = { kind: "search", el: page, input, lazies: [], root };
     const go = (q) => {
       q = String(q || "").trim();
       if (!q) return;
@@ -10215,14 +10249,14 @@
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(input.value); } });
     page.querySelector(".gh-tts-clear").addEventListener("click", (e) => { e.preventDefault(); input.value = ""; onInput(); input.focus(); });
     page.querySelector(".gh-tts-go").addEventListener("click", () => { haptic("light"); if (input.value.trim()) go(input.value); else popTTPage(ctx); });
-    page.querySelector(".gh-tts-back").addEventListener("click", () => { haptic("light"); input.blur(); popTTPage(ctx); });
+    page.querySelector(".gh-tts-back").addEventListener("click", () => { haptic("light"); input.blur(); if (root) { if (ttDMOn()) openTTMessages(ctx); } else popTTPage(ctx); });
     pg.onShow = () => { paintHome(); };
     pg.onDestroy = () => { clearTimeout(sugTimer); };
     if (initial) input.value = initial;
     onInput();
     paintHome();
     pushTTPage(ctx, pg);
-    setTimeout(() => { if (!pg.dead) input.focus(); }, 60);
+    if (!root) setTimeout(() => { if (!pg.dead) input.focus(); }, 60);
     return pg;
   }
   function addTTRecent(T, q) {
