@@ -206,6 +206,7 @@
     return store ? safe("state", () => store.getState(), null) : null;
   }
 
+  let lastActiveAskedAt = 0; // bridge lastActive(): Snapchat's fetch at most every 30 s
   let voiceSendBusy = false; // bridge sendVoiceNote: one Audio swap at a time
   function messaging() {
     return (state() || {}).messaging || {};
@@ -2656,6 +2657,24 @@
     },
     // { userId: "MM-DD" } for every friend whose birthday Snapchat has (see birthdayMap)
     birthdays() { return store ? birthdayMap() : {}; },
+    // { userId: ms } - when each friend was last active on Snapchat. Snapchat Web keeps this in its store
+    // (plaza.lastActiveUserMap, filled by plaza.fetchLastActiveUsers() -> "getLastActiveUsers"; it calls "online"
+    // anything within 10 minutes and refreshes every 30 s). Asked again at most every 30 s; never throws.
+    lastActive() {
+      const plaza = (state() || {}).plaza;
+      if (!plaza) return {};
+      const now = Date.now();
+      if (typeof plaza.fetchLastActiveUsers === "function" && now - lastActiveAskedAt > 30000) {
+        lastActiveAskedAt = now;
+        try { Promise.resolve(plaza.fetchLastActiveUsers()).catch(() => {}); } catch (e) {}
+      }
+      const out = {};
+      const m = plaza.lastActiveUserMap;
+      try {
+        if (m && typeof m.forEach === "function") m.forEach((v, k) => { const t = Number(v); if (k && t > 0) out[idOf(k) || String(k)] = t; });
+      } catch (e) {}
+      return out;
+    },
     searchFriends(query) {
       // state.user.mutuallyConfirmedFriendIds (Array<{id,str}>) - device-verified 2026-09-27 (debugShape showed
       // it directly; BRIDGE_NOTES.md's earlier pass hadn't located it offline). Resolved through the same

@@ -19,6 +19,12 @@
 //     "accept" (its own card + an HMAC proof of the code) to the inviter's inbox. The inviter checks the proof, that the
 //     acceptor's Snapchat id is the person the invite was sent to, and that the code is unused and < 24 h old; then both
 //     are connected ("welcome" back). Codes work once.
+//   - Chat extras (1.10): pins, polls, votes and stickers in a 1:1 chat between two connected Ghosts are SHARED STATE:
+//     items {k, v, by, d} (last writer wins by v, then by id; d null = removed, kept as a tombstone), sent as {type:"xs",
+//     items} when they change, and every sync carries {xc, xm} = how many items (and the newest v) I hold that the friend
+//     wrote; a mismatch makes the friend send all of its items again. So nothing depends on ntfy.sh's 12 h storage.
+//     Sticker pictures go as encrypted attachments (like profile pictures); a Ghost that can't fetch one (ntfy.sh keeps
+//     files 3 h) asks with {type:"xneed", k} and the author uploads it again.
 const GhostNetCore = (() => {
   "use strict";
   const subtle = crypto.subtle;
@@ -329,6 +335,7 @@ const GhostNetCore = (() => {
     // after connecting: the profile, and the status if there is one
     async function sendAll(f) {
       await sendProfile(f);
+      try { const me = await identity(false); if (me) await xsend(f, xmine(f.id, me.id)); } catch (e) { log("extras: " + e.message); }
       if (st.status && st.status.v && statusLive() && f.cap >= 2) { try { await sendStatus(f); } catch (e) { log("status: " + e.message); } }
     }
     async function pushProfileToAll() {
@@ -337,6 +344,62 @@ const GhostNetCore = (() => {
         try { await sendProfile(f); } catch (e) { log("profile to " + f.id + ": " + e.message); }
       }
       await save();
+    }
+
+    // ---- chat extras (pins, polls, votes, stickers) ----
+    const XKEY_RE = /^(pin:[A-Za-z0-9_.-]{1,96}|poll:[a-z0-9]{8,24}|vote:[a-z0-9]{8,24}:[a-z2-9]{26}|stk:[A-Za-z0-9_.-]{1,96}:[a-z0-9]{8,24})$/;
+    const XMAX_ITEM = 1500, XCHUNK = 1700, XMAX_ITEMS = 3000;
+    const num = (x, lo, hi) => typeof x === "number" && isFinite(x) && x >= lo && x <= hi;
+    const txt = (x, n) => typeof x === "string" && x.length <= n;
+    function xbox(fid) { st.extras = st.extras || {}; return st.extras[fid] || (st.extras[fid] = { items: {} }); }
+    function refOk(r) { return !!(r && typeof r === "object" && typeof r.u === "string" && r.u.startsWith(NTFY + "/file/") && r.u.length < 200 && txt(r.k, 64) && txt(r.i, 32) && txt(r.t, 20)); }
+    // what each kind of item may hold (anything else is refused, so a friend's Ghost can't smuggle odd data in)
+    function dataOk(k, d) {
+      if (d === null) return true;
+      if (!d || typeof d !== "object" || Array.isArray(d) || JSON.stringify(d).length > XMAX_ITEM) return false;
+      const kind = k.slice(0, k.indexOf(":"));
+      if (kind === "pin") return num(d.t, 0, 1e14) && txt(d.p, 160) && txt(d.f || "", 80) && txt(d.kd || "", 20);
+      if (kind === "poll") return txt(d.q, 300) && d.q.trim().length > 0 && Array.isArray(d.o) && d.o.length >= 2 && d.o.length <= 10 && d.o.every((o) => txt(o, 120))
+        && typeof d.m === "boolean" && typeof d.x === "boolean" && num(d.c || 0, 0, 1e14) && num(d.at, 0, 1e14) && txt(d.cr, 40);
+      if (kind === "vote") return Array.isArray(d.s) && d.s.length <= 10 && d.s.every((i) => Number.isInteger(i) && i >= 0 && i < 10);
+      if (kind === "stk") return ["e", "b", "i"].includes(d.kd) && txt(d.r || "", 64) && txt(d.a || "", 64) && (d.kd !== "i" || refOk(d.ref))
+        && num(d.x, -1, 2) && num(d.y, -1, 2) && num(d.s, 0.2, 4) && num(d.rot, -7, 7);
+      return false;
+    }
+    function xvalid(it) { return !!(it && typeof it === "object" && typeof it.k === "string" && XKEY_RE.test(it.k) && num(it.v, 1, now() + 10 * 60e3) && txt(it.by, 40) && dataOk(it.k, it.d === undefined ? null : it.d)); }
+    const xnewer = (a, b) => !b || a.v > b.v || (a.v === b.v && String(a.by) > String(b.by));
+    // one item into the chat's state; who may write what: votes only their voter, a poll only its creator, a sticker
+    // only whoever placed it; pins either of you
+    function xapply(fid, it) {
+      if (!xvalid(it)) return false;
+      const box = xbox(fid), cur = box.items[it.k];
+      if (!cur && Object.keys(box.items).length >= XMAX_ITEMS) {
+        // full: make room by forgetting the oldest removed item (a tombstone); only live items refuse new ones
+        let old = null;
+        for (const i of Object.values(box.items)) if (!i.d && (!old || i.v < old.v)) old = i;
+        if (!old) return false;
+        delete box.items[old.k];
+      }
+      if (it.k.startsWith("vote:") && it.k.split(":")[2] !== it.by) return false;
+      if (it.k.startsWith("poll:") && ((cur && cur.d && cur.d.cr && cur.d.cr !== it.by) || (it.d && it.d.cr !== it.by) || (cur && !cur.d && cur.by !== it.by))) return false;
+      if (it.k.startsWith("stk:") && cur && cur.by !== it.by) return false;
+      if (!xnewer(it, cur)) return false;
+      box.items[it.k] = { k: it.k, v: it.v, by: it.by, d: it.d == null ? null : it.d };
+      return true;
+    }
+    const xsyncInfo = (f) => { const h = xsummary(f.id, f.id); return { xc: h.c, xm: h.m }; };
+    const xmine = (fid, myId) => Object.values(xbox(fid).items).filter((i) => i.by === myId);
+    function xsummary(fid, who) { let c = 0, m = 0; for (const i of Object.values(xbox(fid).items)) if (i.by === who) { c++; if (i.v > m) m = i.v; } return { c, m }; }
+    async function xsend(f, items) {
+      if (!items.length || f.state !== "connected") return;
+      let chunk = [], size = 0;
+      const flush = async () => { if (chunk.length) await send(f, { type: "xs", items: chunk }); chunk = []; size = 0; };
+      for (const it of items.slice().sort((a, b) => a.v - b.v)) {
+        const n = JSON.stringify(it).length;
+        if (size + n > XCHUNK) await flush();
+        chunk.push(it); size += n;
+      }
+      await flush();
     }
 
     // ---- receiving ----
@@ -355,6 +418,7 @@ const GhostNetCore = (() => {
       const f = st.friends[id];
       if (!f) return;
       delete st.friends[id];
+      if (st.extras) delete st.extras[id]; // (their pins, polls and stickers go with them)
       await Promise.all([deps.picDel(id + ":pic"), deps.picDel(id + ":banner")].map((p) => Promise.resolve(p).catch(() => {})));
       return f;
     }
@@ -411,13 +475,45 @@ const GhostNetCore = (() => {
           return;
         }
         case "profile": return f ? onProfile(f, obj) : undefined;
+        case "xs": {
+          if (!f || f.state !== "connected" || !Array.isArray(obj.items)) return;
+          let n = 0;
+          for (const it of obj.items.slice(0, 60)) if (it && it.by === from && xapply(f.id, it)) n++;
+          if (n) { await save(); changed("extras", { id: f.id, snap: f.snap }); }
+          return;
+        }
+        // their Ghost couldn't fetch a sticker picture I placed (ntfy.sh keeps files 3 h): upload it again
+        case "xneed": {
+          if (!f || f.state !== "connected" || typeof obj.k !== "string") return;
+          const me = await identity(false), it = me && xbox(f.id).items[obj.k];
+          if (!it || it.by !== me.id || !it.d || it.d.kd !== "i" || !deps.stickerBlob) return;
+          f.xneed = f.xneed || {};
+          if (now() - (f.xneed[obj.k] || 0) < 20 * 60e3) return;
+          f.xneed[obj.k] = now();
+          try {
+            const blob = await deps.stickerBlob(obj.k.split(":")[2]);
+            if (!blob) return;
+            const d = Object.assign({}, it.d, { ref: await api.putPicture(blob) });
+            const nit = { k: it.k, v: Math.max(now(), it.v + 1), by: me.id, d };
+            if (xapply(f.id, nit)) { await save(); await xsend(f, [nit]); }
+          } catch (e) { log("xneed: " + e.message); }
+          return;
+        }
         case "sync": {
           if (!f || f.state !== "connected") return;
           if (obj.have !== st.profile.v) { try { await sendProfile(f); } catch (e) { log("sync reply: " + e.message); } }
           // (builds before 81 send no status numbers: they get no status)
           if (typeof obj.shave === "number" && obj.shave !== st.status.v) { try { await sendStatus(f); } catch (e) { log("sync status: " + e.message); } }
+          // chat extras: they hold a different set of what I wrote than I do -> send all of mine again (1.10+ only)
+          if (typeof obj.xc === "number") {
+            const me = await identity(false), mine = me ? xsummary(f.id, me.id) : null;
+            if (mine && (mine.c !== obj.xc || mine.m !== obj.xm) && now() - (f.xResent || 0) > 10 * 60e3) {
+              f.xResent = now();
+              try { await xsend(f, xmine(f.id, me.id)); } catch (e) { log("extras resend: " + e.message); }
+            }
+          }
           const behind = (typeof obj.mine === "number" && obj.mine > (f.haveV || 0)) || (typeof obj.sv === "number" && obj.sv > (f.statusV || 0));
-          if (behind && !obj.reply) { try { await send(f, Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v, reply: true }, piInfo())); } catch (e) {} }
+          if (behind && !obj.reply) { try { await send(f, Object.assign(Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v, reply: true }, xsyncInfo(f)), piInfo())); } catch (e) {} }
           await save();
           return;
         }
@@ -551,6 +647,41 @@ const GhostNetCore = (() => {
         return Object.values(st.invites).some((i) => !i.used && !i.cancelled && now() - i.created < INVITE_TTL);
       },
       profile() { return st ? Object.assign({}, st.profile) : blank().profile; },
+      // chat extras with a connected friend (by their Snapchat id): [{k, v, by, d}] incl. tombstones; mine() = my Ghost ID
+      extras(snap) {
+        const f = st && snap ? friendBySnap(snap) : null;
+        if (!f || f.state !== "connected") return null;
+        return { friendId: f.id, myId: ident ? ident.id : null, items: Object.values(xbox(f.id).items).map((i) => Object.assign({}, i)) };
+      },
+      async setExtra(snap, k, d) {
+        await state();
+        const f = friendBySnap(snap), me = await identity(false);
+        if (!f || f.state !== "connected" || !me) throw new Error("Not connected on Ghost");
+        const cur = xbox(f.id).items[k];
+        const it = { k, v: Math.max(now(), cur ? cur.v + 1 : 0), by: me.id, d: d == null ? null : d };
+        if (!xapply(f.id, it)) throw new Error("Couldn't change that");
+        await save(); changed("extras", { id: f.id, snap: f.snap });
+        try { await xsend(f, [it]); } catch (e) { log("extras send: " + e.message); } // (sync sends it again if this didn't get out)
+        return it;
+      },
+      // a sticker picture: encrypted with a fresh key and uploaded (ntfy.sh keeps it 3 h; xneed re-uploads)
+      async putPicture(blob) {
+        if (!blob || blob.size > MAX_PIC) throw new Error("picture too big");
+        const bytes = u8(await blob.arrayBuffer());
+        const keyBytes = rand(32), iv = rand(12);
+        const key = await subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt"]);
+        const ct = u8(await subtle.encrypt({ name: "AES-GCM", iv }, key, bytes));
+        return { u: await upload(ct), k: b64(keyBytes), i: b64(iv), t: /^image\/(png|webp|jpeg)$/.test(blob.type) ? blob.type : "image/png" };
+      },
+      async getPicture(ref) { return fetchPic(ref); },
+      async askPicture(snap, k) {
+        const f = st && friendBySnap(snap);
+        if (!f || f.state !== "connected") return;
+        f.xasked = f.xasked || {};
+        if (now() - (f.xasked[k] || 0) < 20 * 60e3) return;
+        f.xasked[k] = now();
+        try { await send(f, { type: "xneed", k }); await save(); } catch (e) { log("xneed ask: " + e.message); }
+      },
       share() { return { mode: st.share, with: (st.shareWith || []).slice() }; },
       inviteFor(convId) { // the newest live invite you sent in this chat
         if (!st) return null;
@@ -688,7 +819,7 @@ const GhostNetCore = (() => {
             if (f.sentV !== st.profile.v && now() - (f.retryAt || 0) > 10 * 60e3) { f.retryAt = now(); try { await sendProfile(f); } catch (e) { log("profile retry " + f.id + ": " + e.message); } }
             if (st.status.v && f.sentSV !== st.status.v && f.cap >= 2) { try { await sendStatus(f); } catch (e) { log("status retry: " + e.message); } }
             if (now() - (f.lastSync || 0) < (force ? SYNC_FORCED : SYNC_EVERY)) continue;
-            await send(f, Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v }, piInfo()));
+            await send(f, Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v }, piInfo(), xsyncInfo(f)));
             f.lastSync = now();
           } catch (e) { log("sync " + f.id + ": " + e.message); }
         }

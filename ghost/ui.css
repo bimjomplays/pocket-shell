@@ -2470,6 +2470,11 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 
 /* ---- Ghost network (ui.js section "Ghost network") ---- */
 /* the ghost mark on a connected Ghost friend's avatar */
+/* last active: Snapchat's "online" dot (active within 10 minutes) on 1:1 chats; top-right when the ghost mark
+   already holds the bottom-right corner */
+.gh-ls-dot { position: absolute; right: 1px; bottom: 1px; width: 15px; height: 15px; border-radius: 50%; background: #34c759; box-shadow: 0 0 0 2.5px var(--gh-bg-list); pointer-events: none; }
+.gh-row-avatar-wrap:has(> .gh-gn-badge) > .gh-ls-dot { bottom: auto; top: 1px; }
+.gh-conv-sub[data-lastseen="now"] { color: var(--gh-accent); }
 .gh-gn-badge {
   position: absolute; right: -2px; bottom: -2px; width: 19px; height: 19px; border-radius: 50%;
   display: grid; place-items: center; color: #fff; pointer-events: none;
@@ -2783,3 +2788,80 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-ttlink-title { font-weight: 600; font-size: 14px; }
 .gh-ttlink-url { font-size: 12.5px; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gh-ttlink-card[data-busy="1"] { opacity: 0.6; }
+
+/* ---------------------------------------------------------------------------------------------------
+   Chat extras (1.10): pinned messages bar, pin lines, polls, stickers on bubbles
+--------------------------------------------------------------------------------------------------- */
+.gh-pinbar {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 6px 6px 6px 12px; background: var(--gh-bg-header); border-bottom: 0.5px solid var(--gh-divider);
+  max-height: 52px; overflow: hidden; transition: max-height 0.2s ease, padding 0.2s ease; position: relative; z-index: 4;
+}
+.gh-pinbar[data-show="0"] { max-height: 0; padding-top: 0; padding-bottom: 0; border-bottom-width: 0; }
+.gh-pinbar-strip { display: flex; flex-direction: column; gap: 2px; align-self: stretch; width: 3px; flex: none; }
+.gh-pinbar-strip i { flex: 1; border-radius: 2px; background: color-mix(in srgb, var(--gh-accent) 35%, transparent); }
+.gh-pinbar-strip i[data-on="1"] { background: var(--gh-accent); }
+.gh-pinbar-body { flex: 1; min-width: 0; text-align: left; display: flex; flex-direction: column; gap: 1px; padding: 2px 0; }
+.gh-pinbar-title { font-size: 12.5px; font-weight: 600; color: var(--gh-accent); }
+.gh-pinbar-text { font-size: 13.5px; color: var(--gh-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-pinbar-list, .gh-pinbar-x { width: 32px; height: 32px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--gh-text-secondary); border-radius: 50%; }
+.gh-gx-line { cursor: pointer; max-width: 86%; }
+.gh-gx-line span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-pin-row { display: flex; align-items: center; gap: 8px; text-align: left; }
+.gh-pin-row .gh-set-label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.gh-pin-row-who { font-size: 12px; color: var(--gh-accent); }
+.gh-pin-row-text { font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-pin-row-x { width: 30px; height: 30px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--gh-text-secondary); margin-left: auto; }
+
+.gh-poll {
+  align-self: center; width: min(310px, 86%); margin: 8px 0; padding: 12px 12px 8px; border-radius: 16px;
+  background: var(--gh-bubble-in-1); color: var(--gh-text); display: flex; flex-direction: column; gap: 6px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+}
+.gh-poll[data-me="1"] { background: linear-gradient(135deg, var(--gh-bubble-out-1), var(--gh-bubble-out-2)); color: #fff; }
+.gh-poll-kind { font-size: 12px; opacity: 0.7; }
+.gh-poll-q { font-size: 16px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; margin-bottom: 2px; }
+.gh-poll-opt {
+  position: relative; display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 6px 10px; border-radius: 10px;
+  background: rgba(255,255,255,0.07); text-align: left; overflow: hidden; color: inherit; font-size: 14.5px;
+}
+.gh-poll-opt:disabled { opacity: 1; color: inherit; -webkit-text-fill-color: currentColor; }
+.gh-poll-bar { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(255,255,255,0.14); border-radius: 10px; transition: width 0.35s var(--gh-spring); pointer-events: none; }
+.gh-poll-opt[data-on="1"] .gh-poll-bar { background: rgba(255,255,255,0.24); }
+.gh-poll-mark { position: relative; z-index: 1; width: 20px; height: 20px; flex: none; border-radius: 50%; border: 1.5px solid currentColor; opacity: 0.8; display: flex; align-items: center; justify-content: center; }
+.gh-poll-mark[data-multi="1"] { border-radius: 6px; }
+.gh-poll-opt[data-on="1"] .gh-poll-mark { background: var(--gh-accent); border-color: var(--gh-accent); color: #fff; opacity: 1; }
+.gh-poll[data-me="1"] .gh-poll-opt[data-on="1"] .gh-poll-mark { background: #fff; border-color: #fff; color: var(--gh-bubble-out-2); }
+.gh-poll-label { position: relative; z-index: 1; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.gh-poll-pct { position: relative; z-index: 1; flex: none; font-size: 13px; font-weight: 600; opacity: 0.85; }
+.gh-poll-foot { display: flex; align-items: center; gap: 10px; font-size: 12.5px; padding-top: 2px; }
+.gh-poll-count { color: inherit; opacity: 0.75; font-size: 12.5px; }
+.gh-poll-until { opacity: 0.6; }
+.gh-poll-close { margin-left: auto; color: inherit; font-weight: 600; font-size: 13px; padding: 4px 8px; border-radius: 8px; background: rgba(255,255,255,0.1); }
+.gh-poll-form { display: flex; flex-direction: column; gap: 8px; }
+.gh-poll-opts { display: flex; flex-direction: column; gap: 6px; }
+.gh-poll-input {
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 15px; color: var(--gh-text); background: var(--gh-bg-input);
+  border: 0.5px solid var(--gh-divider); border-radius: 10px; padding: 10px 12px; outline: none; resize: none;
+}
+.gh-poll-input:focus { border-color: var(--gh-accent); }
+.gh-poll-create { margin-top: 6px; padding: 13px; border-radius: 12px; background: var(--gh-accent); color: #fff; font-size: 16px; font-weight: 600; }
+
+.gh-stk-host { position: relative; max-width: 100%; }
+.gh-msg-stk-layer { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.gh-msg-stk { position: absolute; width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; pointer-events: auto; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35)); }
+.gh-msg-stk img { width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: none; user-select: none; -webkit-user-select: none; }
+.gh-msg-stk-emoji { font-size: 44px; line-height: 1; }
+.gh-gx-pick-body { min-height: 260px; }
+.gh-chat-sheet .gh-gif-tabs { padding: 4px 0 8px; }
+.gh-gx-stk-grid { padding: 4px 0 12px; }
+.gh-gx-place { position: absolute; inset: 0; z-index: 900; background: rgba(0,0,0,0.25); touch-action: none; }
+.gh-gx-place-stk { position: absolute; width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.5)); pointer-events: none; }
+.gh-gx-place-stk img { width: 100%; height: 100%; object-fit: contain; }
+.gh-gx-place-bar {
+  position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px calc(10px + var(--gh-safe-b)); background: var(--gh-bg-header); border-top: 0.5px solid var(--gh-divider);
+}
+.gh-gx-place-hint { flex: 1; text-align: center; font-size: 12.5px; color: var(--gh-text-secondary); }
+.gh-gx-place-btn { padding: 8px 14px; border-radius: 10px; font-size: 15px; color: var(--gh-text); background: var(--gh-bg-panel-2); }
+.gh-gx-place-done { background: var(--gh-accent); color: #fff; font-weight: 600; }

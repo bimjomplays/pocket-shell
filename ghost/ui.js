@@ -263,6 +263,7 @@
     clearRetainedMessages: () => bridge.call("clearRetainedMessages"),
     searchFriends: (q) => bridge.call("searchFriends", [q]),
     birthdays: () => bridge.call("birthdays"),
+    lastActive: () => bridge.call("lastActive"),
     findUsers: (q) => bridge.call("findUsers", [q]),
     friendRequests: () => bridge.call("friendRequests"),
     addFriend: (id) => bridge.call("addFriend", [id]),
@@ -563,6 +564,7 @@
       gnStart(ctx).catch((e) => gnTrail("start " + (e && e.message)));
       notifyStart(ctx).catch((e) => uiTrail("notify start " + (e && e.message)));
       bdayStart(ctx);
+      lsStart(ctx);
       api.friendRequests().then((r) => { ctx.friendReqCount = (r || []).length; }).catch(() => {});
       ctx.revealHome = () => { boot.classList.add("gh-boot-fade"); markReady(true); };
       if (state.listShown) ctx.revealHome();
@@ -1223,6 +1225,7 @@
     const avatarWrap = rowEl.querySelector(".gh-row-avatar-wrap");
     avatarWrap.insertBefore(makeAvatar(convAvatarUser(conv), 52), avatarWrap.firstChild);
     gnSyncBadge(avatarWrap, convAvatarUser(conv));
+    lsSyncDot(avatarWrap, convAvatarUser(conv));
     rowEl._avSig = avatarSig(conv);
     // tap = open the chat; double-tap = snap camera for this person (like Snapchat). The chat opens at once on the
     // first tap (no waiting to see if a second one comes); the camera then slides up over it.
@@ -1344,6 +1347,7 @@
       if (old) old.replaceWith(fresh); else wrap.insertBefore(fresh, wrap.firstChild);
       gnSyncBadge(wrap, convAvatarUser(conv));
     }
+    lsSyncDot(rowEl.querySelector(".gh-row-avatar-wrap"), convAvatarUser(conv));
     rowEl.dataset.unread = conv.unreadCount > 0 || conv.hasUnreadSnap ? "1" : "0";
     rowEl.querySelector(".gh-row-name").textContent = conv.title || "Unknown";
     bdaySyncCake(rowEl.querySelector(".gh-row-top"), rowEl.querySelector(".gh-row-name"), !conv.isGroup && conv.participants && conv.participants[0]);
@@ -1515,6 +1519,9 @@
       unreadBoundaryComputed: false,
       pendingUnreadForDivider: 0,
     };
+    conv.pinbar = gxPinbarEl(ctx); // pinned messages (chat extras), right under the header
+    gxLocalLoad().catch(() => {});
+    screen.querySelector(".gh-header").after(conv.pinbar);
 
     screen.querySelector('[data-act="back"]').addEventListener("click", () => closeConversationScreen(ctx));
     conv.textarea.addEventListener("input", () => {
@@ -1634,6 +1641,7 @@
       conv.subEl.dataset.typing = "0";
       conv.subEl.dataset.here = "0";
       conv.subEl.dataset.gnstatus = "0";
+      conv.subEl.dataset.lastseen = "0";
       // The bridge has no presence/"last seen" data (API.md) — showing one would be fabricated, so a 1:1
       // chat's subtitle is simply omitted (matches Telegram's own behaviour when it has nothing to say).
       // A group's member count IS real data (conv.participants, already part of the contract).
@@ -1643,6 +1651,10 @@
       } else if (gstatus) { // their Ghost status line, while it lasts
         conv.subEl.textContent = gstatus.text;
         conv.subEl.dataset.gnstatus = "1";
+        conv.subEl.style.display = "";
+      } else if (other1 && lsText(other1.id)) { // when they were last on Snapchat (Snapchat Web's own data)
+        conv.subEl.textContent = lsText(other1.id);
+        conv.subEl.dataset.lastseen = lsOnline(other1.id) ? "now" : "1";
         conv.subEl.style.display = "";
       } else {
         conv.subEl.textContent = "";
@@ -1903,11 +1915,18 @@
     updateTypingIndicator(ctx);
   }
 
-  function groupsFor(all, start, end, unreadBoundaryIndex) {
+  // extras: Ghost items for the timeline (chat extras: poll cards, "pinned" lines), sorted by .ts - each goes
+  // between the messages around its time; what's older than the window stays out, what's newer than the newest
+  // message goes at the end (only when the window reaches the end)
+  function groupsFor(all, start, end, unreadBoundaryIndex, extras) {
     const groups = [];
     let cur = null;
+    let xi = 0;
+    extras = extras || [];
+    if (start > 0) while (xi < extras.length && extras[xi].ts <= all[start - 1].ts) xi++;
     for (let i = start; i < end; i++) {
       const m = all[i];
+      while (xi < extras.length && extras[xi].ts < m.ts) { groups.push({ ghost: extras[xi++] }); cur = null; }
       // the divider also breaks bubble grouping: the first unread message always starts a fresh run,
       // never continues visually from the last-read one above the divider
       if (unreadBoundaryIndex != null && i === unreadBoundaryIndex) { groups.push({ unreadDivider: true }); cur = null; }
@@ -1931,6 +1950,7 @@
         groups.push(cur);
       } else cur.items.push(m);
     }
+    if (end === all.length) while (xi < extras.length) groups.push({ ghost: extras[xi++] });
     return groups;
   }
 
@@ -1945,7 +1965,11 @@
     const mEl = conv.messages, fromBottom = mEl.scrollHeight - mEl.scrollTop, wasBottom = conv.atBottom;
     const anchor = wasBottom ? null : chatAnchor(mEl);
     const frag = document.createDocumentFragment();
-    const groups = groupsFor(all, start, end, conv.unreadBoundaryIndex);
+    // chat extras (pins, polls, stickers) of the open chat; a swipe-peek shows plain messages
+    const gxConv = ctx.state.currentConvId;
+    conv._gx = gxConv ? gxIndex(ctx, gxConv) : null;
+    const gxLine = conv._gx ? gxTimeline(ctx, gxConv, conv._gx) : [];
+    const groups = groupsFor(all, start, end, conv.unreadBoundaryIndex, gxLine);
     const meId = ctx.state.me && ctx.state.me.id;
     // messages that look exactly the same as last paint keep their DOM node (photos stay decoded, so nothing
     // collapses and regrows for a frame - the "goes up and comes back" flash on a reaction or a receipt)
@@ -1960,6 +1984,7 @@
       if (g.unreadDivider) { frag.appendChild(unreadSepEl()); continue; }
       if (g.daySep) frag.appendChild(sepEl(g.daySep));
       if (g.system) { frag.appendChild(systemLineEl(g.system, ctx)); continue; }
+      if (g.ghost) { frag.appendChild(g.ghost.kind === "poll" ? gxPollCardEl(ctx, gxConv, g.ghost.pid, g.ghost.it, conv._gx.votes.get(g.ghost.pid)) : gxPinLineEl(ctx, gxConv, g.ghost.it)); continue; }
       const isMe = g.from && meId && g.from.id === meId;
       const groupEl = el("div", "gh-group");
       groupEl.dataset.me = isMe ? "1" : "0";
@@ -1985,6 +2010,7 @@
     conv.stickUntil = nowMs() + 150; // the scroll events our own repaint causes aren't the user scrolling up
     for (const w of oldWraps.values()) forgetChatVideos(w); // (bubbles that weren't reused are gone for good)
     conv.messages.replaceChildren(conv.topSpacer, frag, conv.bottomSpacer);
+    if (gxConv) gxPaintPinbar(ctx);
     conv._anchor = anchor ? Object.assign(anchor, { until: nowMs() + 1500, top: mEl.scrollTop }) : null;
     const restore = () => {
       conv.stickUntil = nowMs() + 150;
@@ -2127,7 +2153,7 @@
     const convId = ctx.state.currentConvId;
     return [m.kind, m.ts, m.text || "", reacts, media, reply, m.saved ? 1 : 0, m.opened ? 1 : 0, m.replayable ? 1 : 0, m.snapSound ? 1 : 0,
       m.edited ? 1 : 0, m.pending ? 1 : 0, m.failed ? 1 : 0, m.retained ? 1 : 0, m.retainedMedia ? 1 : 0, m.mediaUnavailable ? 1 : 0,
-      m.status || "", isMe ? 1 : 0, isLast ? 1 : 0, (ctx.conv && ctx.conv.searchQ) || "", convId && isBookmarked(convId, m.id) ? 1 : 0, gnCardSig(ctx, m, isMe)].join("\u0001");
+      m.status || "", isMe ? 1 : 0, isLast ? 1 : 0, (ctx.conv && ctx.conv.searchQ) || "", convId && isBookmarked(convId, m.id) ? 1 : 0, gnCardSig(ctx, m, isMe), gxStickerSig(ctx, m)].join("\u0001");
   }
   function reusedWrapEl(ctx, oldWraps, m, isMe, isLast, paintKey) {
     const sig = wrapSig(ctx, m, isMe, isLast);
@@ -2149,7 +2175,7 @@
     if (m.replyTo) swipe.appendChild(replyQuoteEl(m.replyTo, ctx));
     if (m.retained && m.mediaUnavailable) {
       const missing = el("div", "gh-bubble"); missing.textContent = "Media wasn't captured before deletion"; swipe.appendChild(missing);
-    } else swipe.appendChild(bubbleEl(ctx, m, isMe, isLast));
+    } else { const b = bubbleEl(ctx, m, isMe, isLast); b.dataset.gxb = "1"; swipe.appendChild(gxWrapBubble(ctx, m, b)); }
     if (m.retained) { const label = el("div", "gh-retained-label"); label.textContent = "Deleted · kept on this device"; swipe.appendChild(label); }
     if (ctx.state.currentConvId && isBookmarked(ctx.state.currentConvId, m.id)) { wrap.dataset.bm = "1"; const bm = el("span", "gh-bm-mark"); bm.appendChild(icon("bookmark", 11)); swipe.appendChild(bm); }
     if (m.reactions && m.reactions.length) swipe.appendChild(reactionsEl(ctx, m));
@@ -3309,6 +3335,8 @@
         <div class="gh-action-item" data-act="copy"></div>
         <div class="gh-action-item" data-act="save"></div>
         <div class="gh-action-item" data-act="bookmark"></div>
+        <div class="gh-action-item" data-act="pin"></div>
+        <div class="gh-action-item" data-act="stick"></div>
         <div class="gh-action-item" data-act="fav"></div>
         <div class="gh-action-item" data-act="photos"></div>
         <div class="gh-action-item gh-action-danger" data-act="delete"></div>
@@ -3334,6 +3362,10 @@
     saveItem.append(icon("star"), textSpan("Save"));
     const bookmarkItem = sheet.querySelector('[data-act="bookmark"]');
     bookmarkItem.append(icon("bookmark"), textSpan("Bookmark"));
+    const pinItem = sheet.querySelector('[data-act="pin"]');
+    pinItem.append(icon("pin"), textSpan("Pin"));
+    const stickItem = sheet.querySelector('[data-act="stick"]');
+    stickItem.append(icon("emoji"), textSpan("Add Sticker"));
     const favItem = sheet.querySelector('[data-act="fav"]');
     favItem.append(icon("emoji"), textSpan("Add to Favorite Stickers"));
     const photosItem = sheet.querySelector('[data-act="photos"]');
@@ -3345,7 +3377,7 @@
     overlaysRoot.appendChild(sheet);
     function textSpan(t) { const s = el("span"); s.textContent = t; return s; }
 
-    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, bookmarkItem, favItem, delItem, photosItem, message: null, liftedEl: null };
+    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, bookmarkItem, pinItem, stickItem, favItem, delItem, photosItem, message: null, liftedEl: null };
     function closeAction() {
       if (s.liftedEl) { s.liftedEl.classList.remove("gh-msg-lifted"); s.liftedEl = null; }
       closeSheetGeneric(backdrop, sheet);
@@ -3403,6 +3435,13 @@
     };
     s.bookmarkItem.querySelector("span").textContent = isBookmarked(convId, message.id) ? "Remove Bookmark" : "Bookmark";
     s.bookmarkItem.onclick = () => { s.close(); haptic("light"); toggleBookmark(ctx, convId, message); };
+    // chat extras: pin (for both with a connected Ghost friend) and stick a sticker on the bubble
+    const pinned = ctx.conv && ctx.conv._gx && ctx.conv._gx.pins.some((p) => p.k === "pin:" + gxMsgKey(message.id));
+    s.pinItem.querySelector("span").textContent = pinned ? "Unpin" : "Pin";
+    s.pinItem.style.display = message.retained || message.pending ? "none" : "";
+    s.pinItem.onclick = () => { s.close(); haptic("light"); setTimeout(() => gxPinMenu(ctx, convId, message), 320); };
+    s.stickItem.style.display = message.retained || message.pending ? "none" : "";
+    s.stickItem.onclick = () => { s.close(); haptic("light"); setTimeout(() => gxOpenStickerPicker(ctx, convId, message), 320); };
     const isSticker = message.kind === "sticker" || message.kind === "gif";
     s.favItem.style.display = isSticker ? "" : "none";
     s.favItem.onclick = () => { s.close(); favoriteSticker(ctx, message, wrapEl); };
@@ -4722,6 +4761,8 @@
       setRow(g, { label: "Send Read Receipts", toggle: { get: () => !!pref("readReceipts"), set: (v) => setPref(ctx, "readReceipts", v) } });
       g = setGroup(body, null, "Friends see \"typing…\" while you write to them.");
       setRow(g, { label: "Show When I'm Typing", toggle: { get: () => !!pref("showTyping"), set: (v) => setPref(ctx, "showTyping", v) } });
+      g = setGroup(body, null, "Shows when friends were last on Snapchat (a green dot and \"Active 5m ago\"), from Snapchat's own data. Only changes what you see in Ghost, not what Snapchat shows others about you.");
+      setRow(g, { label: "Show Last Active", toggle: { get: () => pref("showLastActive") !== false, set: (v) => { setPref(ctx, "showLastActive", v); lsRepaint(ctx); } } });
       g = setGroup(body, null, "Covers Ghost in the app switcher and while your screen is recorded or mirrored. (iPhones don't let apps block a normal screenshot.)");
       setRow(g, { label: "Privacy Shield", toggle: { get: () => nativeSetting("privacyShield", true) !== false, set: (v) => setNativeSetting("privacyShield", v) } });
       g = setGroup(body, null, "Blurs message previews in the chat list until you open the chat.");
@@ -5565,6 +5606,8 @@
       tool("search", "Search", () => openChatSearch(ctx));
       tool("photo", "Media", () => { ctx.settings.galleryConv = convId; ctx.settings.galleryTab = "media"; openSettingsAt(ctx, "gallery"); });
       tool("bookmark", "Bookmarks", () => { ctx.settings.bookmarksConv = convId; openSettingsAt(ctx, "bookmarks"); });
+      tool("pin", "Pinned", () => setTimeout(() => gxOpenPinList(ctx), 320));
+      if (gxFriendSnap(ctx, convId)) tool("hash", "Poll", () => setTimeout(() => gxOpenPollCreator(ctx), 320));
       s.sheet.appendChild(tg);
     }
     // their nickname (Ghost's own - see nickify)
@@ -13072,6 +13115,60 @@
     bday.map = clean; bday.day = today;
     if (changed) refreshAvatars(ctx);
   }
+  // =====================================================================================================
+  // Last active: Snapchat Web's own "when was this friend last on Snapchat" map (bridge lastActive(); Snapchat
+  // calls anything within 10 minutes "online"). A green dot on 1:1 chats in the list, "Active 25m ago" under the
+  // name in a chat. Settings > Privacy > Show Last Active turns it off (in Ghost only).
+  // =====================================================================================================
+  const LS_ONLINE_MS = 10 * 60 * 1000;
+  const lastSeen = { map: {}, at: 0 };
+  function lsOn() { return pref("showLastActive") !== false; }
+  function lsWhen(userId) { const t = lastSeen.map[userId]; return typeof t === "number" && t > 0 ? t : 0; }
+  function lsOnline(userId) { const t = lsWhen(userId); return !!t && Date.now() - t < LS_ONLINE_MS; }
+  function lsFormat(t, now) {
+    now = now || Date.now();
+    const d = Math.max(0, now - t);
+    if (d < LS_ONLINE_MS) return "Active now";
+    if (d < 3600e3) return "Active " + Math.floor(d / 60e3) + "m ago";
+    const then = new Date(t), today = new Date(now);
+    const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+    if (t >= startToday || d < 6 * 3600e3) return "Active " + Math.floor(d / 3600e3) + "h ago";
+    if (t >= startToday - 864e5) return "Active yesterday";
+    const sameYear = then.getFullYear() === today.getFullYear();
+    return "Active " + then.toLocaleDateString(undefined, sameYear ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+  }
+  function lsText(userId) { if (!lsOn()) return ""; const t = lsWhen(userId); return t ? lsFormat(t) : ""; }
+  function lsSyncDot(wrap, user) {
+    if (!wrap) return;
+    const old = wrap.querySelector(":scope > .gh-ls-dot");
+    const want = lsOn() && !!(user && !user.members && user.id && lsOnline(user.id));
+    if (want && !old) { const d = el("span", "gh-ls-dot"); d.setAttribute("aria-label", "Active now"); wrap.appendChild(d); }
+    else if (!want && old) old.remove();
+  }
+  function lsRepaint(ctx) {
+    const home = ctx.home;
+    if (home && home.rows) for (const [id, row] of home.rows) {
+      const c = ctx.state.convById.get(id);
+      if (c) lsSyncDot(row.el.querySelector(".gh-row-avatar-wrap"), convAvatarUser(c));
+    }
+    const cd = ctx.state.currentConvId && ctx.state.convById.get(ctx.state.currentConvId);
+    if (cd && ctx.conv) updateConvHeader(ctx, cd);
+  }
+  async function lsRefresh(ctx) {
+    let m = null;
+    try { m = await api.lastActive(); } catch (e) { return; }
+    if (!m || typeof m !== "object") return;
+    lastSeen.map = m; lastSeen.at = Date.now();
+    lsRepaint(ctx); // even when the map is the same: "5m ago" becomes "6m ago"
+  }
+  function lsStart(ctx) {
+    setTimeout(() => lsRefresh(ctx), window.__ghostMockFast ? 40 : 3000);
+    setInterval(() => { if (!document.hidden && lsOn()) lsRefresh(ctx); }, 30e3);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden && lsOn()) lsRefresh(ctx); });
+  }
+  // for the test rig
+  window.__ghostLastSeen = { format: lsFormat, refresh: (ctx) => lsRefresh(ctx) };
+
   function bdayStart(ctx) {
     setTimeout(() => bdayRefresh(ctx, true), window.__ghostMockFast ? 30 : 4000);
     setInterval(() => { if (!document.hidden) bdayRefresh(ctx, false); }, 60e3); // (also rolls the 🎂 over at midnight)
@@ -13171,7 +13268,9 @@
       save: (s) => storage.set("ghostNet", s),
       picGet: (k) => wallDB.get("gn:" + k), picPut: (k, b) => wallDB.put("gn:" + k, b), picDel: (k) => wallDB.del("gn:" + k),
       me: () => ctx.state.me, log: gnTrail,
+      stickerBlob: (sid) => wallDB.get("gxstk:" + sid), // (chat extras: a friend asks again for a picture sticker you put on)
       onChange: (what, d) => {
+        if (what === "extras") { if (d && d.snap) gxChangedSnap(ctx, d.snap); return; }
         if (d && d.keyChanged) { const cd = Array.from(ctx.state.convById.values()).find((c) => !c.isGroup && c.participants && c.participants[0] && c.participants[0].id === d.snap); ctx.showToast(((cd && cd.title) || "A friend") + "'s Ghost has new keys (reinstalled?) · reconnected"); }
         gnChanged(ctx);
       },
@@ -13552,6 +13651,521 @@
       await gn.net.disconnect(f.id).catch(() => {});
       ctx.showToast("Disconnected");
     } });
+  }
+
+  // =====================================================================================================
+  // Chat extras (1.10): Telegram-style pinned messages, polls and stickers stuck on messages.
+  // With a connected Ghost friend (1:1) they're shared state synced by network.js (items {k, v, by, d}, see its header);
+  // "Pin for me" and stickers in other chats stay on this phone (gxLocal). Nothing is put inside Snapchat messages.
+  //   pin:<msgId>          {t: message time, p: preview, f: sender name, kd: kind}
+  //   poll:<pid>           {q, o: [options], m: multiple choice, c: closes at (0 = never), x: closed, at: created, cr: creator Ghost ID}
+  //   vote:<pid>:<voter>   {s: [option indexes]} (only the voter writes it)
+  //   stk:<msgId>:<sid>    {kd: "e" emoji | "b" Bitmoji | "i" picture, r, a, ref, x, y (0..1 of the bubble), s, rot}
+  // =====================================================================================================
+  const GX_LOCAL_KEY = "ghostChatExtrasLocal";
+  let gxLocal = null;
+  async function gxLocalLoad() {
+    if (gxLocal) return gxLocal;
+    let v = null; try { v = await storage.get(GX_LOCAL_KEY, {}); } catch (e) {}
+    gxLocal = v && typeof v === "object" ? v : {};
+    return gxLocal;
+  }
+  function gxLocalSave() { storage.set(GX_LOCAL_KEY, gxLocal || {}).catch(() => {}); }
+  const gxRand = (n) => { const a = crypto.getRandomValues(new Uint8Array(n)); return Array.from(a, (b) => "abcdefghijkmnpqrstuvwxyz23456789"[b & 31]).join(""); };
+  // text from the friend's Ghost: no control or bidi-override characters (they could fake what a pin/poll says)
+  const gxText = (t) => String(t == null ? "" : t).replace(/[\u0000-\u001f\u202a-\u202e\u2066-\u2069]/g, " ");
+  const gxMsgKey = (id) => String(id || "").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 96);
+  function gxOther(ctx, convId) {
+    const cd = ctx.state.convById.get(convId);
+    if (!cd || cd.isGroup) return null;
+    return (cd.participants && cd.participants[0]) || null;
+  }
+  // the connected Ghost friend of this 1:1 chat (null: not connected / Ghost Network off / a group)
+  function gxFriendSnap(ctx, convId) { const o = gxOther(ctx, convId); return o && gnOn() && gn.net && gn.net.connected(o.id) ? o.id : null; }
+  // every live extra of a chat: shared ones (with who wrote them) and your own local ones
+  function gxItems(ctx, convId) {
+    const out = [];
+    const snap = gxFriendSnap(ctx, convId);
+    const sh = snap ? gn.net.extras(snap) : null;
+    if (sh) for (const i of sh.items) if (i.d) out.push(Object.assign({}, i, { shared: true, mine: i.by === sh.myId }));
+    const loc = (gxLocal && gxLocal[convId]) || {};
+    for (const i of Object.values(loc)) if (i && i.d) out.push(Object.assign({}, i, { shared: false, mine: true }));
+    return out;
+  }
+  function gxIndex(ctx, convId) {
+    const items = gxItems(ctx, convId);
+    const pins = [], polls = new Map(), votes = new Map(), stk = new Map();
+    for (const i of items) {
+      const kind = i.k.slice(0, i.k.indexOf(":"));
+      if (kind === "pin") pins.push(i);
+      else if (kind === "poll") polls.set(i.k.slice(5), i);
+      else if (kind === "vote") { const pid = i.k.split(":")[1]; if (!votes.has(pid)) votes.set(pid, []); votes.get(pid).push(i); }
+      else if (kind === "stk") { const mid = i.k.split(":")[1]; if (!stk.has(mid)) stk.set(mid, []); stk.get(mid).push(i); }
+    }
+    // the same message pinned for both and for you: once
+    const seen = new Set(), pinsU = [];
+    for (const p of pins.sort((a, b) => (b.shared ? 1 : 0) - (a.shared ? 1 : 0))) { if (seen.has(p.k)) continue; seen.add(p.k); pinsU.push(p); }
+    pinsU.sort((a, b) => (a.d.t || 0) - (b.d.t || 0));
+    return { pins: pinsU, polls, votes, stk };
+  }
+  function gxWho(ctx, convId, it) {
+    if (it.mine) return "You";
+    const o = gxOther(ctx, convId);
+    return (o && (gnNameFor(o.id) || o.name)) || "Your friend";
+  }
+  // write one item: shared with the connected friend, or only here
+  async function gxSet(ctx, convId, k, d, shared) {
+    if (shared) {
+      const snap = gxFriendSnap(ctx, convId);
+      if (!snap) throw new Error("Not connected on Ghost");
+      await gn.net.setExtra(snap, k, d);
+      return;
+    }
+    await gxLocalLoad();
+    const box = gxLocal[convId] || (gxLocal[convId] = {});
+    if (d == null) delete box[k]; else box[k] = { k, v: Date.now(), by: "me", d };
+    gxLocalSave();
+    gxChanged(ctx, convId);
+  }
+  // something changed (here or from the friend's Ghost): the open chat repaints (bubbles, timeline, pinned bar)
+  function gxChanged(ctx, convId) {
+    const conv = ctx.conv;
+    if (!conv || !ctx.state.currentConvId || (convId && convId !== ctx.state.currentConvId)) return;
+    clearTimeout(conv._gxT);
+    conv._gxT = setTimeout(() => { if (ctx.state.currentConvId) { try { paintWindow(ctx, conv); } catch (e) {} gxPaintPinbar(ctx); } }, 60);
+  }
+  function gxChangedSnap(ctx, snap) {
+    const convId = ctx.state.currentConvId;
+    const o = convId && gxOther(ctx, convId);
+    if (o && o.id === snap) gxChanged(ctx, convId);
+  }
+  // what the timeline gets besides Snapchat's messages: "📌 … pinned …" lines and poll cards, by time
+  function gxTimeline(ctx, convId, ix) {
+    const out = [];
+    for (const p of ix.pins) if (p.shared) out.push({ ts: p.v, kind: "pinline", it: p });
+    for (const [pid, p] of ix.polls) out.push({ ts: p.d.at || p.v, kind: "poll", pid, it: p });
+    return out.sort((a, b) => a.ts - b.ts);
+  }
+  function gxPreview(m) {
+    const kinds = { "chat-media": "Photo", snap: "Snap", sticker: "Sticker", gif: "GIF", audio: "Voice message", "voice-note": "Voice message", share: "Shared link", location: "Location" };
+    const t = m && m.kind === "text" ? String(m.text || "") : (m && (kinds[m.kind] || (m.text ? String(m.text) : "Message"))) || "Message";
+    return t.replace(/\s+/g, " ").trim().slice(0, 150);
+  }
+
+  // ---- pinned messages ----
+  function gxPinbarEl(ctx) {
+    const bar = el("div", "gh-pinbar");
+    bar.dataset.show = "0";
+    bar.innerHTML = '<div class="gh-pinbar-strip"></div><button class="gh-pinbar-body gh-press"><div class="gh-pinbar-title"></div><div class="gh-pinbar-text"></div></button><button class="gh-pinbar-list gh-hit" aria-label="All pinned messages"></button><button class="gh-pinbar-x gh-hit" aria-label="Unpin"></button>';
+    bar.querySelector(".gh-pinbar-list").appendChild(icon("more", 18));
+    bar.querySelector(".gh-pinbar-x").appendChild(icon("close", 16));
+    bar.querySelector(".gh-pinbar-body").addEventListener("click", () => {
+      const conv = ctx.conv, pins = conv && conv._pins;
+      if (!pins || !pins.length) return;
+      haptic("light");
+      const i = Math.min(conv._pinCur == null ? pins.length - 1 : conv._pinCur, pins.length - 1);
+      jumpToMessage(ctx, gxPinMsgId(ctx, pins[i]));
+      conv._pinCur = i > 0 ? i - 1 : pins.length - 1; // Telegram: each tap goes one pin further back
+      gxPaintPinbar(ctx);
+    });
+    bar.querySelector(".gh-pinbar-list").addEventListener("click", () => { haptic("light"); gxOpenPinList(ctx); });
+    bar.querySelector(".gh-pinbar-x").addEventListener("click", async () => {
+      const conv = ctx.conv, pins = conv && conv._pins;
+      if (!pins || !pins.length) return;
+      const p = pins[Math.min(conv._pinCur == null ? pins.length - 1 : conv._pinCur, pins.length - 1)];
+      if (!(await confirmSheet(ctx, p.shared ? "Unpin this message for both of you?" : "Unpin this message?", "Unpin"))) return;
+      gxUnpin(ctx, ctx.state.currentConvId, p);
+    });
+    return bar;
+  }
+  // a pin's key holds a cleaned-up message id; the message itself is found by comparing the same way
+  function gxPinMsgId(ctx, p) {
+    const want = p.k.slice(4);
+    const m = (ctx.conv && ctx.conv._all || []).find((x) => gxMsgKey(x.id) === want);
+    return m ? m.id : want;
+  }
+  function gxPaintPinbar(ctx) {
+    const conv = ctx.conv;
+    if (!conv || !conv.pinbar) return;
+    const convId = ctx.state.currentConvId;
+    const ix = convId ? gxIndex(ctx, convId) : { pins: [] };
+    const pins = ix.pins;
+    conv._pins = pins;
+    if (conv._pinConv !== convId) { conv._pinConv = convId; conv._pinCur = null; }
+    const bar = conv.pinbar;
+    if (!pins.length) { bar.dataset.show = "0"; conv._pinCur = null; return; }
+    if (conv._pinCur == null || conv._pinCur >= pins.length) conv._pinCur = pins.length - 1;
+    const i = conv._pinCur, p = pins[i];
+    bar.dataset.show = "1";
+    bar.querySelector(".gh-pinbar-title").textContent = pins.length > 1 ? "Pinned Message #" + (i + 1) : "Pinned Message";
+    bar.querySelector(".gh-pinbar-text").textContent = gxText((p.d.f ? p.d.f + ": " : "") + (p.d.p || "Message")) + (p.shared ? "" : "  · only you");
+    const strip = bar.querySelector(".gh-pinbar-strip");
+    strip.innerHTML = "";
+    // up to 4 segments; with more pins the window slides so the current one stays visible
+    const n = Math.min(pins.length, 4), first = Math.max(0, Math.min(i - 1, pins.length - n));
+    for (let j = 0; j < n; j++) { const seg = el("i"); seg.dataset.on = first + j === i ? "1" : "0"; strip.appendChild(seg); }
+  }
+  async function gxPin(ctx, convId, m, shared) {
+    const k = "pin:" + gxMsgKey(m.id);
+    const meId = ctx.state.me && ctx.state.me.id;
+    const f = m.from && m.from.id === meId ? "" : ((m.from && m.from.name) || "");
+    try {
+      await gxSet(ctx, convId, k, { t: Number(m.ts) || Date.now(), p: gxPreview(m), f: f.slice(0, 60), kd: String(m.kind || "").slice(0, 20) }, shared);
+      if (ctx.conv) ctx.conv._pinCur = null;
+      ctx.showToast(shared ? "Pinned for both of you" : "Pinned for you");
+    } catch (e) { ctx.showToast("Couldn't pin that"); }
+  }
+  async function gxUnpin(ctx, convId, p) {
+    try { await gxSet(ctx, convId, p.k, null, p.shared); ctx.showToast("Unpinned"); }
+    catch (e) { ctx.showToast("Couldn't unpin that"); }
+  }
+  async function gxPinMenu(ctx, convId, m) {
+    await gxLocalLoad();
+    const ix = gxIndex(ctx, convId), k = "pin:" + gxMsgKey(m.id);
+    const cur = ix.pins.find((p) => p.k === k);
+    if (cur) { gxUnpin(ctx, convId, cur); return; }
+    if (!gxFriendSnap(ctx, convId)) { gxPin(ctx, convId, m, false); return; }
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const t = el("div", "gh-set-group-title"); t.textContent = "Pin Message"; s.sheet.appendChild(t);
+    const g = el("div", "gh-set-group"); s.sheet.appendChild(g);
+    setRow(g, { icon: "pin", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Pin for Both", onClick: () => { closeSheetGeneric(s.backdrop, s.sheet); gxPin(ctx, convId, m, true); } });
+    setRow(g, { icon: "pin", tint: "#8e8e93", label: "Pin for Me", onClick: () => { closeSheetGeneric(s.backdrop, s.sheet); gxPin(ctx, convId, m, false); } });
+    const foot = el("div", "gh-set-group-foot"); foot.textContent = "Pin for Both shows it at the top of this chat in their Ghost too."; s.sheet.appendChild(foot);
+    openSheetGeneric(s.backdrop, s.sheet);
+  }
+  function gxOpenPinList(ctx) {
+    const convId = ctx.state.currentConvId;
+    const pins = (ctx.conv && ctx.conv._pins) || [];
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const t = el("div", "gh-set-group-title"); t.textContent = pins.length + (pins.length === 1 ? " Pinned Message" : " Pinned Messages"); s.sheet.appendChild(t);
+    const g = el("div", "gh-set-group gh-pin-list"); s.sheet.appendChild(g);
+    if (!pins.length) { const e = el("div", "gh-set-group-foot"); e.textContent = "No pinned messages. Hold a message and tap Pin."; s.sheet.appendChild(e); }
+    for (const p of pins.slice().reverse()) {
+      const row = el("div", "gh-set-row gh-pin-row gh-press");
+      const col = el("div", "gh-set-label");
+      const a = el("div", "gh-pin-row-who"); a.textContent = gxText(p.d.f || "You") + " · " + fmtDaySeparator(p.d.t) + (p.shared ? "" : " · only you");
+      const b = el("div", "gh-pin-row-text"); b.textContent = gxText(p.d.p || "Message");
+      col.append(a, b);
+      const x = el("button", "gh-pin-row-x gh-hit"); x.setAttribute("aria-label", "Unpin"); x.appendChild(icon("close", 14));
+      x.addEventListener("click", (e) => { e.stopPropagation(); closeSheetGeneric(s.backdrop, s.sheet); gxUnpin(ctx, convId, p); });
+      row.append(col, x);
+      row.addEventListener("click", () => { closeSheetGeneric(s.backdrop, s.sheet); jumpToMessage(ctx, gxPinMsgId(ctx, p)); });
+      g.appendChild(row);
+    }
+    openSheetGeneric(s.backdrop, s.sheet);
+  }
+  function gxPinLineEl(ctx, convId, p) {
+    const e = el("div", "gh-system-line gh-gx-line gh-press");
+    const span = el("span");
+    span.textContent = "📌 " + gxWho(ctx, convId, p) + " pinned “" + gxText(p.d.p || "a message").slice(0, 60) + "”";
+    e.appendChild(span);
+    e.addEventListener("click", () => jumpToMessage(ctx, gxPinMsgId(ctx, p)));
+    return e;
+  }
+
+  // ---- polls ----
+  function gxPollClosed(p) { return !!(p.d.x || (p.d.c && p.d.c <= Date.now())); }
+  function gxPollCardEl(ctx, convId, pid, p, votes) {
+    const sh = gxFriendSnap(ctx, convId) ? gn.net.extras(gxFriendSnap(ctx, convId)) : null;
+    const myId = sh && sh.myId;
+    const closed = gxPollClosed(p);
+    const card = el("div", "gh-poll");
+    card.dataset.me = p.mine ? "1" : "0";
+    card.dataset.pollId = pid;
+    const head = el("div", "gh-poll-kind");
+    head.textContent = (closed ? "Final results" : p.d.m ? "Poll · multiple choice" : "Poll") + " · " + gxWho(ctx, convId, p);
+    const q = el("div", "gh-poll-q"); q.textContent = gxText(p.d.q);
+    card.append(head, q);
+    const live = (votes || []).filter((v) => v.d && Array.isArray(v.d.s) && v.d.s.length);
+    const counts = p.d.o.map((_, i) => live.filter((v) => v.d.s.includes(i)).length);
+    const voters = live.length;
+    const mine = live.find((v) => v.by === myId);
+    const mySel = new Set(mine ? mine.d.s : []);
+    const showResults = closed || !!mine;
+    p.d.o.forEach((opt, i) => {
+      const row = el("button", "gh-poll-opt gh-press");
+      row.dataset.on = mySel.has(i) ? "1" : "0";
+      row.disabled = closed;
+      const mark = el("span", "gh-poll-mark"); if (mySel.has(i)) mark.appendChild(icon("check", 12));
+      if (p.d.m) mark.dataset.multi = "1";
+      const label = el("span", "gh-poll-label"); label.textContent = gxText(opt);
+      const pct = el("span", "gh-poll-pct"); pct.textContent = showResults ? Math.round(voters ? (counts[i] * 100) / voters : 0) + "%" : "";
+      const bar = el("span", "gh-poll-bar"); bar.style.width = showResults && voters ? (counts[i] * 100 / voters) + "%" : "0%";
+      row.append(mark, label, pct, bar);
+      row.addEventListener("click", () => {
+        if (closed || !myId) return;
+        haptic("light");
+        let next;
+        if (p.d.m) { next = new Set(mySel); if (next.has(i)) next.delete(i); else next.add(i); next = [...next].sort(); }
+        else next = mySel.has(i) && mySel.size === 1 ? [] : [i];
+        gxSet(ctx, convId, "vote:" + pid + ":" + myId, next.length ? { s: next } : null, true).catch(() => ctx.showToast("Couldn't vote"));
+      });
+      card.appendChild(row);
+    });
+    const foot = el("div", "gh-poll-foot");
+    const cnt = el("button", "gh-poll-count gh-press"); cnt.textContent = voters === 1 ? "1 vote" : voters + " votes";
+    cnt.addEventListener("click", () => { if (voters) gxOpenVoters(ctx, convId, p, live); });
+    foot.appendChild(cnt);
+    if (!closed && p.d.c) { const until = el("span", "gh-poll-until"); until.textContent = "closes " + fmtClock(p.d.c); foot.appendChild(until); }
+    if (!closed && p.mine) {
+      const cl = el("button", "gh-poll-close gh-press"); cl.textContent = "Close Poll";
+      cl.addEventListener("click", async () => {
+        if (!(await confirmSheet(ctx, "Close this poll? Nobody can vote after that.", "Close Poll"))) return;
+        gxSet(ctx, convId, "poll:" + pid, Object.assign({}, p.d, { x: true }), true).catch(() => ctx.showToast("Couldn't close the poll"));
+      });
+      foot.appendChild(cl);
+    }
+    card.appendChild(foot);
+    return card;
+  }
+  function gxOpenVoters(ctx, convId, p, live) {
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const t = el("div", "gh-set-group-title"); t.textContent = gxText(p.d.q); s.sheet.appendChild(t);
+    p.d.o.forEach((opt, i) => {
+      const who = live.filter((v) => v.d.s.includes(i));
+      if (!who.length) return;
+      const tt = el("div", "gh-set-group-title"); tt.textContent = gxText(opt) + " · " + who.length; s.sheet.appendChild(tt);
+      const g = el("div", "gh-set-group"); s.sheet.appendChild(g);
+      for (const v of who) setRow(g, { label: gxWho(ctx, convId, v) });
+    });
+    openSheetGeneric(s.backdrop, s.sheet);
+  }
+  function gxOpenPollCreator(ctx) {
+    const convId = ctx.state.currentConvId;
+    if (!convId || !gxFriendSnap(ctx, convId)) { ctx.showToast("Polls work in chats with a friend you're connected with on Ghost"); return; }
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const t = el("div", "gh-set-group-title"); t.textContent = "New Poll"; s.sheet.appendChild(t);
+    const form = el("div", "gh-poll-form"); s.sheet.appendChild(form);
+    const q = el("textarea", "gh-poll-input gh-poll-qin"); q.rows = 2; q.maxLength = 280; q.placeholder = "Ask a question"; q.id = "gh-poll-q";
+    form.appendChild(q);
+    const optT = el("div", "gh-set-group-title"); optT.textContent = "Options"; form.appendChild(optT);
+    const opts = el("div", "gh-poll-opts"); form.appendChild(opts);
+    const addOpt = (v) => {
+      if (opts.children.length >= 10) return;
+      const i = el("input", "gh-poll-input gh-poll-optin"); i.maxLength = 100; i.placeholder = "Option " + (opts.children.length + 1); if (v) i.value = v;
+      i.addEventListener("input", () => { const all = [...opts.children]; if (i === all[all.length - 1] && i.value.trim() && all.length < 10) addOpt(); });
+      opts.appendChild(i);
+    };
+    addOpt(); addOpt();
+    const g = el("div", "gh-set-group"); form.appendChild(g);
+    let multi = false, closeIn = 0;
+    setRow(g, { label: "Multiple Answers", toggle: { get: () => multi, set: (v) => { multi = v; } } });
+    setRow(g, { label: "Closes", value: "Never", onClick: (row) => {
+      const choices = [[0, "Never"], [3600e3, "In 1 hour"], [86400e3, "In 1 day"], [7 * 86400e3, "In 1 week"]];
+      const i = choices.findIndex((c) => c[0] === closeIn);
+      closeIn = choices[(i + 1) % choices.length][0];
+      const lab = choices[(i + 1) % choices.length][1];
+      if (row._value) row._value.textContent = lab;
+    } });
+    const send = el("button", "gh-poll-create gh-press"); send.textContent = "Create Poll";
+    send.addEventListener("click", async () => {
+      const question = q.value.trim(), options = [...opts.children].map((i) => i.value.trim()).filter(Boolean);
+      if (!question) { ctx.showToast("Add a question"); return; }
+      if (options.length < 2) { ctx.showToast("Add at least 2 options"); return; }
+      const sh = gn.net.extras(gxFriendSnap(ctx, convId));
+      if (!sh || !sh.myId) { ctx.showToast("Ghost isn't ready - try again"); return; }
+      const pid = gxRand(12);
+      try {
+        await gxSet(ctx, convId, "poll:" + pid, { q: question.slice(0, 280), o: options.slice(0, 10).map((o) => o.slice(0, 100)), m: multi, c: closeIn ? Date.now() + closeIn : 0, x: false, at: Date.now(), cr: sh.myId }, true);
+        closeSheetGeneric(s.backdrop, s.sheet); haptic("light");
+        if (ctx.conv) { ctx.conv.atBottom = true; requestAnimationFrame(() => scrollConvToBottom(ctx, true)); }
+      } catch (e) { ctx.showToast("Couldn't create the poll"); }
+    });
+    form.appendChild(send);
+    openSheetGeneric(s.backdrop, s.sheet);
+    setTimeout(() => q.focus({ preventScroll: true }), 350);
+  }
+
+  // ---- stickers on messages ----
+  function gxStickerSig(ctx, m) {
+    const ix = ctx.conv && ctx.conv._gx;
+    const list = ix && ix.stk.get(gxMsgKey(m.id));
+    return list ? list.map((s) => s.k + "@" + s.v).join(",") : "";
+  }
+  const gxStkBlobs = new Map(); // sid -> blob: URL of a picture sticker
+  function gxStickerEl(ctx, convId, it) {
+    const d = it.d;
+    const sid = it.k.split(":")[2];
+    const e = el("div", "gh-msg-stk");
+    e.style.left = (d.x * 100) + "%"; e.style.top = (d.y * 100) + "%";
+    e.style.transform = "translate(-50%,-50%) rotate(" + d.rot + "rad) scale(" + d.s + ")";
+    if (d.kd === "e") { const t = el("span", "gh-msg-stk-emoji"); t.textContent = d.r; e.appendChild(t); }
+    else {
+      const img = el("img"); img.alt = ""; img.draggable = false;
+      if (d.kd === "b") img.src = stickerUrl(d.r, d.a);
+      else {
+        const known = gxStkBlobs.get(sid);
+        if (known) img.src = known;
+        else wallDB.get("gxstk:" + sid).then(async (b) => {
+          if (!b && d.ref && it.shared) {
+            try { b = await gn.net.getPicture(d.ref); await wallDB.put("gxstk:" + sid, b); }
+            catch (err) { const snap = gxFriendSnap(ctx, convId); if (snap && !it.mine) gn.net.askPicture(snap, it.k); }
+          }
+          if (b) { const u = URL.createObjectURL(b); gxStkBlobs.set(sid, u); img.src = u; }
+        }).catch(() => {});
+      }
+      e.appendChild(img);
+    }
+    // tap: who put it there; hold your own: take it off
+    let held = false, timer = null;
+    e.addEventListener("touchstart", (ev) => { held = false; clearTimeout(timer); timer = setTimeout(() => { held = true; if (it.mine) { haptic("medium"); gxRemoveSticker(ctx, convId, it); } }, 550); ev.stopPropagation(); }, { passive: true });
+    for (const t of ["touchmove", "touchend", "touchcancel"]) e.addEventListener(t, () => clearTimeout(timer), { passive: true });
+    e.addEventListener("click", (ev) => { ev.stopPropagation(); if (held) return; ctx.showToast((it.mine ? "You" : gxWho(ctx, convId, it)) + " added this sticker" + (it.mine ? " · hold to remove" : "")); });
+    return e;
+  }
+  async function gxRemoveSticker(ctx, convId, it) {
+    if (!(await confirmSheet(ctx, "Remove this sticker?", "Remove"))) return;
+    try { await gxSet(ctx, convId, it.k, null, it.shared); wallDB.del("gxstk:" + it.k.split(":")[2]).catch(() => {}); }
+    catch (e) { ctx.showToast("Couldn't remove it"); }
+  }
+  // the bubble with its stickers on top (a host shrink-wrapped around the bubble; only when there are stickers)
+  function gxWrapBubble(ctx, m, bubble) {
+    const ix = ctx.conv && ctx.conv._gx;
+    const list = ix && ix.stk.get(gxMsgKey(m.id));
+    if (!list || !list.length) return bubble;
+    const host = el("div", "gh-stk-host");
+    const layer = el("div", "gh-msg-stk-layer");
+    const convId = ctx.state.currentConvId;
+    // (at most 12 per bubble, newest kept: a flood of stickers can't make the phone download hundreds of pictures)
+    for (const it of list.sort((a, b) => a.v - b.v).slice(-12)) layer.appendChild(gxStickerEl(ctx, convId, it));
+    host.append(bubble, layer);
+    return host;
+  }
+  // picking a sticker: emoji, your Bitmoji stickers, your favorites and cut-outs
+  function gxOpenStickerPicker(ctx, convId, m) {
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const tabs = el("div", "gh-gif-tabs"); s.sheet.appendChild(tabs);
+    const body = el("div", "gh-gx-pick-body"); s.sheet.appendChild(body);
+    let urls = []; // favorites' blob: URLs, let go whenever the grid is rebuilt or a sticker is picked
+    const freeUrls = () => { for (const u of urls) URL.revokeObjectURL(u); urls = []; };
+    const pick = (choice) => { freeUrls(); closeSheetGeneric(s.backdrop, s.sheet); setTimeout(() => gxPlaceSticker(ctx, convId, m, choice), 300); };
+    const show = async (tab) => {
+      for (const b of tabs.children) b.dataset.on = b.dataset.tab === tab ? "1" : "0";
+      freeUrls();
+      body.innerHTML = "";
+      if (tab === "emoji") {
+        const grid = el("div", "gh-emoji-grid");
+        for (const e of EMOJI_GRID) { const b = el("button", "gh-emoji-cell gh-press"); b.textContent = e; b.addEventListener("click", () => pick({ kd: "e", r: e })); grid.appendChild(b); }
+        body.appendChild(grid);
+        return;
+      }
+      const grid = el("div", "gh-sticker-grid gh-gx-stk-grid"); body.appendChild(grid);
+      const p = await ensureMyBitmoji(ctx);
+      const tile = (src, choice) => { const b = el("button", "gh-sticker-tile gh-press"); const img = el("img"); img.alt = ""; img.loading = "lazy"; img.src = src; img.addEventListener("error", () => b.remove(), { once: true }); b.appendChild(img); b.addEventListener("click", () => pick(choice)); grid.appendChild(b); };
+      if (tab === "bitmoji") {
+        if (!p.me) { body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "Your Bitmoji hasn't loaded yet" })); return; }
+        let cat = null; try { cat = await loadStickerCatalog(); } catch (e) {}
+        const recent = (await storage.get("ghostStickerRecents", [])).filter((x) => !x.duo).map((x) => x.c);
+        const ids = [...new Set([...recent, ...((cat && cat.solo) || []).map((x) => x[0])])].slice(0, 120);
+        for (const c of ids) tile(stickerUrl(c, p.me), { kd: "b", r: String(c), a: String(p.me) });
+        return;
+      }
+      // favorites: Bitmoji favorites + saved stickers and cut-outs (pictures)
+      for (const x of await storage.get("ghostBitmojiFavs", [])) if (!x.duo && p.me) tile(stickerUrl(x.c, p.me), { kd: "b", r: String(x.c), a: String(p.me) });
+      for (const x of await storage.get("ghostStickerFavs", [])) {
+        const b = await wallDB.get("favsticker:" + x.id).catch(() => null);
+        if (b) { const u = URL.createObjectURL(b); urls.push(u); tile(u, { kd: "i", blob: b }); }
+      }
+      if (!grid.children.length) body.appendChild(Object.assign(el("div", "gh-gif-empty"), { textContent: "No favorites yet. Hold a sticker to add it." }));
+    };
+    for (const [tab, label] of [["emoji", "Emoji"], ["bitmoji", "Bitmoji"], ["favs", "Favorites"]]) {
+      const b = el("button", "gh-gif-tab"); b.dataset.tab = tab; b.textContent = label; b.addEventListener("click", () => show(tab)); tabs.appendChild(b);
+    }
+    openSheetGeneric(s.backdrop, s.sheet);
+    show("emoji");
+  }
+  // placing it: the sticker appears on the bubble; drag it, pinch to size, twist to turn; Done keeps it
+  function gxPlaceSticker(ctx, convId, m, choice) {
+    const conv = ctx.conv;
+    const wrap = conv && [...conv.messages.querySelectorAll(".gh-msg-wrap")].find((w) => w.dataset.messageId === m.id);
+    // (stickers are placed relative to the bubble's box - the sticker host when the bubble already has some)
+    const inner = wrap && wrap.querySelector("[data-gxb]");
+    const bubble = inner && (inner.parentElement.classList.contains("gh-stk-host") ? inner.parentElement : inner);
+    if (!bubble) { ctx.showToast("Scroll to the message and try again"); return; }
+    const root = ctx.root;
+    const layer = el("div", "gh-gx-place");
+    const stk = el("div", "gh-gx-place-stk");
+    let previewUrl = null;
+    if (choice.kd === "e") { const t = el("span", "gh-msg-stk-emoji"); t.textContent = choice.r; stk.appendChild(t); }
+    else { const img = el("img"); img.alt = ""; img.draggable = false; if (choice.kd === "b") img.src = stickerUrl(choice.r, choice.a); else img.src = previewUrl = URL.createObjectURL(choice.blob); stk.appendChild(img); }
+    const bar = el("div", "gh-gx-place-bar");
+    const cancel = el("button", "gh-gx-place-btn gh-press"); cancel.textContent = "Cancel";
+    const done = el("button", "gh-gx-place-btn gh-gx-place-done gh-press"); done.textContent = "Done";
+    const hint = el("div", "gh-gx-place-hint"); hint.textContent = "Drag, pinch or twist the sticker";
+    bar.append(cancel, hint, done);
+    layer.append(stk, bar);
+    root.appendChild(layer);
+    // positions in the host's own px (the host is zoomed on the phone; touches and rects are in page px)
+    const br = () => { const r = bubble.getBoundingClientRect(); const a = toLocal(root, r.left, r.top), b = toLocal(root, r.right, r.bottom); return { l: a.x, t: a.y, w: b.x - a.x, h: b.y - a.y }; };
+    const b0 = br();
+    const st = { x: b0.l + b0.w * 0.85, y: b0.t + b0.h * 0.15, s: 1, rot: 0 };
+    const paint = () => { stk.style.left = st.x + "px"; stk.style.top = st.y + "px"; stk.style.transform = "translate(-50%,-50%) rotate(" + st.rot + "rad) scale(" + st.s + ")"; };
+    paint();
+    const touches = new Map();
+    let g0 = null;
+    const pt = (t) => toLocal(root, t.clientX, t.clientY);
+    const begin = () => {
+      const p = [...touches.values()];
+      if (p.length >= 2) g0 = { d: Math.hypot(p[1].x - p[0].x, p[1].y - p[0].y), a: Math.atan2(p[1].y - p[0].y, p[1].x - p[0].x), s: st.s, rot: st.rot, cx: (p[0].x + p[1].x) / 2, cy: (p[0].y + p[1].y) / 2, x: st.x, y: st.y };
+      else if (p.length === 1) g0 = { cx: p[0].x, cy: p[0].y, x: st.x, y: st.y };
+    };
+    layer.addEventListener("touchstart", (e) => { if (bar.contains(e.target)) return; e.preventDefault(); for (const t of e.changedTouches) touches.set(t.identifier, pt(t)); begin(); }, { passive: false });
+    layer.addEventListener("touchmove", (e) => {
+      if (!g0) return; e.preventDefault();
+      for (const t of e.changedTouches) if (touches.has(t.identifier)) touches.set(t.identifier, pt(t));
+      const p = [...touches.values()];
+      if (p.length >= 2 && g0.d) {
+        const d = Math.hypot(p[1].x - p[0].x, p[1].y - p[0].y), a = Math.atan2(p[1].y - p[0].y, p[1].x - p[0].x);
+        st.s = clamp(g0.s * d / g0.d, 0.3, 3.5); st.rot = g0.rot + (a - g0.a);
+        st.x = g0.x + ((p[0].x + p[1].x) / 2 - g0.cx); st.y = g0.y + ((p[0].y + p[1].y) / 2 - g0.cy);
+      } else if (p.length === 1) { st.x = g0.x + (p[0].x - g0.cx); st.y = g0.y + (p[0].y - g0.cy); }
+      paint();
+    }, { passive: false });
+    const end = (e) => { for (const t of e.changedTouches) touches.delete(t.identifier); begin(); if (!touches.size) g0 = null; };
+    layer.addEventListener("touchend", end); layer.addEventListener("touchcancel", end);
+    // mouse (rig/desktop): drag
+    layer.addEventListener("mousedown", (e) => { if (bar.contains(e.target)) return; const p = toLocal(root, e.clientX, e.clientY); g0 = { cx: p.x, cy: p.y, x: st.x, y: st.y }; });
+    layer.addEventListener("mousemove", (e) => { if (!g0 || !e.buttons) return; const p = toLocal(root, e.clientX, e.clientY); st.x = g0.x + (p.x - g0.cx); st.y = g0.y + (p.y - g0.cy); paint(); });
+    layer.addEventListener("mouseup", () => { g0 = null; });
+    const close = () => { layer.remove(); if (previewUrl) URL.revokeObjectURL(previewUrl); };
+    cancel.addEventListener("click", () => { haptic("light"); close(); });
+    done.addEventListener("click", async () => {
+      haptic("light");
+      const b = br();
+      const d = { kd: choice.kd, r: choice.r || "", a: choice.a || "", x: clamp((st.x - b.l) / (b.w || 1), -0.5, 1.5), y: clamp((st.y - b.t) / (b.h || 1), -0.5, 1.5), s: Math.round(st.s * 100) / 100, rot: Math.round(Math.atan2(Math.sin(st.rot), Math.cos(st.rot)) * 1000) / 1000 };
+      const shared = !!gxFriendSnap(ctx, convId);
+      const sid = gxRand(10);
+      close();
+      try {
+        if (choice.kd === "i") {
+          const small = await gxShrinkSticker(choice.blob);
+          await wallDB.put("gxstk:" + sid, small);
+          if (shared) d.ref = await gn.net.putPicture(small);
+        }
+        await gxSet(ctx, convId, "stk:" + gxMsgKey(m.id) + ":" + sid, d, shared);
+      } catch (e) { ctx.showToast("Couldn't add the sticker"); }
+    });
+  }
+  // picture stickers go out small (a sticker on a bubble is ~60 px): 240 px PNG
+  async function gxShrinkSticker(blob) {
+    try {
+      const bmp = await createImageBitmap(blob);
+      const k = Math.min(1, 240 / Math.max(bmp.width, bmp.height));
+      const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(bmp.width * k)); c.height = Math.max(1, Math.round(bmp.height * k));
+      c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+      const out = await new Promise((res) => c.toBlob(res, "image/png"));
+      return out || blob;
+    } catch (e) { return blob; }
   }
 
   // =====================================================================================================

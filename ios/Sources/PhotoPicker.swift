@@ -176,21 +176,22 @@ final class GhostPhotoPicker: NSObject, WKURLSchemeHandler, PHPhotoLibraryChange
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = true
         options.isSynchronous = false
-        let target = CGSize(width: pixelSize, height: pixelSize)
+        // the web view draws at 2x: never ask for less than ~2x a grid tile, whatever size the page passed
+        let target = CGSize(width: max(pixelSize, 360), height: max(pixelSize, 360))
         var delivered = false
+        var fallback: Data? = nil
         imageManager.requestImage(for: asset, targetSize: target, contentMode: .aspectFill, options: options) { [weak self] image, info in
             guard let self, !delivered else { return }
-            // .opportunistic can call back twice (a fast low-res pass, then a better one); a WKURLSchemeTask
-            // can only finish once, so only the first callback that actually has image data is used - for a
-            // ~300px grid thumbnail the first pass is already good enough that waiting for a second one would
-            // only add latency, never visible quality.
-            guard let image, let data = image.jpegData(compressionQuality: 0.82) else {
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
-                if !degraded { DispatchQueue.main.async { self.fail(task, 500) } }
-                return
-            }
+            // .opportunistic calls back twice: a fast, tiny, blurry pass (degraded) and then the real one. A
+            // WKURLSchemeTask can only finish once, and serving the first pass made every Gallery and photo-picker
+            // thumbnail blurry (phone report 2026-09-30). So the degraded pass is only kept as a fallback, and the
+            // tile is answered with the final image (or the fallback if the final one never comes).
+            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
+            let data = image.flatMap { $0.jpegData(compressionQuality: 0.85) }
+            if degraded { if fallback == nil { fallback = data }; return }
             delivered = true
-            DispatchQueue.main.async { self.respond(task, data: data, mime: "image/jpeg") }
+            if let data = data ?? fallback { DispatchQueue.main.async { self.respond(task, data: data, mime: "image/jpeg") } }
+            else { DispatchQueue.main.async { self.fail(task, 500) } }
         }
     }
 
