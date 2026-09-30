@@ -31,7 +31,7 @@ final class GhostTikTokVideo: NSObject, WKNavigationDelegate, WKUIDelegate {
     func handle(_ body: [String: Any], reply: @escaping (Any?, String?) -> Void) {
         switch body["cmd"] as? String ?? "" {
         case "vpRun":
-            guard let action = body["action"] as? String, ["state", "like", "save", "follow", "comments", "replies", "likeComment", "comment", "notInterested"].contains(action),
+            guard let action = body["action"] as? String, ["state", "like", "save", "follow", "comments", "replies", "likeComment", "comment", "notInterested", "play"].contains(action),
                   let id = body["id"] as? String, id.range(of: "^[0-9]{5,30}$", options: .regularExpression) != nil else { return reply(nil, "bad action") }
             let handle = (body["handle"] as? String ?? "").range(of: "^[A-Za-z0-9._]{1,40}$", options: .regularExpression) != nil ? body["handle"] as! String : "i"
             var args = body["args"] as? [String: Any] ?? [:]

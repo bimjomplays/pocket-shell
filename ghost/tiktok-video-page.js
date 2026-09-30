@@ -377,6 +377,24 @@
     return { ok: true };
   }
 
+  // the video's own file address as TikTok's page has it (signed for this session): a TikTok link in a Snapchat
+  // chat whose embed-page address TikTok refuses (403, device report 2026-09-30) plays from this instead.
+  // Same choice as tiktok-page.js compact(): an H.264 rung around 720p, else playAddr.
+  async function playUrl(id) {
+    let it = null;
+    for (let i = 0; i < 40 && !(it = currentItem(id)); i++) { if (i === 10) reloadIfMissing(id); await new Promise((r) => setTimeout(r, 250)); }
+    if (!it || !it.video) return { error: "TikTok's page didn't show that video" };
+    const v = it.video;
+    const pick = (x) => (Array.isArray(x) ? x[0] : x) || "";
+    let play = pick(v.playAddr) || pick(v.PlayAddrStruct && v.PlayAddrStruct.UrlList);
+    const h264 = (Array.isArray(v.bitrateInfo) ? v.bitrateInfo : []).filter((b) => b && /h264|avc/i.test(b.CodecType || "") && b.PlayAddr && b.PlayAddr.UrlList && b.PlayAddr.UrlList.length)
+      .sort((a, b) => (a.Bitrate || 0) - (b.Bitrate || 0));
+    const mid = h264.find((b) => (b.PlayAddr.Height || 0) >= 700) || h264[h264.length - 1];
+    if (mid) play = mid.PlayAddr.UrlList[0];
+    if (!/^https:\/\//.test(play)) return { error: "no video address on TikTok's page" };
+    return { ok: true, play };
+  }
+
   window.__ghostVP = function (action, a) {
     a = a || {};
     const id = str(a.id, 30);
@@ -392,6 +410,7 @@
         case "likeComment": return likeComment(id, str(a.cid, 40), !!a.on);
         case "comment": return postComment(id, String(a.text || ""), str(a.replyTo, 40), str(a.rid, 80));
         case "notInterested": return notInterested(id);
+        case "play": return playUrl(id);
         default: return Promise.resolve({ error: "unknown action" });
       }
     };

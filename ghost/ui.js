@@ -11883,8 +11883,8 @@
     return card;
   }
   // plays in the chat's own full-screen viewer: closing it is back in the chat, where it was. The viewer opens at
-  // once with a spinner (a tap used to look like it did nothing while the video downloaded); if TikTok's video
-  // address has gone stale since the card was drawn, the video is looked up again once
+  // once with a spinner (a tap used to look like it did nothing while the video downloaded); if TikTok refuses the
+  // embed page's video address, the address from the video's own page is used
   async function ttPlayLinkVideo(ctx, e, card) {
     if (card.dataset.busy === "1") return;
     card.dataset.busy = "1"; haptic("light");
@@ -11903,12 +11903,14 @@
       try { blob = await get(e.item); }
       catch (err) {
         if (!live()) return;
-        gtrail("ttlink video fetch failed, looking it up again: " + ((err && err.message) || err));
-        const r = await ttApi("item", { id: e.item.id });
-        const it = r && r.items && r.items[0];
-        if (!it) throw new Error("item gone");
-        e.item = it;
-        blob = await get(it);
+        // TikTok refuses some videos' embed-page file address (403): take the address from the video's own page
+        // (the hidden TikTok video page, signed for this session), like the TikTok tab plays them
+        gtrail("ttlink embed video failed (" + ((err && err.message) || err) + "), trying TikTok's video page");
+        const r = await ttVP("play", e.item).catch((x) => ({ error: String((x && x.message) || x) }));
+        if (!live()) return;
+        if (!r || !r.play) throw new Error("video page: " + ((r && r.error) || "no answer"));
+        e.item = Object.assign({}, e.item, { play: r.play });
+        blob = await get(e.item);
       }
       if (!live()) return;
       gtrail("ttlink video " + blob.size + " bytes " + (blob.type || "?"));

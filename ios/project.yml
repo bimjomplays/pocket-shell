@@ -14,7 +14,7 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: Ghost
-        CFBundleShortVersionString: "1.12.2"
+        CFBundleShortVersionString: "1.12.3"
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         UILaunchScreen:
