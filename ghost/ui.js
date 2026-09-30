@@ -11855,24 +11855,73 @@
     const e = ttLinkLoad(link);
     if (e.state === "loading") e.waiters.add(() => { if (card.isConnected || card.parentNode) paint(); });
     paint();
+    // on the phone a tap is taken on touchend (a click doesn't always come through inside a message bubble, device
+    // report 2026-09-30); a click (mouse, or one that still comes after that touchend) within 600 ms is the same tap
+    let t0 = null, tapAt = 0;
+    const go = () => {
+      const x = ttLinkCache.get(link.url);
+      gtrail("ttlink tap " + (x ? x.state : "none"));
+      if (x && x.state === "video" && x.item) ttPlayLinkVideo(ctx, x, card);
+      else if (!x || x.state !== "loading") openLink(link.url);
+    };
+    card.addEventListener("touchstart", (e) => { const t = e.touches[0]; t0 = e.touches.length === 1 && t ? { x: t.clientX, y: t.clientY, at: nowMs() } : null; }, { passive: true });
+    card.addEventListener("touchmove", (e) => { const t = e.touches[0]; if (t0 && t && Math.hypot(t.clientX - t0.x, t.clientY - t0.y) > 10) t0 = null; }, { passive: true });
+    card.addEventListener("touchcancel", () => { t0 = null; }, { passive: true });
+    card.addEventListener("touchend", (e) => {
+      const s = t0; t0 = null;
+      // a long press is the message's action sheet, not a tap
+      if (!s || nowMs() - s.at > 450) return;
+      // no click after this: it would land on the viewer that just opened over the card
+      if (e.cancelable) e.preventDefault();
+      tapAt = nowMs(); go();
+    }, { passive: false });
     card.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      const x = ttLinkCache.get(link.url);
-      if (x && x.state === "video" && x.item) ttPlayLinkVideo(ctx, x.item, card);
-      else if (!x || x.state !== "loading") openLink(link.url);
+      if (nowMs() - tapAt < 600) return;
+      go();
     });
     return card;
   }
-  // plays in the chat's own full-screen viewer: closing it is back in the chat, where it was
-  async function ttPlayLinkVideo(ctx, it, card) {
+  // plays in the chat's own full-screen viewer: closing it is back in the chat, where it was. The viewer opens at
+  // once with a spinner (a tap used to look like it did nothing while the video downloaded); if TikTok's video
+  // address has gone stale since the card was drawn, the video is looked up again once
+  async function ttPlayLinkVideo(ctx, e, card) {
     if (card.dataset.busy === "1") return;
     card.dataset.busy = "1"; haptic("light");
+    const v = ctx.viewer;
+    const token = (v.loadToken = (v.loadToken || 0) + 1);
+    clearTimeout(v.timer);
+    v.story = null; v.snapQ = null; v.el.dataset.unsave = "0";
+    v.single = true; v.items = [];
+    v.el.dataset.open = "1"; v.bars.style.display = "none"; v.avatarSlot.style.display = "none";
+    v.media.innerHTML = "";
+    v.media.appendChild(el("div", "gh-spinner gh-viewer-spinner"));
+    const live = () => v.loadToken === token && v.el.dataset.open === "1";
+    const get = async (it) => { const b = await ttBlob(it.play, true, live); if (!b || !b.size) throw new Error("empty"); return b; };
     try {
-      const blob = await ttBlob(it.play, true);
-      if (!blob || !blob.size) throw new Error("empty");
+      let blob = null;
+      try { blob = await get(e.item); }
+      catch (err) {
+        if (!live()) return;
+        gtrail("ttlink video fetch failed, looking it up again: " + ((err && err.message) || err));
+        const r = await ttApi("item", { id: e.item.id });
+        const it = r && r.items && r.items[0];
+        if (!it) throw new Error("item gone");
+        e.item = it;
+        blob = await get(it);
+      }
+      if (!live()) return;
+      gtrail("ttlink video " + blob.size + " bytes " + (blob.type || "?"));
       openViewerSingle(ctx, { type: "video", blob });
-    } catch (e) { ctx.showToast("Couldn't play that TikTok"); }
-    finally { card.dataset.busy = "0"; }
+      const vid = v.media.querySelector("video");
+      if (vid) {
+        vid.addEventListener("error", () => gtrail("ttlink video can't play: " + (vid.error ? vid.error.code + " " + (vid.error.message || "") : "?")), { once: true });
+        const p = vid.play(); if (p && p.catch) p.catch((err) => gtrail("ttlink play() " + ((err && err.name) || err)));
+      }
+    } catch (err) {
+      gtrail("ttlink play failed: " + ((err && err.message) || err));
+      if (live()) { closeViewer(ctx); ctx.showToast("Couldn't play that TikTok"); }
+    } finally { card.dataset.busy = "0"; }
   }
   async function ttOpenSharedVideo(ctx, itemId) {
     try {
