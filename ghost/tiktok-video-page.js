@@ -284,9 +284,14 @@
     if (!(await openComments(id))) return { error: "TikTok's comments didn't open" };
     const el = commentEl(cid);
     if (!el) return { error: "that comment isn't on TikTok's page" };
-    const box = commentBox(el) || el;
-    const area = box.parentElement || box;
-    const btn = qa("p, span, div, button", area).find((b) => /^(view|view more)\s+\d*\s*(more\s+)?repl/i.test((b.textContent || "").trim()) && b.children.length < 3);
+    // the comment's own block: the largest ancestor that still holds only this one top-level comment (its replies
+    // button sits beside the comment, not inside it)
+    let area = el;
+    for (let e = el.parentElement, i = 0; e && i < 8; e = e.parentElement, i++) { if (e.querySelectorAll('[data-e2e="comment-level-1"]').length > 1) break; area = e; }
+    // TikTok's "View 6 replies" is a <button class="TUXButton"> inside a DivViewRepliesContainer (phone 2026-09-29);
+    // clicking the container div never reaches the button's handler, so the button itself is taken first
+    const isView = (b) => /^(view|view more)\s+\d*\s*(more\s+)?repl/i.test((b.textContent || "").trim());
+    const btn = qa("button, [role=button]", area).find(isView) || qa("p, span, div", area).find((b) => isView(b) && b.children.length < 3);
     const before = readComments().filter((c) => c.replyTo === cid).length;
     if (btn) {
       // a plain click first (like the comment button), the full pointer press only if nothing happened
