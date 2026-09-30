@@ -293,7 +293,7 @@
         g.strokeStyle = "rgba(255,255,255,0.35)"; g.beginPath(); g.moveTo(toX(ex), toY(ey)); g.lineTo(toX(ex + rx * 0.14), toY(ey + ry * 0.14)); g.stroke();
       }
       // cue stick
-      const back = (0.05 + powerNow * 0.28) * scale;
+      const back = (0.05 + pullNow * 0.28) * scale;
       const sx = toX(c[0]) - dx * (R * scale + back), sy = toY(c[1]) - dy * (R * scale + back);
       const len = 1.05 * scale;
       const exs = sx - dx * len, eys = sy - dy * len;
@@ -353,21 +353,25 @@
     });
     canvas.addEventListener("pointerup", () => { draggingCue = false; });
 
+    // power follows how far the finger has pulled down from where it first touched the bar (not where on the bar
+    // it touched: a light touch low on the bar used to be a hard shot), on a curve so short pulls give soft shots
+    let pullY0 = 0, pullNow = 0;
     function setPower(e) {
       const r = power.getBoundingClientRect();
-      powerNow = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
-      powerFill.style.height = powerNow * 100 + "%";
-      powerCue.style.transform = `translateY(${powerNow * (power.clientHeight * 0.6)}px)`;
+      pullNow = Math.min(1, Math.max(0, (e.clientY - pullY0) / (r.height * 0.85)));
+      powerNow = pullNow * pullNow;
+      powerFill.style.height = pullNow * 100 + "%";
+      powerCue.style.transform = `translateY(${pullNow * (power.clientHeight * 0.6)}px)`;
       draw();
     }
-    power.addEventListener("pointerdown", (e) => { if (!myTurn() || anim) return; power.setPointerCapture(e.pointerId); pulling = true; setPower(e); });
+    power.addEventListener("pointerdown", (e) => { if (!myTurn() || anim) return; try { power.setPointerCapture(e.pointerId); } catch (x) {} pulling = true; pullY0 = e.clientY; setPower(e); });
     power.addEventListener("pointermove", (e) => { if (pulling) setPower(e); });
     const release = () => {
       if (!pulling) return;
       pulling = false;
       const p = powerNow;
-      powerNow = 0; powerFill.style.height = "0"; powerCue.style.transform = "";
-      if (p >= 0.03) shoot(p); else draw();
+      powerNow = 0; pullNow = 0; powerFill.style.height = "0"; powerCue.style.transform = "";
+      if (p >= 0.01) shoot(p); else draw();
     };
     power.addEventListener("pointerup", release);
     power.addEventListener("pointercancel", release);
@@ -422,7 +426,7 @@
       },
       destroy() { dead = true; cancelAnimationFrame(raf); if (ro) ro.disconnect(); rootEl.remove(); },
       // tests
-      _debug: { get state() { return state; }, aim, setSpin: (s) => { spin = s; }, shoot, get animating() { return !!anim; }, setCall: (i) => { call = i; }, setCuePlace: (p) => { cuePlace = p; } },
+      _debug: { get state() { return state; }, aim, setSpin: (s) => { spin = s; }, shoot, get animating() { return !!anim; }, get power() { return powerNow; }, setCall: (i) => { call = i; }, setCuePlace: (p) => { cuePlace = p; } },
     };
   }
 
