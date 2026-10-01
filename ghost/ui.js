@@ -10622,10 +10622,27 @@
     sh.sheet.appendChild(body);
     const close = () => closeSheetGeneric(sh.backdrop, sh.sheet);
     const g = setGroup(body, "Share");
+    setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Send to a Snapchat friend", onClick: () => { close(); ttSendToSnapchat(ctx, it); } });
     if (ttDMOn()) setRow(g, { icon: "send", tint: "var(--gh-accent)", label: "Send to a TikTok friend", onClick: () => { close(); openTTShare(ctx, it); } });
     setRow(g, { icon: "copy", tint: "#8e8e93", label: "Copy link", onClick: () => { close(); copyToClipboard(ttLink(it)); ctx.showToast("Link copied"); } });
     setRow(g, { icon: "share", tint: "#34c759", label: "Share to…", onClick: () => { close(); ttPost("shareLink", { url: ttLink(it) }).catch(() => ctx.showToast("Couldn't open sharing")); } });
     openSheetGeneric(sh.backdrop, sh.sheet);
+  }
+
+  // a TikTok to Snapchat chats, as its link (the user's choice, 2026-10-01): in Ghost it's the link card that plays in
+  // the chat (ttLinkCard), in Snapchat itself a normal link that opens TikTok. Ghost's own Send To page, chats only.
+  function ttSendToSnapchat(ctx, it) {
+    if (!it || !it.id) return;
+    const link = ttLink(it);
+    openSendPage(ctx, { chatOnly: true, title: "Send TikTok To", onSend: async (dest) => {
+      let sent = 0;
+      for (const id of dest.convIds) {
+        try { await api.sendText(id, link, {}); sent++; } catch (e) { gtrail("tiktok to snapchat failed " + ((e && e.message) || e)); }
+      }
+      if (!sent) { ctx.showToast("Couldn't send that TikTok"); return false; }
+      ctx.showToast(sent < dest.convIds.length ? "Sent to " + sent + " of " + dest.convIds.length : "Sent");
+      return true;
+    } });
   }
 
   // ---- comments sheet (TikTok's): count, list, replies, like a comment, post / reply ----
@@ -12914,7 +12931,10 @@
     sp.picked = new Set(sp.opts.preselect ? [sp.opts.preselect] : []);
     sp.search.value = "";
     sp.sending = false; sp.sendBtn.dataset.sending = "0";
-    setSendMode(ctx, sp.opts.mode || "chat"); // Chat first and always the default; Snap is the one you pick (user 2026-09-28)
+    // a TikTok link (ttSendToSnapchat) only goes to chats: no Chat/Snap choice, no My Story
+    sp.el.dataset.chatonly = sp.opts.chatOnly ? "1" : "0";
+    sp.el.querySelector(".gh-cam-picker-title").textContent = sp.opts.title || "Send To";
+    setSendMode(ctx, sp.opts.chatOnly ? "chat" : sp.opts.mode || "chat"); // Chat first and always the default; Snap is the one you pick (user 2026-09-28)
     sp.el.dataset.open = "1";
   }
   function closeSendPage(ctx) { const sp = ctx.sendPage; sp.el.dataset.open = "0"; sp.opts = null; }

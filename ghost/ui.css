@@ -2306,6 +2306,7 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 
 /* Send To page: the camera picker's look, above the camera, with a Snap / Chat switch */
 .gh-send-page { position: absolute; z-index: 25; }
+.gh-send-page[data-chatonly="1"] .gh-send-mode, .gh-send-page[data-chatonly="1"] .gh-send-mode-hint { display: none; }
 .gh-send-mode { display: flex; margin: 2px 16px 4px; padding: 3px; border-radius: 11px; background: var(--gh-bg-panel-2); }
 .gh-send-mode button { flex: 1; height: 32px; border-radius: 9px; color: var(--gh-text-secondary); font-weight: 600; font-size: 15px; }
 .gh-send-mode button[data-on="1"] { background: var(--gh-accent); color: #fff; }
