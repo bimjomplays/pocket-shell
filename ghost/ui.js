@@ -10629,20 +10629,48 @@
     openSheetGeneric(sh.backdrop, sh.sheet);
   }
 
-  // a TikTok to Snapchat chats, as its link (the user's choice, 2026-10-01): in Ghost it's the link card that plays in
-  // the chat (ttLinkCard), in Snapchat itself a normal link that opens TikTok. Ghost's own Send To page, chats only.
+  // a TikTok to Snapchat chats (user, 2026-10-01): a friend connected on Ghost gets the link (the TikTok card that
+  // plays in their Ghost), anyone else (and every group) gets the video itself as a chat video, so it plays in plain
+  // Snapchat. The video is downloaded into memory only, sent, and let go: never written to the phone or the gallery.
   function ttSendToSnapchat(ctx, it) {
     if (!it || !it.id) return;
     const link = ttLink(it);
+    const onGhost = (id) => {
+      const c = ctx.state.convById.get(id);
+      const other = c && !c.isGroup && c.participants && c.participants.length === 1 && c.participants[0];
+      return !!(other && gnFriend(other.id));
+    };
     openSendPage(ctx, { chatOnly: true, title: "Send TikTok To", onSend: async (dest) => {
+      const ghost = dest.convIds.filter(onGhost), plain = dest.convIds.filter((id) => !onGhost(id));
       let sent = 0;
-      for (const id of dest.convIds) {
-        try { await api.sendText(id, link, {}); sent++; } catch (e) { gtrail("tiktok to snapchat failed " + ((e && e.message) || e)); }
+      for (const id of ghost) {
+        try { await api.sendText(id, link, {}); sent++; } catch (e) { gtrail("tiktok link to snapchat failed " + ((e && e.message) || e)); }
       }
+      if (plain.length) {
+        let blob = null;
+        ctx.showToast("Getting the video…");
+        try { blob = await ttVideoBlob(it); } catch (e) { gtrail("tiktok video for snapchat failed " + ((e && e.message) || e)); }
+        if (blob) {
+          for (const id of plain) {
+            try { await api.sendMedia(id, blob, { kind: "video" }); sent++; } catch (e) { gtrail("tiktok video to snapchat failed " + ((e && e.message) || e)); }
+          }
+        }
+        blob = null; // (memory only: nothing kept once it's sent)
+      }
+      const n = dest.convIds.length;
       if (!sent) { ctx.showToast("Couldn't send that TikTok"); return false; }
-      ctx.showToast(sent < dest.convIds.length ? "Sent to " + sent + " of " + dest.convIds.length : "Sent");
+      ctx.showToast(sent < n ? "Sent to " + sent + " of " + n : "Sent");
       return true;
     } });
+  }
+  // the video file in memory: its usual address, else the one on TikTok's own video page (some refuse the first, 403)
+  async function ttVideoBlob(it) {
+    try { const b = await ttBlob(it.play, true); if (b && b.size) return b; } catch (e) {}
+    const r = await ttVP("play", it).catch(() => null);
+    if (!r || !r.play) throw new Error("no video address");
+    const b = await ttBlob(r.play, true);
+    if (!b || !b.size) throw new Error("empty");
+    return b;
   }
 
   // ---- comments sheet (TikTok's): count, list, replies, like a comment, post / reply ----
