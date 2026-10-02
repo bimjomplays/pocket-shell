@@ -2503,7 +2503,7 @@
     }
     if (opts.fullscreenOnTap) {
       wrap.classList.add("gh-press");
-      wrap.addEventListener("click", () => openViewerSingle(opts.ctx, ref));
+      wrap.addEventListener("click", () => { if (nowMs() - (opts.ctx.state.longPressAt || 0) < 900) return; openViewerSingle(opts.ctx, ref); });
     }
     return wrap;
   }
@@ -3224,7 +3224,9 @@
     conv.messages.addEventListener("touchstart", (e) => {
       if (!e.touches || e.touches.length !== 1) { g = null; return; }
       const target = e.target;
-      if (target.closest("button, a, input, textarea, video, .gh-reaction-pill")) { g = null; return; }
+      // (a chat video bubble is a <video> without controls: it long-presses like any message - device report
+      // 2026-10-01, holding a sent video did nothing; only a video with its own controls keeps the touch)
+      if (target.closest("button, a, input, textarea, video[controls], .gh-reaction-pill")) { g = null; return; }
       const wrap = findWrap(target);
       if (!wrap) { g = null; return; }
       const t = e.touches[0];
@@ -3233,6 +3235,7 @@
         tappable: !target.closest(".gh-media, .gh-snap-row, .gh-snap-media, .gh-audio-body, .gh-link, .gh-reply-quote, .gh-ttlink-card") };
       g.timer = setTimeout(() => {
         g.longFired = true;
+        ctx.state.longPressAt = nowMs(); // the tap that ends this hold doesn't also open the photo/video
         haptic("medium");
         const m = messageFor(wrap);
         if (m) openActionSheet(ctx, m, wrap);
