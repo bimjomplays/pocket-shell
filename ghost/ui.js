@@ -3441,7 +3441,7 @@
     s.bookmarkItem.querySelector("span").textContent = isBookmarked(convId, message.id) ? "Remove Bookmark" : "Bookmark";
     s.bookmarkItem.onclick = () => { s.close(); haptic("light"); toggleBookmark(ctx, convId, message); };
     // chat extras: pin (for both with a connected Ghost friend) and stick a sticker on the bubble
-    const pinned = ctx.conv && ctx.conv._gx && ctx.conv._gx.pins.some((p) => p.k === "pin:" + gxMsgKey(message.id));
+    const pinned = ctx.conv && ctx.conv._gx && ctx.conv._gx.pins.some((p) => p.k === "pin:" + gxMsgKey(message.id) && gxNear(message, Number(p.d.t) || 0));
     s.pinItem.querySelector("span").textContent = pinned ? "Unpin" : "Pin";
     s.pinItem.style.display = message.retained || message.pending ? "none" : "";
     s.pinItem.onclick = () => { s.close(); haptic("light"); setTimeout(() => gxPinMenu(ctx, convId, message), 320); };
@@ -14528,12 +14528,42 @@
   }
   // the connected Ghost friend of this 1:1 chat (null: not connected / Ghost Network off / a group)
   function gxFriendSnap(ctx, convId) { const o = gxOther(ctx, convId); return o && gnOn() && gn.net && gn.net.connected(o.id) ? o.id : null; }
+  // 1.14: in a group, pins and stickers are shared with every member you're connected with on Ghost, under keys
+  // prefixed with the group's conversation id (network.js XGROUP_RE)
+  const gxGroupPfx = (convId) => "g." + String(convId || "").replace(/[^A-Za-z0-9-]/g, "").slice(0, 40) + ".";
+  function gxIsGroup(ctx, convId) { const cd = ctx.state.convById.get(convId); return !!(cd && cd.isGroup); }
+  // the Snapchat ids of the chat's members connected with you on Ghost (1:1: the friend; group: each such member)
+  function gxPeers(ctx, convId) {
+    if (!gnOn() || !gn.net) return [];
+    const cd = ctx.state.convById.get(convId);
+    if (!cd) return [];
+    if (!cd.isGroup) { const s1 = gxFriendSnap(ctx, convId); return s1 ? [s1] : []; }
+    const meId = ctx.state.me && ctx.state.me.id;
+    return [...new Set((cd.participants || []).map((p) => p && p.id).filter((id) => id && id !== meId && gn.net.connected(id)))];
+  }
+  // can pins/stickers here be shared (someone in this chat is connected with you on Ghost)?
+  const gxShared = (ctx, convId) => gxPeers(ctx, convId).length > 0;
   // every live extra of a chat: shared ones (with who wrote them) and your own local ones
   function gxItems(ctx, convId) {
     const out = [];
-    const snap = gxFriendSnap(ctx, convId);
-    const sh = snap ? gn.net.extras(snap) : null;
-    if (sh) for (const i of sh.items) if (i.d) out.push(Object.assign({}, i, { shared: true, mine: i.by === sh.myId }));
+    if (gxIsGroup(ctx, convId)) {
+      // the same item reaches you from each member's Ghost: keep the newest copy of each key
+      const pfx = gxGroupPfx(convId), best = new Map();
+      for (const snap of gxPeers(ctx, convId)) {
+        const sh = gn.net.extras(snap);
+        if (!sh) continue;
+        for (const i of sh.items) {
+          if (!i.k.startsWith(pfx)) continue;
+          const k = i.k.slice(pfx.length), cur = best.get(k);
+          if (!cur || i.v > cur.v || (i.v === cur.v && String(i.by) > String(cur.by))) best.set(k, Object.assign({}, i, { k, shared: true, mine: i.by === sh.myId, from: snap }));
+        }
+      }
+      for (const i of best.values()) if (i.d) out.push(i);
+    } else {
+      const snap = gxFriendSnap(ctx, convId);
+      const sh = snap ? gn.net.extras(snap) : null;
+      if (sh) for (const i of sh.items) if (i.d && !i.k.startsWith("g.")) out.push(Object.assign({}, i, { shared: true, mine: i.by === sh.myId, from: snap }));
+    }
     const loc = (gxLocal && gxLocal[convId]) || {};
     for (const i of Object.values(loc)) if (i && i.d) out.push(Object.assign({}, i, { shared: false, mine: true }));
     return out;
@@ -14556,15 +14586,24 @@
   }
   function gxWho(ctx, convId, it) {
     if (it.mine) return "You";
+    // who wrote it: their Ghost ID -> the friend -> their name (in a group the item may have come via anyone)
+    const f = it.by && gn.net && gn.net.friends().find((x) => x.id === it.by);
+    if (f && f.snap) {
+      const cd = ctx.state.convById.get(convId), p = cd && (cd.participants || []).find((x) => x && x.id === f.snap);
+      return gnNameFor(f.snap) || (p && p.name) || "A friend";
+    }
     const o = gxOther(ctx, convId);
-    return (o && (gnNameFor(o.id) || o.name)) || "Your friend";
+    return (o && (gnNameFor(o.id) || o.name)) || "A friend";
   }
-  // write one item: shared with the connected friend, or only here
+  // write one item: shared with the connected friend (or, in a group, every member connected on Ghost), or only here
   async function gxSet(ctx, convId, k, d, shared) {
     if (shared) {
-      const snap = gxFriendSnap(ctx, convId);
-      if (!snap) throw new Error("Not connected on Ghost");
-      await gn.net.setExtra(snap, k, d);
+      const peers = gxPeers(ctx, convId);
+      if (!peers.length) throw new Error("Not connected on Ghost");
+      const key = gxIsGroup(ctx, convId) ? gxGroupPfx(convId) + k : k;
+      let ok = 0;
+      for (const snap of peers) { try { await gn.net.setExtra(snap, key, d); ok++; } catch (e) { gtrail("extras to a group member: " + ((e && e.message) || e)); } }
+      if (!ok) throw new Error("Couldn't share that");
       return;
     }
     await gxLocalLoad();
@@ -14582,8 +14621,9 @@
   }
   function gxChangedSnap(ctx, snap) {
     const convId = ctx.state.currentConvId;
-    const o = convId && gxOther(ctx, convId);
-    if (o && o.id === snap) gxChanged(ctx, convId);
+    if (!convId) return;
+    const cd = ctx.state.convById.get(convId);
+    if (cd && cd.isGroup ? (cd.participants || []).some((p) => p && p.id === snap) : (gxOther(ctx, convId) || {}).id === snap) gxChanged(ctx, convId);
   }
   // what the timeline gets besides Snapchat's messages: "📌 … pinned …" lines and poll cards, by time
   function gxTimeline(ctx, convId, ix) {
@@ -14611,7 +14651,7 @@
       if (!pins || !pins.length) return;
       haptic("light");
       const i = Math.min(conv._pinCur == null ? pins.length - 1 : conv._pinCur, pins.length - 1);
-      jumpToMessage(ctx, gxPinMsgId(ctx, pins[i]));
+      gxJumpPin(ctx, pins[i]);
       conv._pinCur = i > 0 ? i - 1 : pins.length - 1; // Telegram: each tap goes one pin further back
       gxPaintPinbar(ctx);
     });
@@ -14620,16 +14660,31 @@
       const conv = ctx.conv, pins = conv && conv._pins;
       if (!pins || !pins.length) return;
       const p = pins[Math.min(conv._pinCur == null ? pins.length - 1 : conv._pinCur, pins.length - 1)];
-      if (!(await confirmSheet(ctx, p.shared ? "Unpin this message for both of you?" : "Unpin this message?", "Unpin"))) return;
+      if (!(await confirmSheet(ctx, !p.shared ? "Unpin this message?" : gxIsGroup(ctx, ctx.state.currentConvId) ? "Unpin this message for the group?" : "Unpin this message for both of you?", "Unpin"))) return;
       gxUnpin(ctx, ctx.state.currentConvId, p);
     });
     return bar;
   }
-  // a pin's key holds a cleaned-up message id; the message itself is found by comparing the same way
-  function gxPinMsgId(ctx, p) {
-    const want = p.k.slice(4);
-    const m = (ctx.conv && ctx.conv._all || []).find((x) => gxMsgKey(x.id) === want);
-    return m ? m.id : want;
+  // a pin's key holds a cleaned-up message id, and its data the message's time (and, since 1.14, sender). The
+  // message must match both: an id alone once led to another message way up the chat (device report 2026-10-02)
+  const gxNear = (m, t) => !t || Math.abs((Number(m.ts) || 0) - t) < 5000;
+  function gxPinFind(ctx, p) {
+    const want = p.k.slice(4), t = Number(p.d.t) || 0, all = (ctx.conv && ctx.conv._all) || [];
+    const byId = all.find((x) => gxMsgKey(x.id) === want);
+    if (byId && gxNear(byId, t)) return byId;
+    if (!t) return null;
+    const near = all.filter((x) => gxNear(x, t) && (!p.d.s || (x.from && x.from.id) === p.d.s) && (!p.d.kd || x.kind === p.d.kd));
+    near.sort((a, b) => Math.abs(a.ts - t) - Math.abs(b.ts - t));
+    return near[0] || null;
+  }
+  // jump to a pinned message: loads older pages until it (or its time) is reached
+  async function gxJumpPin(ctx, p) {
+    const conv = ctx.conv;
+    if (!conv) return;
+    let m = gxPinFind(ctx, p);
+    if (!m && conv._hasMore) { await fetchOlderPages(ctx, 60, () => !!gxPinFind(ctx, p) || ((conv._all || [])[0] && Number(conv._all[0].ts) < (Number(p.d.t) || 0) - 60e3)); m = gxPinFind(ctx, p); }
+    if (!m) { ctx.showToast("That pinned message isn't in the chat anymore"); return; }
+    jumpToMessage(ctx, m.id);
   }
   function gxPaintPinbar(ctx) {
     const conv = ctx.conv;
@@ -14657,9 +14712,9 @@
     const meId = ctx.state.me && ctx.state.me.id;
     const f = m.from && m.from.id === meId ? "" : ((m.from && m.from.name) || "");
     try {
-      await gxSet(ctx, convId, k, { t: Number(m.ts) || Date.now(), p: gxPreview(m), f: f.slice(0, 60), kd: String(m.kind || "").slice(0, 20) }, shared);
+      await gxSet(ctx, convId, k, { t: Number(m.ts) || Date.now(), p: gxPreview(m), f: f.slice(0, 60), kd: String(m.kind || "").slice(0, 20), s: String((m.from && m.from.id) || "").slice(0, 40) }, shared);
       if (ctx.conv) ctx.conv._pinCur = null;
-      ctx.showToast(shared ? "Pinned for both of you" : "Pinned for you");
+      ctx.showToast(!shared ? "Pinned for you" : gxIsGroup(ctx, convId) ? "Pinned for the group" : "Pinned for both of you");
     } catch (e) { ctx.showToast("Couldn't pin that"); }
   }
   async function gxUnpin(ctx, convId, p) {
@@ -14671,15 +14726,16 @@
     const ix = gxIndex(ctx, convId), k = "pin:" + gxMsgKey(m.id);
     const cur = ix.pins.find((p) => p.k === k);
     if (cur) { gxUnpin(ctx, convId, cur); return; }
-    if (!gxFriendSnap(ctx, convId)) { gxPin(ctx, convId, m, false); return; }
+    if (!gxShared(ctx, convId)) { gxPin(ctx, convId, m, false); return; }
+    const grp = gxIsGroup(ctx, convId);
     const s = ctx.chatSheet;
     s.sheet.innerHTML = "";
     s.sheet.appendChild(el("div", "gh-sheet-grip"));
     const t = el("div", "gh-set-group-title"); t.textContent = "Pin Message"; s.sheet.appendChild(t);
     const g = el("div", "gh-set-group"); s.sheet.appendChild(g);
-    setRow(g, { icon: "pin", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Pin for Both", onClick: () => { closeSheetGeneric(s.backdrop, s.sheet); gxPin(ctx, convId, m, true); } });
+    setRow(g, { icon: "pin", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: grp ? "Pin for the Group" : "Pin for Both", onClick: () => { closeSheetGeneric(s.backdrop, s.sheet); gxPin(ctx, convId, m, true); } });
     setRow(g, { icon: "pin", tint: "#8e8e93", label: "Pin for Me", onClick: () => { closeSheetGeneric(s.backdrop, s.sheet); gxPin(ctx, convId, m, false); } });
-    const foot = el("div", "gh-set-group-foot"); foot.textContent = "Pin for Both shows it at the top of this chat in their Ghost too."; s.sheet.appendChild(foot);
+    const foot = el("div", "gh-set-group-foot"); foot.textContent = grp ? "Pin for the Group shows it at the top of this chat in the Ghost of every member you're connected with on Ghost." : "Pin for Both shows it at the top of this chat in their Ghost too."; s.sheet.appendChild(foot);
     openSheetGeneric(s.backdrop, s.sheet);
   }
   function gxOpenPinList(ctx) {
@@ -14700,7 +14756,7 @@
       const x = el("button", "gh-pin-row-x gh-hit"); x.setAttribute("aria-label", "Unpin"); x.appendChild(icon("close", 14));
       x.addEventListener("click", (e) => { e.stopPropagation(); closeSheetGeneric(s.backdrop, s.sheet); gxUnpin(ctx, convId, p); });
       row.append(col, x);
-      row.addEventListener("click", () => { closeSheetGeneric(s.backdrop, s.sheet); jumpToMessage(ctx, gxPinMsgId(ctx, p)); });
+      row.addEventListener("click", () => { closeSheetGeneric(s.backdrop, s.sheet); gxJumpPin(ctx, p); });
       g.appendChild(row);
     }
     openSheetGeneric(s.backdrop, s.sheet);
@@ -14710,7 +14766,7 @@
     const span = el("span");
     span.textContent = "📌 " + gxWho(ctx, convId, p) + " pinned “" + gxText(p.d.p || "a message").slice(0, 60) + "”";
     e.appendChild(span);
-    e.addEventListener("click", () => jumpToMessage(ctx, gxPinMsgId(ctx, p)));
+    e.addEventListener("click", () => gxJumpPin(ctx, p));
     return e;
   }
 
@@ -14834,7 +14890,7 @@
   // ---- stickers on messages ----
   function gxStickerSig(ctx, m) {
     const ix = ctx.conv && ctx.conv._gx;
-    const list = ix && ix.stk.get(gxMsgKey(m.id));
+    const list = ix && (ix.stk.get(gxMsgKey(m.id)) || []).filter((s) => gxNear(m, Number(s.d.t) || 0));
     return list ? list.map((s) => s.k + "@" + s.v).join(",") : "";
   }
   const gxStkBlobs = new Map(); // sid -> blob: URL of a picture sticker
@@ -14854,7 +14910,7 @@
         else wallDB.get("gxstk:" + sid).then(async (b) => {
           if (!b && d.ref && it.shared) {
             try { b = await gn.net.getPicture(d.ref); await wallDB.put("gxstk:" + sid, b); }
-            catch (err) { const snap = gxFriendSnap(ctx, convId); if (snap && !it.mine) gn.net.askPicture(snap, it.k); }
+            catch (err) { const snap = it.from || gxFriendSnap(ctx, convId); if (snap && !it.mine) gn.net.askPicture(snap, gxIsGroup(ctx, convId) ? gxGroupPfx(convId) + it.k : it.k); }
           }
           if (b) { const u = URL.createObjectURL(b); gxStkBlobs.set(sid, u); img.src = u; }
         }).catch(() => {});
@@ -14876,7 +14932,8 @@
   // the bubble with its stickers on top (a host shrink-wrapped around the bubble; only when there are stickers)
   function gxWrapBubble(ctx, m, bubble) {
     const ix = ctx.conv && ctx.conv._gx;
-    const list = ix && ix.stk.get(gxMsgKey(m.id));
+    // (on a message with this id AND, for stickers that carry it, this time: see gxPinFind)
+    const list = ix && (ix.stk.get(gxMsgKey(m.id)) || []).filter((s) => gxNear(m, Number(s.d.t) || 0));
     if (!list || !list.length) return bubble;
     const host = el("div", "gh-stk-host");
     const layer = el("div", "gh-msg-stk-layer");
@@ -14990,7 +15047,8 @@
       haptic("light");
       const b = br();
       const d = { kd: choice.kd, r: choice.r || "", a: choice.a || "", x: clamp((st.x - b.l) / (b.w || 1), -0.5, 1.5), y: clamp((st.y - b.t) / (b.h || 1), -0.5, 1.5), s: Math.round(st.s * 100) / 100, rot: Math.round(Math.atan2(Math.sin(st.rot), Math.cos(st.rot)) * 1000) / 1000 };
-      const shared = !!gxFriendSnap(ctx, convId);
+      const shared = gxShared(ctx, convId);
+      d.t = Number(m.ts) || 0; // the message's time: the sticker only sits on a message with this id AND time
       const sid = gxRand(10);
       close();
       try {

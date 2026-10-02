@@ -348,7 +348,7 @@ const GhostNetCore = (() => {
     // after connecting: the profile, and the status if there is one
     async function sendAll(f) {
       await sendProfile(f);
-      try { const me = await identity(false); if (me) await xsend(f, xmine(f.id, me.id)); } catch (e) { log("extras: " + e.message); }
+      try { const me = await identity(false); if (me) await xsend(f, xmine(f.id, me.id, false).concat(xmine(f.id, me.id, true))); } catch (e) { log("extras: " + e.message); }
       if (st.status && st.status.v && statusLive() && f.cap >= 2) { try { await sendStatus(f); } catch (e) { log("status: " + e.message); } }
     }
     async function pushProfileToAll() {
@@ -361,6 +361,13 @@ const GhostNetCore = (() => {
 
     // ---- chat extras (pins, polls, votes, stickers) ----
     const XKEY_RE = /^(pin:[A-Za-z0-9_.-]{1,96}|poll:[a-z0-9]{8,24}|vote:[a-z0-9]{8,24}:[a-z2-9]{26}|stk:[A-Za-z0-9_.-]{1,96}:[a-z0-9]{8,24})$/;
+    // 1.14: pins and stickers in a GROUP chat carry the group's Snapchat conversation id as a prefix
+    // ("g.<conversation id>.pin:<msg>"), and go to every group member you're connected with on Ghost. Builds before
+    // 1.14 refuse these keys, so they're counted apart in the sync summary (xg/xgm) and never trigger a resend there.
+    const XGROUP_RE = /^g\.[A-Za-z0-9-]{1,40}\./;
+    const xbase = (k) => String(k).replace(XGROUP_RE, "");
+    const xgroup = (k) => XGROUP_RE.test(String(k));
+    const xkeyOk = (k) => typeof k === "string" && XKEY_RE.test(xbase(k)) && (!xgroup(k) || /^(pin|stk):/.test(xbase(k)));
     const XMAX_ITEM = 1500, XCHUNK = 1700, XMAX_ITEMS = 3000;
     const num = (x, lo, hi) => typeof x === "number" && isFinite(x) && x >= lo && x <= hi;
     const txt = (x, n) => typeof x === "string" && x.length <= n;
@@ -370,7 +377,7 @@ const GhostNetCore = (() => {
     function dataOk(k, d) {
       if (d === null) return true;
       if (!d || typeof d !== "object" || Array.isArray(d) || JSON.stringify(d).length > XMAX_ITEM) return false;
-      const kind = k.slice(0, k.indexOf(":"));
+      const b = xbase(k), kind = b.slice(0, b.indexOf(":"));
       if (kind === "pin") return num(d.t, 0, 1e14) && txt(d.p, 160) && txt(d.f || "", 80) && txt(d.kd || "", 20);
       if (kind === "poll") return txt(d.q, 300) && d.q.trim().length > 0 && Array.isArray(d.o) && d.o.length >= 2 && d.o.length <= 10 && d.o.every((o) => txt(o, 120))
         && typeof d.m === "boolean" && typeof d.x === "boolean" && num(d.c || 0, 0, 1e14) && num(d.at, 0, 1e14) && txt(d.cr, 40);
@@ -379,7 +386,7 @@ const GhostNetCore = (() => {
         && num(d.x, -1, 2) && num(d.y, -1, 2) && num(d.s, 0.2, 4) && num(d.rot, -7, 7);
       return false;
     }
-    function xvalid(it) { return !!(it && typeof it === "object" && typeof it.k === "string" && XKEY_RE.test(it.k) && num(it.v, 1, now() + 10 * 60e3) && txt(it.by, 40) && dataOk(it.k, it.d === undefined ? null : it.d)); }
+    function xvalid(it) { return !!(it && typeof it === "object" && xkeyOk(it.k) && num(it.v, 1, now() + 10 * 60e3) && txt(it.by, 40) && dataOk(it.k, it.d === undefined ? null : it.d)); }
     const xnewer = (a, b) => !b || a.v > b.v || (a.v === b.v && String(a.by) > String(b.by));
     // one item into the chat's state; who may write what: votes only their voter, a poll only its creator, a sticker
     // only whoever placed it; pins either of you
@@ -393,16 +400,17 @@ const GhostNetCore = (() => {
         if (!old) return false;
         delete box.items[old.k];
       }
-      if (it.k.startsWith("vote:") && it.k.split(":")[2] !== it.by) return false;
-      if (it.k.startsWith("poll:") && ((cur && cur.d && cur.d.cr && cur.d.cr !== it.by) || (it.d && it.d.cr !== it.by) || (cur && !cur.d && cur.by !== it.by))) return false;
-      if (it.k.startsWith("stk:") && cur && cur.by !== it.by) return false;
+      const bk = xbase(it.k);
+      if (bk.startsWith("vote:") && bk.split(":")[2] !== it.by) return false;
+      if (bk.startsWith("poll:") && ((cur && cur.d && cur.d.cr && cur.d.cr !== it.by) || (it.d && it.d.cr !== it.by) || (cur && !cur.d && cur.by !== it.by))) return false;
+      if (bk.startsWith("stk:") && cur && cur.by !== it.by) return false;
       if (!xnewer(it, cur)) return false;
       box.items[it.k] = { k: it.k, v: it.v, by: it.by, d: it.d == null ? null : it.d };
       return true;
     }
-    const xsyncInfo = (f) => { const h = xsummary(f.id, f.id); return { xc: h.c, xm: h.m }; };
-    const xmine = (fid, myId) => Object.values(xbox(fid).items).filter((i) => i.by === myId);
-    function xsummary(fid, who) { let c = 0, m = 0; for (const i of Object.values(xbox(fid).items)) if (i.by === who) { c++; if (i.v > m) m = i.v; } return { c, m }; }
+    const xsyncInfo = (f) => { const h = xsummary(f.id, f.id, false), g = xsummary(f.id, f.id, true); return { xc: h.c, xm: h.m, xg: g.c, xgm: g.m }; };
+    const xmine = (fid, myId, group) => Object.values(xbox(fid).items).filter((i) => i.by === myId && xgroup(i.k) === group);
+    function xsummary(fid, who, group) { let c = 0, m = 0; for (const i of Object.values(xbox(fid).items)) if (i.by === who && xgroup(i.k) === group) { c++; if (i.v > m) m = i.v; } return { c, m }; }
     async function xsend(f, items) {
       if (!items.length || f.state !== "connected") return;
       let chunk = [], size = 0;
@@ -520,10 +528,18 @@ const GhostNetCore = (() => {
           if (typeof obj.shave === "number" && obj.shave !== st.status.v) { try { await sendStatus(f); } catch (e) { log("sync status: " + e.message); } }
           // chat extras: they hold a different set of what I wrote than I do -> send all of mine again (1.10+ only)
           if (typeof obj.xc === "number") {
-            const me = await identity(false), mine = me ? xsummary(f.id, me.id) : null;
+            const me = await identity(false), mine = me ? xsummary(f.id, me.id, false) : null;
             if (mine && (mine.c !== obj.xc || mine.m !== obj.xm) && now() - (f.xResent || 0) > 10 * 60e3) {
               f.xResent = now();
-              try { await xsend(f, xmine(f.id, me.id)); } catch (e) { log("extras resend: " + e.message); }
+              try { await xsend(f, xmine(f.id, me.id, false)); } catch (e) { log("extras resend: " + e.message); }
+            }
+          }
+          // group pins/stickers (1.14+ only: older builds send no xg)
+          if (typeof obj.xg === "number") {
+            const me = await identity(false), mine = me ? xsummary(f.id, me.id, true) : null;
+            if (mine && (mine.c !== obj.xg || mine.m !== obj.xgm) && now() - (f.xgResent || 0) > 10 * 60e3) {
+              f.xgResent = now();
+              try { await xsend(f, xmine(f.id, me.id, true)); } catch (e) { log("group extras resend: " + e.message); }
             }
           }
           const behind = (typeof obj.mine === "number" && obj.mine > (f.haveV || 0)) || (typeof obj.sv === "number" && obj.sv > (f.statusV || 0));
