@@ -90,7 +90,9 @@ if (ghost / 'ui.js').exists():
         games = ''.join(f.read_text() + '\n' for f in [ghost / 'games.js'] + first + [m for m in mods if m not in first])
     # snap filters (colour looks, WebGL renderer, native parameters): SnapFX, read by ui.js's snap editor
     snapfx = (ghost / 'snapfx.js').read_text() + '\n' if (ghost / 'snapfx.js').exists() else ''
-    (app / 'ghost-ui.js').write_text(gifanim + 'const GHOST_CSS = ' + json.dumps(css) + ';\n' + net + games + snapfx + (ghost / 'ui.js').read_text())
+    # the What's New text (window.GHOST_WHATS_NEW, written at publish time): read by ui.js on the first open after an update
+    whatsnew = (ghost / 'whatsnew.js').read_text() + '\n' if (ghost / 'whatsnew.js').exists() else ''
+    (app / 'ghost-ui.js').write_text(gifanim + 'const GHOST_CSS = ' + json.dumps(css) + ';\n' + net + games + snapfx + whatsnew + (ghost / 'ui.js').read_text())
 # the TikTok tab's hidden TikTok page script (runs in TikTokFeed.swift's own web view, never in Snapchat's page)
 if (ghost / 'tiktok-page.js').exists():
     (app / 'ghost-tiktok.js').write_text((ghost / 'tiktok-page.js').read_text())

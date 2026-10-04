@@ -50,6 +50,9 @@ const GhostNetCore = (() => {
   const PI_RE = /^gh-pi-[a-z2-9]{26}$/;
   const RX_RE = /^gh-rp-[a-z2-9]{26}$/;       // a relay's report inbox
   const REPORT_MAX = 8 * 1024 * 1024;          // the relay refuses bigger report files
+  const NTFY_FILE_MAX = 2 * 1024 * 1024;       // ntfy.sh's limit for one file (anonymous: /v1/account attachment_file_size)
+  const PUB_EVERY = 3 * 60e3; // the public inbox (invites, Ghosts before build 81) is read this often when nothing waits there
+  const SLOW_MIN = 30e3, SLOW_MAX = 10 * 60e3; // after a 429: no requests for 30 s, doubling to 10 min while it lasts
   const MAX_PIC = 3 * 1024 * 1024;
   const LIMITS = { name: 40, bio: 300, status: 60 };
   // Shared items (games; later anything two Ghosts keep in sync): small JSON state, versioned, re-sent until the friend
@@ -244,7 +247,7 @@ const GhostNetCore = (() => {
   function create(deps) {
     const now = () => (deps.now ? deps.now() : Date.now());
     const log = (t) => { try { deps.log && deps.log(t); } catch (e) {} };
-    let st = null, ident = null, identP = null, busy = null, leaving = false, slowUntil = 0;
+    let st = null, ident = null, identP = null, busy = null, leaving = false, slowUntil = 0, slowWait = 0, pubAt = 0;
     const blank = () => ({ v: 1, on: true, friends: {}, invites: {}, joined: {}, since: {}, seen: [], share: "all", shareWith: [],
       profile: { v: 0, name: "", bio: "", accent: "", pic: false, banner: false }, uploads: {},
       status: { v: 0, text: "", until: 0 }, gone: {}, pi: "", items: {}, rx: { v: 0, inbox: null } });
@@ -276,11 +279,15 @@ const GhostNetCore = (() => {
     }
 
     // ---- ntfy.sh ----
+    // ntfy.sh limits requests per IP (a bucket of 60, one more every 5 s), shared with the PC relay on the same wifi. A
+    // 429 means it's empty: nothing goes out for a while (SLOW_MIN, doubling while it lasts; any answer resets it)
     async function net(args) {
       if (now() < slowUntil) throw new Error("ntfy busy");
       const r = await deps.gnet(args);
       if (!r || typeof r.status !== "number") throw new Error("Ghost network isn't reachable");
-      if (r.status === 429) { slowUntil = now() + 10 * 60e3; throw new Error("ntfy 429"); } // over ntfy.sh's limits: wait
+      if (r.status === 429) { slowWait = Math.min(Math.max(slowWait * 2, SLOW_MIN), SLOW_MAX); slowUntil = now() + slowWait; throw new Error("ntfy 429"); }
+      slowWait = 0;
+      if (r.status === 413) throw new Error("ntfy 413 too big");
       if (r.status < 200 || r.status >= 300) throw new Error("ntfy " + r.status);
       return unb64(r.body || "");
     }
@@ -510,8 +517,17 @@ const GhostNetCore = (() => {
       await save();
     }
     function friendBySnap(snap) { return Object.values(st.friends).find((f) => f.snap === snap) || null; }
+    // the public inbox gets: accepts for my invites (cancelled ones are answered too), welcomes for invites I took from
+    // a Ghost before build 81, and anything from a friend that may not know my private inbox yet: one that hasn't told
+    // me its own, or a new friend that hasn't written to it (a re-sent accept after a lost welcome goes there)
+    function needPublic() {
+      if (now() - pubAt >= PUB_EVERY) return true;
+      if (Object.values(st.invites).some((i) => !i.used && now() - i.created < INVITE_TTL)) return true;
+      if (Object.values(st.joined).some((j) => j.state === "connecting")) return true;
+      return Object.values(st.friends).some((f) => f.state !== "connected" || !(f.cap >= 2) || (!f.piSeen && now() - (f.since || 0) < INVITE_TTL));
+    }
     const senderKey = (id) => (st.friends[id] && st.friends[id].s) || (st.gone[id] && st.gone[id].s) || null;
-    async function handle(msg) {
+    async function handle(msg, viaPi) {
       const me = await identity(false);
       if (!me || typeof msg.message !== "string" || msg.message[0] !== "{" || msg.message.length > 6000) return;
       let got = null;
@@ -529,6 +545,7 @@ const GhostNetCore = (() => {
       }
       if (f && f.since && obj.ts < f.since - 10 * 60e3 && obj.type !== "welcome") return; // older than this connection (replayed; 10 min for clock drift)
       if (f && f.state === "connected") f.heard = now(); // "Last heard from" on their profile
+      if (f && viaPi) f.piSeen = true; // they know my private inbox (needPublic)
       if (f && learnPi(f, obj)) await save();
       switch (obj.type) {
         case "accept": return onAccept(got);
@@ -913,24 +930,28 @@ const GhostNetCore = (() => {
         await save(); changed("friends", { id: card.id, snap: card.snap });
         return f.state;
       },
-      // one round: read the inbox, repost rendezvous cards about to expire, resend accepts that are still waiting
-      async poll() {
+      // one round: read the inbox, repost rendezvous cards about to expire, resend accepts that are still waiting.
+      // full (launch, back to the front): the public inbox too, which otherwise is read only while something can
+      // arrive there (see needPublic) or every PUB_EVERY - each read is a request against ntfy.sh's per-IP limit
+      async poll(full) {
         await state();
         if (!st.on || leaving) return 0;
-        if (busy) return busy;
+        if (busy) { if (full) pubAt = 0; return busy; } // (a full round asked for meanwhile: the next one reads both)
         busy = (async () => {
           await farewells();
           const me = await identity(false);
           if (!me) return 0;
           let n = 0;
           // the private inbox (connected friends on build 81+) and the public one (invites, older builds)
-          for (const topic of [st.pi, me.inbox]) {
+          const topics = full || needPublic() ? [st.pi, me.inbox] : [st.pi];
+          for (const topic of topics) {
             let msgs = [];
             try { msgs = await poll(topic, st.since[topic]); } catch (e) { if (topic === me.inbox) throw e; log("poll pi: " + e.message); continue; }
+            if (topic === me.inbox) pubAt = now();
             for (const m of msgs.slice(0, 300)) {
               if (leaving) return n;
               st.since[topic] = m.id; n++;
-              try { await handle(m); } catch (e) { log("handle: " + e.message); }
+              try { await handle(m, topic === st.pi); } catch (e) { log("handle: " + e.message); }
             }
           }
           for (const inv of Object.values(st.invites)) {
@@ -1046,20 +1067,30 @@ const GhostNetCore = (() => {
         return Object.values(st.friends).filter((f) => f.state === "connected" && f.rx && rxValid(f.rx))
           .map((f) => ({ friendId: f.id, snap: f.snap, name: (f.profile && f.profile.name) || "", t: f.rx.t, k: Object.assign({}, f.rx.k), n: f.rx.n || "" }));
       },
-      // seal a report (r = the report JSON string, imgs = Uint8Arrays) for a relay's inbox and upload it there
-      async sendReport(inbox, r, imgs) {
+      // seal a report (r = the report JSON string, imgs = Uint8Arrays) for a relay's inbox: the file to upload. It
+      // must fit ntfy.sh's file limit (ui.js shrinks the pictures until it does)
+      async sealReport(inbox, r, imgs) {
         await state();
         const me = await identity(false);
         if (!me) throw new Error("no Ghost identity");
         const d = rxValid(inbox);
         if (!d) throw new Error("bad report inbox");
         if (typeof r !== "string") throw new Error("bad report");
-        const blob = await sealReport(me, d, r, imgs || []);
-        if (blob.length > REPORT_MAX) throw new Error("report too big");
+        return sealReport(me, d, r, imgs || []);
+      },
+      reportFileMax: Math.min(REPORT_MAX, NTFY_FILE_MAX),
+      // upload a sealed report (kept by ui.js until it goes through: a 429 / busy / network error is worth retrying)
+      async uploadReport(inbox, blob) {
+        const d = rxValid(inbox);
+        if (!d) throw new Error("bad report inbox");
+        if (blob.length > Math.min(REPORT_MAX, NTFY_FILE_MAX)) throw new Error("report too big");
         const res = JSON.parse(td.decode(await net({ url: NTFY + "/" + d.t, method: "PUT", body: b64(blob), headers: { Filename: "report.bin", Firebase: "no" } })));
         if (!res || !res.attachment || typeof res.attachment.url !== "string") throw new Error("upload failed");
         return { id: String(res.id || ""), bytes: blob.length };
       },
+      async sendReport(inbox, r, imgs) { return api.uploadReport(inbox, await api.sealReport(inbox, r, imgs)); },
+      // ms until ntfy.sh may be asked again after a 429 (0 = now)
+      busyFor() { return Math.max(0, slowUntil - now()); },
       // invites you sent that are still waiting
       pendingInvites() {
         if (!st) return [];

@@ -555,6 +555,7 @@
       }
       state.homeReady = true;
       state.ready = true;
+      whatsNewMaybe(ctx).catch((e) => uiTrail("whats new " + (e && e.message)));
       // iOS killed the page (memory) and the app reloaded it: go straight back into the chat you were in
       storage.get("ghostResume", "").then(async (flag) => {
         if (String(flag) !== "1") return;
@@ -1726,7 +1727,6 @@
     ctx.state.currentConvId = conversationId;
     const convData = ctx.state.convById.get(conversationId);
     if (convData) updateConvHeader(ctx, convData);
-    fbNoteScreen(ctx, convData && convData.isGroup ? "Group chat" : "Chat");
     navigateTo(ctx, "conv", true);
     const conv = ctx.conv;
     conv.rendered.forEach((elm) => elm.remove());
@@ -3506,6 +3506,20 @@
     try { return Promise.resolve(window.webkit.messageHandlers.dg.postMessage(Object.assign({ op }, args || {}))); }
     catch (e) { return Promise.reject(e); }
   }
+  // Every ntfy.sh request from this phone (Ghost Network, the relay's control topic, answers to reports) goes through
+  // here. ntfy.sh limits requests per IP and the PC relay on the same wifi shares it: after a 429 nothing goes out until
+  // the wait is over (30 s, doubling to 10 min while 429s last; any answer resets it), since asking again keeps it full.
+  const ntfyGate = { until: 0, wait: 0 };
+  async function ntfyNet(args) {
+    if (Date.now() < ntfyGate.until) throw new Error("ntfy busy");
+    const r = await dgPost("gnet", args);
+    if (r && r.status === 429) {
+      ntfyGate.wait = Math.min(Math.max(ntfyGate.wait * 2, 30e3), 600e3);
+      ntfyGate.until = Date.now() + ntfyGate.wait;
+      uiTrailN("ntfy 429: nothing sent for " + Math.round(ntfyGate.wait / 1000) + " s");
+    } else if (r && r.status) ntfyGate.wait = 0;
+    return r;
+  }
   // The real ghostphoto:// scheme only exists inside the native app's own WKWebView (App.swift registers it on
   // the configuration before creating the web view) - a plain browser (incl. the Playwright test rig, which has
   // no native side at all) has no such scheme and a bare <img src="ghostphoto://..."> just fails to load there.
@@ -4171,7 +4185,6 @@
   }
   function openSettings(ctx) {
     haptic();
-    ctx.settingsFrom = fbScreenNow(ctx); // for a bug report (section "Feedback")
     const s = ctx.settings;
     s.el.innerHTML = "";
     s.stack = []; s.rootLabel = null;
@@ -5088,6 +5101,56 @@
       setTimeout(() => inp.focus(), 50);
     });
   }
+  // ---- What's New (the first open after an update) ----
+  // The text is ghost/whatsnew.js (window.GHOST_WHATS_NEW, written at publish time). Shown once per version: the
+  // version is saved as soon as the screen shows. A fresh install (nothing of Ghost saved yet) just records the
+  // version and shows nothing. Only a newer version than the saved one counts (a downgrade shows nothing).
+  const WN_KEY = "ghostWhatsNewSeen";
+  const WN_USED_KEYS = ["ghostPrefs", "ghostLastConv", "ghostResume", "ghostNet", "ghostNetKeys", "ghostGifRecents", "ghostStickerRecents", "ghostStickerFavs"];
+  function wnVer(v) { const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v || "")); return m ? [+m[1], +m[2], +m[3]] : null; }
+  function wnNewer(a, b) { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i]; return false; }
+  async function whatsNewMaybe(ctx) {
+    if (ctx.whatsNewChecked) return;
+    ctx.whatsNewChecked = true;
+    const ver = String((window.__ghostApp && window.__ghostApp.version) || "");
+    const cur = wnVer(ver);
+    if (!cur) return;
+    const seen = await storage.get(WN_KEY, "");
+    if (seen === ver) return;
+    const was = wnVer(seen);
+    if (was) { if (!wnNewer(cur, was)) return; } else {
+      // no saved version: a fresh install, or an update from a Ghost that predates this screen
+      let used = false;
+      for (const k of WN_USED_KEYS) if ((await storage.get(k, null)) != null) { used = true; break; }
+      if (!used) { storage.set(WN_KEY, ver); return; }
+    }
+    const entry = window.GHOST_WHATS_NEW && window.GHOST_WHATS_NEW[ver];
+    const items = entry && Array.isArray(entry.items) ? entry.items.filter((x) => x && typeof x.t === "string" && x.t) : [];
+    if (!items.length) { storage.set(WN_KEY, ver); return; }
+    await storage.set(WN_KEY, ver);
+    await new Promise((r) => setTimeout(r, 900));
+    ctx.root.querySelector(".gh-whatsnew") || whatsNewShow(ctx, ver, items);
+  }
+  function whatsNewShow(ctx, ver, items) {
+    const ov = el("div", "gh-confirm gh-whatsnew");
+    const box = el("div", "gh-confirm-box gh-wn-box");
+    const title = el("div", "gh-wn-title"); title.textContent = "What\u2019s New";
+    const sub = el("div", "gh-wn-ver"); sub.textContent = "Ghost " + ver;
+    const list = el("div", "gh-wn-list");
+    for (const it of items.slice(0, 6)) {
+      const row = el("div", "gh-wn-item");
+      const t = el("div", "gh-wn-text"); t.textContent = it.t; row.appendChild(t);
+      if (typeof it.how === "string" && it.how) { const h = el("div", "gh-wn-how"); h.textContent = it.how; row.appendChild(h); }
+      list.appendChild(row);
+    }
+    const row = el("div", "gh-confirm-row");
+    const ok = el("button", "gh-confirm-ok gh-press"); ok.textContent = "Got it";
+    ok.addEventListener("click", () => { haptic("light"); ov.remove(); });
+    row.appendChild(ok);
+    box.append(title, sub, list, row);
+    ov.appendChild(box);
+    ctx.root.appendChild(ov);
+  }
   async function renameGroupPrompt(ctx, convId, current) {
     const name = await promptSheet(ctx, "Group name", current);
     if (name == null || !name) return;
@@ -5291,7 +5354,6 @@
   }
   function openSettingsAt(ctx, name, rootLabel) {
     haptic();
-    ctx.settingsFrom = fbScreenNow(ctx);
     const s = ctx.settings;
     s.el.innerHTML = ""; s.stack = []; s.rootLabel = rootLabel || "Chat";
     s.el.dataset.open = "1";
@@ -5403,7 +5465,7 @@
     const c = notifyCfg;
     if (!c || !c.ctl) return false;
     const url = "https://ntfy.sh/" + c.ctl.topic + "/json?poll=1&since=" + encodeURIComponent(c.since || "all");
-    let r = null; try { r = await dgPost("gnet", { url, method: "GET" }); } catch (e) { return false; }
+    let r = null; try { r = await ntfyNet({ url, method: "GET" }); } catch (e) { return false; }
     if (!r || r.status !== 200 || typeof r.body !== "string") return false;
     const text = new TextDecoder().decode(b64uBytes(r.body.replace(/\+/g, "-").replace(/\//g, "_")));
     const key = await crypto.subtle.importKey("raw", b64uBytes(c.ctl.key), "AES-GCM", false, ["decrypt"]);
@@ -5466,12 +5528,13 @@
     if (notifyCfg !== c || !c.deliveryPending) { notifyRefreshPage(ctx); return; }
     try {
       const msg = await notifyCtlEncrypt(c, { type: "settings", v: 1, rev: c.deliveryRev, delivery: notifyDelivery(c), ping: notifyPing(c), ts: Date.now() });
-      const r = await dgPost("gnet", { url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg) });
+      const r = await ntfyNet({ url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg) });
       if (!r || r.status < 200 || r.status >= 300) uiTrailN("settings not sent " + (r && r.status));
     } catch (e) { uiTrailN("settings " + (e && e.message)); }
-    // the relay reads the topic about every 20 s: look for its ack a few times while Ghost is open
+    // relay 1.6+ gets it at once over its subscription (1.5 read the topic every 20 s): look for its ack a few times
+    // while Ghost is open, the first time soon (each look is a request against ntfy.sh's per-IP limit)
     clearTimeout(notifyAckTimer);
-    const waits = [25e3, 30e3, 60e3, 120e3];
+    const waits = [6e3, 25e3, 60e3, 120e3];
     const step = (i) => { notifyAckTimer = setTimeout(async () => {
       if (notifyCfg !== c || !c.deliveryPending) return;
       try { await notifyPollControl(); } catch (e) {}
@@ -5496,13 +5559,13 @@
   async function notifyStart(ctx) {
     window.__ghostOpenURL = (u) => { dgPost("takeOpenURL", {}).catch(() => {}); handleGhostURL(ctx, u).catch((e) => uiTrailN("url " + (e && e.message))); };
     ctx.notifyTest = { poll: () => notifyPollControl(), cfg: () => notifyCfg, start: () => notifyStart(ctx), setDelivery: (m) => notifySetDelivery(ctx, typeof m === "string" ? { delivery: m } : m) }; // rig only
-    ctx.fbTest = { state: () => fbState, acks: () => fbPollAcks(ctx), owner: () => fbOwnerSync(ctx), dests: () => fbDestinations(ctx), screen: () => fbScreenLabel(ctx), app: () => fbAppInfo() }; // rig only
+    ctx.fbTest = { state: () => fbState, acks: () => fbPollAcks(ctx), owner: () => fbOwnerSync(ctx), dests: () => fbDestinations(ctx), app: () => fbAppInfo(), outbox: () => fbOutboxRun(ctx), gate: () => Object.assign({}, ntfyGate) }; // rig only
     let pending = null; try { pending = await dgPost("takeOpenURL", {}); } catch (e) {}
     await notifyLoad();
     if (typeof pending === "string" && pending) setTimeout(() => handleGhostURL(ctx, pending).catch(() => {}), 1200);
     if (notifyCfg && notifyCfg.deliveryPending) notifyDeliverySync(ctx).catch(() => {}); // not confirmed last time: send again
     fbCtx = ctx;
-    fbLoad().then((f) => { if (f.sent.some((s) => s.st === "sent" || s.st === "received" || s.st === "held")) fbAckSoon(ctx); }).catch(() => {}); // answers to reports
+    fbLoad().then((f) => { if (f.sent.some((s) => s.st === "sent" || s.st === "received" || s.st === "held")) fbAckSoon(ctx); fbOutboxSoon(ctx); }).catch(() => {}); // answers to reports, reports still waiting
     if (!notifyCfg) return;
     await new Promise((r) => setTimeout(r, window.__ghostMockFast ? 200 : 6000)); // Snapchat's services are up by then
     // (read while paired even with notifications off: the relay's report inbox comes this way too)
@@ -5600,6 +5663,10 @@
   // filed (as ticket n) / held / limited / rejected, AES-GCM with a key from the report. The owner's Ghost also tells
   // its relay who may send reports and under which name (section end). Contract: ghost-notify/README.md "Bug reports
   // and feature requests".
+  // A report is sealed once and kept (wallDB "fbq:<rid>") until ntfy.sh takes it: when ntfy.sh is busy (its per-IP
+  // request limit, shared with the PC relay at home) or the phone is offline, it waits as "Waiting to Send" and Ghost
+  // tries again by itself while open, for a day. The sealed file must fit ntfy.sh's 2 MB limit per file: the pictures
+  // are made smaller until it does.
   // =====================================================================================================
   const FB_KEY = "ghostFeedback";
   const FB_ACK_AAD = "ghost-report-ack-v1";
@@ -5607,8 +5674,10 @@
   const FB_LIMITS = [[3600e3, 3], [86400e3, 8]]; // the same as the relay's per sender
   const FB_ACK_FOR = 12 * 3600e3; // ntfy.sh keeps the answer 12 h
   const FB_STATUSES = ["received", "filed", "held", "limited", "rejected"];
+  const FB_QUEUE_FOR = 24 * 3600e3; // a report not sent by then is given up (the relay refuses reports over 48 h old)
+  const fbOutbox = new Map(); // rid -> sealed report bytes, while waiting (also in wallDB, for after a relaunch)
   const FB_B32 = "abcdefghijkmnpqrstuvwxyz23456789";
-  let fbState; // {v: 1, sent: [{rid, kind, excerpt, ts, to, ack: {t, k}, since, st, n?, why?}]}
+  let fbState; // {v: 1, sent: [{rid, kind, excerpt, ts, to, ack: {t, k}, since, st, n?, why?, inbox?, tries?, next?}]}
   let fbCtx = null;
   const fbDraft = { bug: null, feature: null }; // what you typed and picked, kept while Ghost runs
   async function fbLoad() {
@@ -5630,26 +5699,7 @@
     if (top && top.refresh && top.name === "feedback") top.refresh();
   }
 
-  // ---- what goes with a report: the screen, the app and the phone ----
-  // the screen Settings was opened from, and the ones before it (openConversationScreen, openGallery, openTikTok and
-  // openCamera note theirs)
-  function fbScreenNow(ctx) {
-    const open = (x) => !!(x && x.el && x.el.dataset.open === "1");
-    if (ctx.state.currentConvId) { const cd = ctx.state.convById.get(ctx.state.currentConvId); return cd && cd.isGroup ? "Group chat" : "Chat"; }
-    if (open(ctx.tiktok)) return "TikTok";
-    if (open(ctx.gallery)) return "Gallery";
-    return "Chats list";
-  }
-  function fbNoteScreen(ctx, name) {
-    const t = ctx.fbTrail || (ctx.fbTrail = []);
-    if (t[t.length - 1] !== name) t.push(name);
-    if (t.length > 6) t.shift();
-  }
-  function fbScreenLabel(ctx) {
-    const from = ctx.settingsFrom || "Chats list";
-    const earlier = (ctx.fbTrail || []).filter((x) => x !== from).slice(-3);
-    return ("Settings, opened from " + from + (earlier.length ? "; earlier: " + earlier.join(", ") : "")).slice(0, 120);
-  }
+  // ---- what goes with a report: the app and the phone (no screen: owner 2026-10-04) ----
   // native fills window.__ghostApp {version, build, model, os}; without it (a browser, the rig) the user agent
   function fbAppInfo() {
     const a = window.__ghostApp || {}, ua = navigator.userAgent || "";
@@ -5675,7 +5725,7 @@
     return out;
   }
   function fbLimitText() {
-    const sent = (fbState ? fbState.sent : []).filter((s) => s.st !== "limited" && s.st !== "rejected");
+    const sent = (fbState ? fbState.sent : []).filter((s) => s.st !== "limited" && s.st !== "rejected" && s.st !== "failed");
     for (const [win, n] of FB_LIMITS) {
       if (sent.filter((s) => Date.now() - s.ts < win).length >= n) return win < 86400e3 ? "That's " + n + " reports this hour. Try again a bit later." : "That's the most for today (" + n + "). Try again tomorrow.";
     }
@@ -5687,53 +5737,148 @@
     if (s.st === "held") return "Received · Waiting";
     if (s.st === "limited") return "Too Many · Try Later";
     if (s.st === "rejected") return "Not Accepted";
-    return Date.now() - s.ts > FB_ACK_FOR ? "Sent · No Answer" : "Sent";
+    if (s.st === "queued") return "Waiting to Send";
+    if (s.st === "failed") return "Not Sent";
+    return Date.now() - (s.sentAt || s.ts) > FB_ACK_FOR ? "Sent · No Answer" : "Sent";
   }
 
-  // ---- pictures: re-drawn as JPEG (no photo metadata goes along), at most 2048 px and about 1.4 MB ----
-  async function fbPrepPicture(file) {
+  // ---- pictures: re-drawn as JPEG (no photo metadata goes along), at most 2048 px and about 1.4 MB (or maxBytes) ----
+  async function fbPrepPicture(file, maxBytes) {
+    const max = maxBytes || FB_PIC_MAX_BYTES;
     const d = await decodePhoto(file);
     try {
-      let edge = FB_PIC_EDGE, q = 0.85, blob = null, w = 0, h = 0;
-      for (let i = 0; i < 6; i++) {
+      let edge = Math.min(FB_PIC_EDGE, Math.max(d.w, d.h)), q = 0.85, blob = null, w = 0, h = 0;
+      for (let i = 0; i < 9; i++) {
         const k = Math.min(1, edge / Math.max(d.w, d.h));
         w = Math.max(1, Math.round(d.w * k)); h = Math.max(1, Math.round(d.h * k));
         const c = document.createElement("canvas"); c.width = w; c.height = h;
         c.getContext("2d").drawImage(d.src, 0, 0, w, h);
         blob = await new Promise((res) => c.toBlob(res, "image/jpeg", q));
         c.width = c.height = 0; // the canvas memory goes now, not at the next GC
-        if (blob && blob.size <= FB_PIC_MAX_BYTES) break;
-        if (q > 0.6) q -= 0.15; else edge = Math.round(edge * 0.75);
+        if (blob && blob.size <= max) break;
+        if (q > 0.6) q -= 0.15; else edge = Math.round(edge * 0.85);
       }
-      if (!blob || blob.size > FB_PIC_MAX_BYTES) throw new Error("picture too big");
+      if (!blob || blob.size > max) throw new Error("picture too big");
       return { bytes: new Uint8Array(await blob.arrayBuffer()), type: "image/jpeg", w, h, url: URL.createObjectURL(blob) };
     } finally { if (d.url) URL.revokeObjectURL(d.url); if (d.src && d.src.close) d.src.close(); }
   }
 
   // ---- sending ----
+  // Seals the report (smaller pictures until the file fits ntfy.sh's limit), keeps it, and tries to upload it now:
+  // "sent", "queued" (ntfy.sh busy / offline: Ghost sends it by itself later) or "failed" (refused for good; removed
+  // again, so the draft can be fixed and sent).
   async function fbSend(ctx, kind, d, dest) {
     if (!gnOn() || !gn.net.myId()) throw new Error("ghost network off");
     await fbLoad();
     const rid = fbB64u(crypto.getRandomValues(new Uint8Array(16)));
     const ack = { t: "gh-ra-" + fbRand32(26), k: fbB64u(crypto.getRandomValues(new Uint8Array(32))) };
-    const imgs = [];
-    for (const p of d.pics) imgs.push({ type: p.type, size: p.bytes.length, sha: await fbSha(p.bytes), w: p.w, h: p.h });
     const me = ctx.state.me || {}, prof = gn.net.profile(), info = fbAppInfo();
     const text = fbCut(d.text.trim(), FB_MAX_TEXT);
-    const r = JSON.stringify({ v: 1, rid, kind, text, screen: fbCut(d.screen, 120), app: { version: info.version, build: info.build },
-      device: { model: info.model, os: info.os }, name: fbCut(prof.name || me.name || me.username || "", 40), ts: Date.now(), ack, imgs });
-    await gn.net.sendReport(dest.inbox, r, d.pics.map((p) => p.bytes));
+    const max = gn.net.reportFileMax || 2 * 1024 * 1024;
+    let blob = null;
+    for (let i = 0; i < 5; i++) {
+      const imgs = [];
+      for (const p of d.pics) imgs.push({ type: p.type, size: p.bytes.length, sha: await fbSha(p.bytes), w: p.w, h: p.h });
+      const r = JSON.stringify({ v: 1, rid, kind, text, app: { version: info.version, build: info.build },
+        device: { model: info.model, os: info.os }, name: fbCut(prof.name || me.name || me.username || "", 40), ts: Date.now(), ack, imgs });
+      const b = await gn.net.sealReport(dest.inbox, r, d.pics.map((p) => p.bytes));
+      if (b.length <= max) { blob = b; break; }
+      if (!d.pics.length || i === 4) break;
+      // the pictures are almost all of it (base64 inside): each one smaller by the share that's over, plus room
+      const k = (max - 24 * 1024) / b.length;
+      for (const p of d.pics) {
+        const q = await fbPrepPicture(new Blob([p.bytes], { type: p.type }), Math.max(40 * 1024, Math.floor(p.bytes.length * k * 0.97)));
+        URL.revokeObjectURL(p.url);
+        Object.assign(p, q);
+      }
+    }
+    if (!blob) throw new Error("report too big");
     const first = (text.split("\n").find((x) => x.trim()) || "").trim();
-    fbState.sent.push({ rid, kind, excerpt: Array.from(first).length > 60 ? fbCut(first, 59) + "…" : first, ts: Date.now(), to: dest.label, ack, since: "", st: "sent" });
+    const s = { rid, kind, excerpt: Array.from(first).length > 60 ? fbCut(first, 59) + "…" : first, ts: Date.now(), to: dest.label, ack, since: "", st: "queued", inbox: Object.assign({}, dest.inbox), tries: 0, next: 0 };
+    fbState.sent.push(s);
+    fbOutbox.set(rid, blob);
+    try { await wallDB.put("fbq:" + rid, new Blob([blob])); } catch (e) { uiTrailN("feedback keep " + (e && e.message)); } // (memory only then)
     await fbSave();
+    const res = await fbUpload(ctx, s);
+    if (res === "failed") { fbState.sent = fbState.sent.filter((x) => x !== s); await fbSave(); throw Object.assign(new Error(s.why || "ntfy.sh refused it"), { said: true }); }
+    return res;
+  }
+  async function fbForget(rid) { fbOutbox.delete(rid); try { await wallDB.del("fbq:" + rid); } catch (e) {} }
+  // one try at uploading a kept report; on a busy ntfy.sh or no network it waits (30 s, doubling to 10 min, never
+  // before ntfy.sh's own wait is over) and fbOutboxSoon tries again
+  const fbUploading = new Set(); // rids being uploaded right now (Send and the outbox timer can meet)
+  async function fbUpload(ctx, s) {
+    if (s.st !== "queued") return s.st === "failed" ? "failed" : "sent"; // (gone out, or given up, meanwhile)
+    if (fbUploading.has(s.rid)) return "queued";
+    fbUploading.add(s.rid);
+    try { return await fbUploadNow(ctx, s); } finally { fbUploading.delete(s.rid); }
+  }
+  async function fbUploadNow(ctx, s) {
+    let blob = fbOutbox.get(s.rid);
+    if (!blob) { try { const b = await wallDB.get("fbq:" + s.rid); if (b) blob = new Uint8Array(await b.arrayBuffer()); } catch (e) {} }
+    if (!blob || !s.inbox) { s.st = "failed"; s.why = "lost"; await fbSave(); return "failed"; }
+    try {
+      await gn.net.uploadReport(s.inbox, blob);
+    } catch (e) {
+      const m = String(e && e.message || e);
+      uiTrailN("feedback upload " + m);
+      // ntfy.sh's 413 is also "this IP's file storage is full" (20 MB per 3 h): worth two more tries, far apart
+      const n413 = /ntfy 413/.test(m) ? (s.n413 = (s.n413 || 0) + 1) : 0;
+      const keep = /busy|429|reachable|ntfy 5\d\d|upload failed/.test(m) || (n413 && n413 <= 2);
+      if (!keep || Date.now() - s.ts > FB_QUEUE_FOR) {
+        s.st = "failed"; s.why = n413 ? "it's too big, try fewer pictures" : fbErrorText(e);
+        delete s.inbox; delete s.next; await fbForget(s.rid); await fbSave(); fbRefresh(ctx);
+        return "failed";
+      }
+      s.tries = (s.tries || 0) + 1;
+      const own = Math.min(30e3 * Math.pow(2, s.tries - 1), 10 * 60e3);
+      s.next = Date.now() + Math.max(n413 ? 15 * 60e3 : own, gn.net.busyFor ? gn.net.busyFor() : 0, ntfyGate.until - Date.now());
+      await fbSave(); fbRefresh(ctx);
+      fbOutboxSoon(ctx);
+      return "queued";
+    }
+    s.st = "sent"; s.sentAt = Date.now();
+    delete s.inbox; delete s.tries; delete s.next; delete s.n413;
+    await fbForget(s.rid);
+    await fbSave(); fbRefresh(ctx);
     fbAckSoon(ctx);
+    return "sent";
+  }
+  // the next try for reports still waiting, while Ghost is open (and at every launch / return to the front)
+  let fbOutboxTimer = 0, fbOutboxBusy = false;
+  function fbOutboxSoon(ctx, later) {
+    clearTimeout(fbOutboxTimer);
+    const waiting = (fbState ? fbState.sent : []).filter((s) => s.st === "queued");
+    if (!waiting.length) return;
+    const at = Math.min.apply(null, waiting.map((s) => s.next || 0));
+    fbOutboxTimer = setTimeout(() => fbOutboxRun(ctx), Math.max(later || (window.__ghostMockFast ? 50 : 1000), at - Date.now()));
+  }
+  async function fbOutboxRun(ctx) {
+    if (fbOutboxBusy) return;
+    fbOutboxBusy = true;
+    let later = 0;
+    try {
+      await fbLoad();
+      if (!gnOn() || !gn.net || !gn.net.myId()) { // Ghost Network still starting (or turned off): look again later
+        later = 15e3;
+        for (const s of fbState.sent.filter((x) => x.st === "queued" && Date.now() - x.ts > FB_QUEUE_FOR)) { s.st = "failed"; s.why = "Ghost Network is off"; delete s.inbox; await fbForget(s.rid); }
+        await fbSave();
+        return;
+      }
+      for (const s of fbState.sent.filter((x) => x.st === "queued")) {
+        if (s.st !== "queued" || (s.next || 0) > Date.now()) continue; // (sent by Send while an earlier one uploaded)
+        if ((await fbUpload(ctx, s)) === "queued") break; // still busy: the rest waits with it
+      }
+    } catch (e) { uiTrailN("feedback outbox " + (e && e.message)); }
+    finally { fbOutboxBusy = false; fbOutboxSoon(ctx, later); }
   }
   function fbErrorText(e) {
     const m = String(e && e.message || e);
     if (/ghost network off|no Ghost identity/.test(m)) return "turn on Ghost Network first (Settings > Privacy)";
     if (/429|busy/.test(m)) return "ntfy.sh is busy, try again in a few minutes";
     if (/too big/.test(m)) return "it's too big, try fewer pictures";
-    return "check your connection and try again";
+    if (/inbox/.test(m)) return "that PC doesn't take reports any more";
+    return /ntfy 4\d\d/.test(m) ? "ntfy.sh refused it" : "check your connection and try again";
   }
   // the relay's answer: read while Ghost is open, a few times after sending and whenever the Feedback page opens
   let fbAckBusy = null, fbAckTimer = 0;
@@ -5743,11 +5888,11 @@
   }
   async function fbPollAcksNow(ctx) {
     await fbLoad();
-    const open = fbState.sent.filter((s) => s.ack && Date.now() - s.ts < FB_ACK_FOR && !["filed", "limited", "rejected"].includes(s.st));
+    const open = fbState.sent.filter((s) => s.ack && Date.now() - (s.sentAt || s.ts) < FB_ACK_FOR && !["filed", "limited", "rejected", "queued", "failed"].includes(s.st));
     let changed = false;
     for (const s of open) {
       let r = null;
-      try { r = await dgPost("gnet", { url: "https://ntfy.sh/" + s.ack.t + "/json?poll=1&since=" + encodeURIComponent(s.since || "all"), method: "GET" }); } catch (e) { continue; }
+      try { r = await ntfyNet({ url: "https://ntfy.sh/" + s.ack.t + "/json?poll=1&since=" + encodeURIComponent(s.since || "all"), method: "GET" }); } catch (e) { continue; }
       if (!r || r.status !== 200 || typeof r.body !== "string") continue;
       const text = new TextDecoder().decode(b64uBytes(r.body.replace(/\+/g, "-").replace(/\//g, "_")));
       const key = await crypto.subtle.importKey("raw", b64uBytes(s.ack.k), "AES-GCM", false, ["decrypt"]);
@@ -5775,7 +5920,7 @@
     const waits = window.__ghostMockFast ? [300, 600, 1200] : [20e3, 45e3, 90e3, 180e3];
     const step = (i) => { fbAckTimer = setTimeout(async () => {
       await fbPollAcks(ctx);
-      const waiting = fbState && fbState.sent.some((s) => Date.now() - s.ts < FB_ACK_FOR && (s.st === "sent" || s.st === "received" || s.st === "held"));
+      const waiting = fbState && fbState.sent.some((s) => Date.now() - (s.sentAt || s.ts) < FB_ACK_FOR && (s.st === "sent" || s.st === "received" || s.st === "held"));
       if (waiting && i + 1 < waits.length) step(i + 1);
     }, waits[i]); };
     step(0);
@@ -5788,7 +5933,7 @@
     let foot;
     if (dests.length) {
       foot = (dests[0].key === "own" ? "Reports go to your PC (" + (notifyCfg.name || "relay") + ") and become tickets there." : "Reports go to " + dests[0].label + "'s PC" + (dests.length > 1 ? " (or another one you pick)" : "") + ", where whoever makes Ghost works through them.")
-        + " Bugs go on the list to fix; feature ideas wait until the owner decides. Each one includes your Ghost name, the Ghost version, your phone model and the screen you were on.";
+        + " Bugs go on the list to fix; feature ideas wait until the owner decides. Each one includes your Ghost name, the Ghost version and your phone model.";
     } else {
       foot = "Reports go to the PC of whoever makes Ghost, over Ghost Network. Connect your Ghost with theirs (open your chat with them > tap their name > Connect on Ghost); the buttons work once their Ghost tells yours where to send reports."
         + (notifyCfg ? " Your own PC's relay can take reports too: run `reports enable` there (ghost-notify README)." : "");
@@ -5798,7 +5943,8 @@
     setRow(g, { icon: "bulb", tint: "linear-gradient(135deg,#f0b232,#ffcf33)", label: "Request a Feature", onClick: () => pushSettingsPage(ctx, "feedbackIdea") });
     const sent = fbState ? fbState.sent.slice().reverse().slice(0, 15) : [];
     if (sent.length) {
-      const gs = setGroup(body, "Sent", "The answer comes from the PC that took the report while Ghost is open, for about 12 hours. Received · #12 = ticket 12 on that PC.");
+      const gs = setGroup(body, "Sent", "The answer comes from the PC that took the report while Ghost is open, for about 12 hours. Received · #12 = ticket 12 on that PC."
+        + (sent.some((s) => s.st === "queued") ? " Waiting to Send: ntfy.sh is busy or you're offline; Ghost sends it by itself while it's open." : ""));
       for (const s of sent) {
         const row = setRow(gs, { label: (s.kind === "bug" ? "Bug · " : "Idea · ") + (s.excerpt || "…"), value: fbStatusLabel(s) });
         row.classList.add("gh-fb-sent-row");
@@ -5814,8 +5960,7 @@
     fbPollAcks(ctx).catch(() => {});
   }
   function feedbackFormPage(ctx, body, page, kind) {
-    const d = fbDraft[kind] || (fbDraft[kind] = { text: "", screen: "", pics: [], to: "" });
-    if (!d.screenEdited) d.screen = fbScreenLabel(ctx); // where Settings was opened from this time (a kept draft too)
+    const d = fbDraft[kind] || (fbDraft[kind] = { text: "", pics: [], to: "" });
     const dests = fbDestinations(ctx);
     if (!dests.some((x) => x.key === d.to)) d.to = dests.length ? dests[0].key : "";
     const bug = kind === "bug";
@@ -5827,10 +5972,6 @@
     ta.value = d.text;
     const count = el("div", "gh-fb-count");
     box.append(ta, count); g.appendChild(box);
-    setRow(g, { label: "Screen", value: d.screen || "-", onClick: async (row) => {
-      const v = await promptSheet(ctx, bug ? "Where did it happen? (e.g. a group chat, the camera)" : "Where would it go?", d.screen, 120);
-      if (v != null) { d.screen = v; d.screenEdited = true; row._value.textContent = v || "-"; }
-    } }).classList.add("gh-fb-screen-row");
     g = setGroup(body, "Screenshots & Photos", "Up to " + FB_MAX_PICS + ". They're re-saved as plain pictures (no location or other photo details) and go with the report.");
     const grid = el("div", "gh-fb-pics"); g.appendChild(grid);
     const add = setRow(g, { icon: "photo", tint: "#ff9433", label: "Add Screenshot or Photo", onClick: async () => {
@@ -5860,7 +6001,7 @@
     const info = fbAppInfo();
     const note = el("div", "gh-set-group-foot gh-fb-note");
     note.textContent = (dests.length ? "Goes to " + (dests.find((x) => x.key === d.to) || dests[0]).label + ". " : "")
-      + "Sent with it: your Ghost name, Ghost " + (info.version || "(version unknown)") + (info.build ? " (" + info.build + ")" : "") + ", " + info.model + (info.os ? " on iOS " + info.os : "") + " and the screen above."
+      + "Sent with it: your Ghost name, Ghost " + (info.version || "(version unknown)") + (info.build ? " (" + info.build + ")" : "") + ", " + info.model + (info.os ? " on iOS " + info.os : "") + "."
       + (bug ? "" : " Feature ideas wait until the owner decides.");
     const send = el("button", "gh-fb-send gh-press");
     body.append(note, send);
@@ -5883,15 +6024,16 @@
         if (lim) { ctx.showToast(lim); return; }
         if (add.dataset.busy) { ctx.showToast("One moment, the picture is still being prepared"); return; }
         if (!dest || !d.text.trim()) return;
-        await fbSend(ctx, kind, d, dest);
+        const res = await fbSend(ctx, kind, d, dest);
         for (const p of d.pics) URL.revokeObjectURL(p.url);
         fbDraft[kind] = null;
-        ctx.showToast(bug ? "Bug report sent · thanks!" : "Feature request sent · thanks!");
+        ctx.showToast(res === "sent" ? (bug ? "Bug report sent · thanks!" : "Feature request sent · thanks!")
+          : (bug ? "Bug report saved · Ghost sends it as soon as ntfy.sh lets it" : "Feature request saved · Ghost sends it as soon as ntfy.sh lets it"));
         const st = ctx.settings.stack;
         if (st.length && st[st.length - 1].page === page) popSettingsPage(ctx);
       } catch (e) {
         uiTrailN("feedback send " + (e && e.message));
-        ctx.showToast("Couldn't send it: " + fbErrorText(e));
+        ctx.showToast("Couldn't send it: " + (e && e.said ? e.message : fbErrorText(e)));
       } finally { busy = false; paint(); }
     });
     paintPics(); paint();
@@ -5951,13 +6093,13 @@
     for (let i = 0; i < parts.length; i++) {
       try {
         const msg = await notifyCtlEncrypt(c, { type: "reporters", v: 1, rev: c.rpRev, part: i, parts: parts.length, rx: c.rx.rev, me: list.me, friends: parts[i], ts: Date.now() });
-        const r = await dgPost("gnet", { url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg) });
+        const r = await ntfyNet({ url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg) });
         if (!r || r.status < 200 || r.status >= 300) uiTrailN("reporters not sent " + (r && r.status));
       } catch (e) { uiTrailN("reporters " + (e && e.message)); }
     }
-    // the relay reads the topic about every 20 s: look for its answer a few times while Ghost is open
+    // relay 1.6+ gets it at once (1.5 read the topic every 20 s): look for its answer a few times while Ghost is open
     clearTimeout(fbOwnerTimer);
-    const waits = window.__ghostMockFast ? [300, 900] : [25e3, 60e3, 120e3];
+    const waits = window.__ghostMockFast ? [300, 900] : [6e3, 25e3, 60e3, 120e3];
     const step = (i) => { fbOwnerTimer = setTimeout(async () => {
       if (notifyCfg !== c || !c.rpPending) return;
       try { await notifyPollControl(); } catch (e) {}
@@ -7945,7 +8087,6 @@
   function openCamera(ctx, opts) {
     const c = ctx.camera;
     haptic();
-    fbNoteScreen(ctx, "Camera");
     c.preselect = (opts && opts.to) || null;
     const conv = c.preselect && ctx.state.convById.get(c.preselect);
     c.toEl.textContent = conv ? conv.title : "";
@@ -10431,7 +10572,6 @@
   function openGallery(ctx) {
     const g = ctx.gallery;
     g.el.dataset.open = "1";
-    fbNoteScreen(ctx, "Gallery");
     if (g.seg) { g.seg.dataset.show = galTikTokOn() ? "1" : "0"; if (g.mode === "tiktok") { if (galTikTokOn()) { ttBmLoad(true).then(() => paintGalTikTok(ctx)); } else setGalMode(ctx, "photos"); } }
     if (!g.loaded && !g.loading) loadGallery(ctx);
     else {
@@ -10660,7 +10800,6 @@
     const T = ctx.tiktok;
     if (!T || pref("tiktokTab") === false) return;
     T.el.dataset.open = "1";
-    fbNoteScreen(ctx, "TikTok");
     if (!ttBM.loaded) ttBmLoad(); // which videos are bookmarked in Ghost (the rail's bookmark state)
     ttPost("active", { on: true }).catch(() => {});
     if (!T.started) {
@@ -14382,7 +14521,7 @@
     if (!(window.crypto && crypto.subtle)) { gnTrail("no WebCrypto here - Ghost Network unavailable"); return; } // https pages only
     gn.ctx = ctx; ctx.gn = gn;
     gn.net = GhostNetCore.create({
-      gnet: (a) => dgPost("gnet", a).catch((e) => { gnTrail("gnet " + (e && e.message || e)); return null; }),
+      gnet: (a) => ntfyNet(a).catch((e) => { gnTrail("gnet " + (e && e.message || e)); return null; }),
       // keys live in the Keychain ({keys}); a Keychain error rejects (network.js then refuses to make new keys). Ghost
       // storage is only used where there is no native side at all (a plain browser / old rig: no {keys} reply).
       keysGet: async () => {
@@ -14425,7 +14564,7 @@
     const round = async (withSync) => {
       if (document.hidden || !gn.net.hasWork() || gn.polling) return;
       gn.polling = true;
-      try { await gn.net.poll(); if (withSync) await gn.net.sync(withSync === "force"); }
+      try { await gn.net.poll(withSync === "force"); if (withSync) await gn.net.sync(withSync === "force"); }
       catch (e) { gnTrail("poll " + (e && e.message)); }
       finally { gn.polling = false; }
       // a status that just ran out disappears from headers and profiles without waiting for a message
