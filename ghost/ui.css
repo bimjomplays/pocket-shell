@@ -1776,6 +1776,12 @@ input, textarea {
 .gh-set-wall span { position: absolute; left: 0; right: 0; bottom: 6px; text-align: center; font-size: 11.5px; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.6); }
 .gh-set-wall[data-on="1"] { border-color: var(--gh-accent); }
 .gh-set-slider-row { gap: 14px; }
+.gh-set-ping-row { flex-direction: column; align-items: stretch; gap: 10px; padding-top: 11px; padding-bottom: 12px; }
+.gh-set-ping-top { display: flex; align-items: center; gap: 10px; }
+.gh-set-ping-line { display: flex; align-items: center; gap: 12px; }
+.gh-set-slider-cap.gh-set-ping-cap { width: auto; flex: none; font-size: 13px; white-space: nowrap; }
+.gh-set-slider-cap.gh-set-ping-cap:first-child { text-align: left; }
+.gh-set-slider-cap.gh-set-ping-cap:last-child { text-align: right; }
 .gh-set-slider-cap { color: var(--gh-text-secondary); font-size: 13px; width: 16px; text-align: center; }
 .gh-set-slider-cap-big { font-size: 20px; }
 .gh-set-slider { flex: 1; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px; background: rgba(120,120,128,0.36); outline: none; }
@@ -2976,3 +2982,34 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-fx-bg-busy { display: none; position: absolute; left: 50%; top: -34px; transform: translateX(-50%); padding: 6px 12px; border-radius: 999px; background: rgba(0,0,0,0.6); color: #fff; font: 600 13px -apple-system, sans-serif; white-space: nowrap; }
 .gh-fx-bg[data-busy="1"] .gh-fx-bg-busy { display: block; }
 .gh-fx-bg[data-busy="1"] .gh-fx-bg-row { opacity: 0.5; }
+
+/* ---- Feedback (1.16): Settings > Report a Bug or Idea ------------------------------------------------------ */
+.gh-fb-box { padding: 10px 14px 8px; }
+.gh-fb-text {
+  display: block; width: 100%; box-sizing: border-box; min-height: 132px; resize: none; border: 0; outline: none;
+  padding: 0; background: none; color: var(--gh-text); font: inherit; font-size: 16px; line-height: 1.35;
+}
+.gh-fb-text::placeholder { color: var(--gh-text-tertiary); }
+.gh-fb-count { margin-top: 4px; text-align: right; font-size: 12px; color: var(--gh-text-tertiary); font-variant-numeric: tabular-nums; }
+.gh-fb-box + .gh-set-row::before { content: ""; position: absolute; top: 0; right: 0; left: 14px; height: 0.5px; background: var(--gh-divider); }
+.gh-fb-screen-row .gh-set-value { max-width: 64%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-fb-pics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 12px 14px 4px; }
+.gh-fb-pic { position: relative; aspect-ratio: 3 / 4; border-radius: 10px; overflow: hidden; background: var(--gh-bg-panel-2); }
+.gh-fb-pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gh-fb-pic-x {
+  position: absolute; top: 5px; right: 5px; width: 24px; height: 24px; border-radius: 50%; border: 0; padding: 0;
+  display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.62); color: #fff;
+}
+.gh-fb-pic-x::after { content: ""; position: absolute; inset: -9px; } /* a finger-sized target around the small circle */
+.gh-fb-pics + .gh-set-row::before { content: ""; position: absolute; top: 0; right: 0; left: 56px; height: 0.5px; background: var(--gh-divider); }
+.gh-set-row[data-busy="1"] { opacity: 0.5; pointer-events: none; }
+.gh-fb-note { margin-top: 14px; }
+.gh-fb-send {
+  display: block; width: 100%; margin-top: 16px; padding: 13px 0; border: 0; border-radius: 13px;
+  background: var(--gh-accent); color: var(--gh-accent-text); font: inherit; font-size: 16.5px; font-weight: 650;
+}
+.gh-fb-send:disabled { opacity: 0.45; }
+.gh-fb-sent-row .gh-set-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gh-fb-sent-row .gh-set-value { flex: none; font-size: 14px; }
+.gh-fb-sent-row[data-st="filed"] .gh-set-value, .gh-fb-sent-row[data-st="received"] .gh-set-value { color: #3ddc84; }
+.gh-fb-sent-row[data-st="limited"] .gh-set-value, .gh-fb-sent-row[data-st="rejected"] .gh-set-value { color: var(--gh-danger); }

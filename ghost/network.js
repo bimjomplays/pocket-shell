@@ -25,6 +25,14 @@
 //     wrote; a mismatch makes the friend send all of its items again. So nothing depends on ntfy.sh's 12 h storage.
 //     Sticker pictures go as encrypted attachments (like profile pictures); a Ghost that can't fetch one (ntfy.sh keeps
 //     files 3 h) asks with {type:"xneed", k} and the author uploads it again.
+//   - Report inbox (1.16): a Ghost whose PC relay takes bug reports (ghost-notify `reports enable`) tells its connected
+//     friends where to send them: {type:"rx", rv, rx:{t, k, n} | null} (t = the relay's ntfy inbox "gh-rp-...", k = the
+//     relay's ECDH public key, n = a label). Kept like the status line: every sync carries rxh (the rv I hold from you)
+//     and rxv (mine), a mismatch re-sends it. A report is ONE encrypted file PUT to that inbox: "GRPT1" || ephemeral
+//     ECDH public (65) || iv (12) || AES-GCM(HKDF(ECDH(eph, relay), salt = eph, "ghost-report-v1"), AAD
+//     "ghost-report-v1|" + t) of {x, s (my public keys), r (the report JSON, a string), sig, img:[base64...]}, sig =
+//     ECDSA over "ghost-report-v1|" + t + "|" + r. The relay works out the Ghost ID from x+s, so a report can't claim
+//     to be from someone else. Contract and limits: ghost-notify/README.md "Bug reports and feature requests".
 const GhostNetCore = (() => {
   "use strict";
   const subtle = crypto.subtle;
@@ -40,6 +48,8 @@ const GhostNetCore = (() => {
   const SYNC_FORCED = 3600e3; // a forced sync (every time Ghost comes to the front) still only runs hourly per friend: ntfy.sh allows 250 messages a day
   const GONE_KEEP = 7 * 24 * 3600e3; // how long a disconnected friend is remembered, to answer their Ghost with "bye"
   const PI_RE = /^gh-pi-[a-z2-9]{26}$/;
+  const RX_RE = /^gh-rp-[a-z2-9]{26}$/;       // a relay's report inbox
+  const REPORT_MAX = 8 * 1024 * 1024;          // the relay refuses bigger report files
   const MAX_PIC = 3 * 1024 * 1024;
   const LIMITS = { name: 40, bio: 300, status: 60 };
   // Shared items (games; later anything two Ghosts keep in sync): small JSON state, versioned, re-sent until the friend
@@ -186,6 +196,26 @@ const GhostNetCore = (() => {
     return { from: inner.f, obj, card };
   }
 
+  // ---- reports to a relay (see "Report inbox" above) ---------------------------------------------------
+  // a friend's report inbox, cleaned; null when it isn't one
+  function rxValid(d) {
+    if (!d || typeof d !== "object" || !RX_RE.test(d.t || "") || !d.k || !validJwk(d.k)) return null;
+    const n = Array.from(String(d.n == null ? "" : d.n).replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, " ").trim()).slice(0, 40).join("");
+    return { t: d.t, k: { x: d.k.x, y: d.k.y }, n };
+  }
+  async function sealReport(me, inbox, r, imgs) {
+    const aad = "ghost-report-v1|" + inbox.t;
+    const sig = u8(await subtle.sign(SIG, me.sPriv, te.encode(aad + "|" + r)));
+    const plain = te.encode(JSON.stringify({ x: me.x, s: me.s, r, sig: b64(sig), img: imgs.map((b) => b64(b)) }));
+    const eph = await subtle.generateKey(EC, true, ["deriveBits"]);
+    const e = await rawOf(eph.publicKey);
+    const shared = u8(await subtle.deriveBits({ name: "ECDH", public: await importEcdhPub(inbox.k) }, eph.privateKey, 256));
+    const key = await hkdfKey(shared, e, "ghost-report-v1");
+    const iv = rand(12);
+    const c = u8(await subtle.encrypt({ name: "AES-GCM", iv, additionalData: te.encode(aad) }, key, plain));
+    return concat("GRPT1", e, iv, c);
+  }
+
   // ---- invite codes -------------------------------------------------------------------------------------
   function newCode() {
     const r = rand(12); let s = "";
@@ -217,7 +247,7 @@ const GhostNetCore = (() => {
     let st = null, ident = null, identP = null, busy = null, leaving = false, slowUntil = 0;
     const blank = () => ({ v: 1, on: true, friends: {}, invites: {}, joined: {}, since: {}, seen: [], share: "all", shareWith: [],
       profile: { v: 0, name: "", bio: "", accent: "", pic: false, banner: false }, uploads: {},
-      status: { v: 0, text: "", until: 0 }, gone: {}, pi: "", items: {} });
+      status: { v: 0, text: "", until: 0 }, gone: {}, pi: "", items: {}, rx: { v: 0, inbox: null } });
     async function state() {
       if (st) return st;
       let s = null; try { s = await deps.load(); } catch (e) {}
@@ -345,11 +375,26 @@ const GhostNetCore = (() => {
       }
       await save();
     }
+    // my report inbox (my PC relay takes bug reports), like the status line: its own message, re-sent on a sync mismatch
+    async function sendRx(f) {
+      await send(f, { type: "rx", rv: st.rx.v, rx: st.rx.inbox });
+      f.sentRV = st.rx.v;
+    }
+    async function pushRxToAll() {
+      for (const f of Object.values(st.friends)) {
+        if (f.state !== "connected" || f.sentRV === st.rx.v || !(f.cap >= 2)) continue;
+        try { await sendRx(f); } catch (e) { log("rx to " + f.id + ": " + e.message); }
+      }
+      await save();
+    }
+    // what every sync carries about report inboxes (builds before 1.16 send neither and ignore both)
+    const rxInfo = (f) => ({ rxh: f.rxV || 0, rxv: st.rx.v || 0 });
     // after connecting: the profile, and the status if there is one
     async function sendAll(f) {
       await sendProfile(f);
       try { const me = await identity(false); if (me) await xsend(f, xmine(f.id, me.id, false).concat(xmine(f.id, me.id, true))); } catch (e) { log("extras: " + e.message); }
       if (st.status && st.status.v && statusLive() && f.cap >= 2) { try { await sendStatus(f); } catch (e) { log("status: " + e.message); } }
+      if (st.rx && st.rx.v && f.cap >= 2) { try { await sendRx(f); } catch (e) { log("rx: " + e.message); } }
     }
     async function pushProfileToAll() {
       for (const f of Object.values(st.friends)) {
@@ -542,8 +587,10 @@ const GhostNetCore = (() => {
               try { await xsend(f, xmine(f.id, me.id, true)); } catch (e) { log("group extras resend: " + e.message); }
             }
           }
-          const behind = (typeof obj.mine === "number" && obj.mine > (f.haveV || 0)) || (typeof obj.sv === "number" && obj.sv > (f.statusV || 0));
-          if (behind && !obj.reply) { try { await send(f, Object.assign(Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v, reply: true }, xsyncInfo(f)), piInfo())); } catch (e) {} }
+          // my report inbox: they hold another version (1.16+ only: older builds send no rxh)
+          if (typeof obj.rxh === "number" && st.rx.v && obj.rxh !== st.rx.v && f.cap >= 2) { try { await sendRx(f); } catch (e) { log("sync rx: " + e.message); } }
+          const behind = (typeof obj.mine === "number" && obj.mine > (f.haveV || 0)) || (typeof obj.sv === "number" && obj.sv > (f.statusV || 0)) || (typeof obj.rxv === "number" && obj.rxv > (f.rxV || 0));
+          if (behind && !obj.reply) { try { await send(f, Object.assign(Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v, reply: true }, xsyncInfo(f), rxInfo(f)), piInfo())); } catch (e) {} }
           await save();
           return;
         }
@@ -553,6 +600,15 @@ const GhostNetCore = (() => {
           const until = Number(obj.until) || 0;
           f.status = text ? { text, until } : null; f.statusV = obj.sv;
           await save(); changed("profile", { id: f.id, snap: f.snap });
+          return;
+        }
+        // a connected friend's report inbox (their PC relay takes bug reports from their friends), or null = not any more
+        case "rx": {
+          if (!f || f.state !== "connected" || !Number.isSafeInteger(obj.rv) || obj.rv <= (f.rxV || 0)) return;
+          const d = obj.rx === null ? null : rxValid(obj.rx);
+          if (obj.rx !== null && !d) return;
+          f.rx = d; f.rxV = obj.rv;
+          await save(); changed("rx", { id: f.id, snap: f.snap });
           return;
         }
         // their Ghost couldn't download my pictures (ntfy.sh keeps files 3 h): upload fresh ones and send again
@@ -912,13 +968,14 @@ const GhostNetCore = (() => {
             // a profile or status that didn't get out earlier (network down, a picture upload failed)
             if (f.sentV !== st.profile.v && now() - (f.retryAt || 0) > 10 * 60e3) { f.retryAt = now(); try { await sendProfile(f); } catch (e) { log("profile retry " + f.id + ": " + e.message); } }
             if (st.status.v && f.sentSV !== st.status.v && f.cap >= 2) { try { await sendStatus(f); } catch (e) { log("status retry: " + e.message); } }
+            if (st.rx.v && f.sentRV !== st.rx.v && f.cap >= 2) { try { await sendRx(f); } catch (e) { log("rx retry: " + e.message); } }
             // shared items the friend hasn't confirmed yet (a move they may have missed while offline for days)
             for (const it of Object.values(st.items || {})) {
               if (it.with !== f.id || it.acked === it.v || now() - (it.sentAt || 0) < (force ? 60e3 : ITEM_RESEND)) continue;
               try { await send(f, itemMsg(it)); it.sentAt = now(); } catch (e) { log("item resend: " + e.message); break; }
             }
             if (now() - (f.lastSync || 0) < (force ? SYNC_FORCED : SYNC_EVERY)) continue;
-            await send(f, Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v }, piInfo(), xsyncInfo(f)));
+            await send(f, Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v }, piInfo(), xsyncInfo(f), rxInfo(f)));
             f.lastSync = now();
           } catch (e) { log("sync " + f.id + ": " + e.message); }
         }
@@ -969,6 +1026,40 @@ const GhostNetCore = (() => {
       },
       // a connected friend's status, while it lasts
       friendStatus(id) { const f = st && st.friends[id]; return f && f.status && f.status.text && (!f.status.until || f.status.until > now()) ? f.status : null; },
+      // ---- bug reports / feature requests (ui.js section "Feedback") ----
+      // my report inbox for connected friends ({t, k, n} from my paired PC relay, null = none); same one again = no-op
+      async setReportInbox(d) {
+        await state();
+        const clean = d ? rxValid(d) : null;
+        if (d && !clean) throw new Error("bad report inbox");
+        if (JSON.stringify(clean) === JSON.stringify(st.rx.inbox)) return false;
+        if (!st.rx.v && !clean) return false; // never had one: nothing to take back
+        st.rx = { v: Math.max(now(), (st.rx.v || 0) + 1), inbox: clean };
+        await save();
+        await pushRxToAll();
+        return true;
+      },
+      myReportInbox() { return st && st.rx && st.rx.inbox ? Object.assign({}, st.rx.inbox) : null; },
+      // where I can send a report: connected friends whose relay takes them
+      reportInboxes() {
+        if (!st) return [];
+        return Object.values(st.friends).filter((f) => f.state === "connected" && f.rx && rxValid(f.rx))
+          .map((f) => ({ friendId: f.id, snap: f.snap, name: (f.profile && f.profile.name) || "", t: f.rx.t, k: Object.assign({}, f.rx.k), n: f.rx.n || "" }));
+      },
+      // seal a report (r = the report JSON string, imgs = Uint8Arrays) for a relay's inbox and upload it there
+      async sendReport(inbox, r, imgs) {
+        await state();
+        const me = await identity(false);
+        if (!me) throw new Error("no Ghost identity");
+        const d = rxValid(inbox);
+        if (!d) throw new Error("bad report inbox");
+        if (typeof r !== "string") throw new Error("bad report");
+        const blob = await sealReport(me, d, r, imgs || []);
+        if (blob.length > REPORT_MAX) throw new Error("report too big");
+        const res = JSON.parse(td.decode(await net({ url: NTFY + "/" + d.t, method: "PUT", body: b64(blob), headers: { Filename: "report.bin", Firebase: "no" } })));
+        if (!res || !res.attachment || typeof res.attachment.url !== "string") throw new Error("upload failed");
+        return { id: String(res.id || ""), bytes: blob.length };
+      },
       // invites you sent that are still waiting
       pendingInvites() {
         if (!st) return [];
@@ -1043,6 +1134,6 @@ const GhostNetCore = (() => {
     return api;
   }
 
-  return { create, parseInvite, inviteText, _test: { seal, unseal, seal2, unseal2, loadIdentity, newKeyFile, makeCard, readCard, proof, newCode, rvTopic, b32 } };
+  return { create, parseInvite, inviteText, _test: { seal, unseal, seal2, unseal2, loadIdentity, newKeyFile, makeCard, readCard, proof, newCode, rvTopic, b32, sealReport, rxValid } };
 })();
 if (typeof module !== "undefined" && module.exports) module.exports = GhostNetCore;

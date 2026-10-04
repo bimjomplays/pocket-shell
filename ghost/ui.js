@@ -120,6 +120,8 @@
     arrowUpLeft: '<path d="M17 17L7 7"/><path d="M7 15V7h8"/>',
     hash: '<path d="M9.5 4L7.5 20"/><path d="M16.5 4l-2 16"/><path d="M4.5 9h15"/><path d="M4 15h15"/>',
     playOutline: '<path d="M8 5.5v13l10.5-6.5z"/>',
+    bug: '<rect x="8" y="6.5" width="8" height="13" rx="4"/><path d="M12 11v8.5"/><path d="M8 11.5H4.5M19.5 11.5H16M8 16H5M19 16h-3M9.5 7L7.5 4.5M14.5 7l2-2.5"/>',
+    bulb: '<path d="M9.5 18h5M10.5 21h3"/><path d="M12 3a6 6 0 00-3.6 10.8c.7.5 1.1 1.3 1.1 2.1v.1h5v-.1c0-.8.4-1.6 1.1-2.1A6 6 0 0012 3z"/>',
     games: '<rect x="2.5" y="7" width="19" height="11" rx="5.5"/><path d="M7.5 10.5v4M5.5 12.5h4"/><circle cx="15.5" cy="11.5" r=".9" fill="currentColor"/><circle cx="17.8" cy="13.8" r=".9" fill="currentColor"/>',
   };
   function icon(name, size, extraClass) {
@@ -1724,6 +1726,7 @@
     ctx.state.currentConvId = conversationId;
     const convData = ctx.state.convById.get(conversationId);
     if (convData) updateConvHeader(ctx, convData);
+    fbNoteScreen(ctx, convData && convData.isGroup ? "Group chat" : "Chat");
     navigateTo(ctx, "conv", true);
     const conv = ctx.conv;
     conv.rendered.forEach((elm) => elm.remove());
@@ -4168,6 +4171,7 @@
   }
   function openSettings(ctx) {
     haptic();
+    ctx.settingsFrom = fbScreenNow(ctx); // for a bug report (section "Feedback")
     const s = ctx.settings;
     s.el.innerHTML = "";
     s.stack = []; s.rootLabel = null;
@@ -4277,7 +4281,7 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile", gnPreview: "How Friends See You", gnVerify: "Verify Connection", tiktok: "TikTok", notify: "Notifications", notifySetup: "Set Up on Your PC" };
+  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile", gnPreview: "How Friends See You", gnVerify: "Verify Connection", tiktok: "TikTok", notify: "Notifications", notifySetup: "Set Up on Your PC", feedback: "Feedback", feedbackBug: "Report a Bug", feedbackIdea: "Request a Feature" };
   const SETTINGS_PAGES = {
     gnProfile(ctx, body) { return GN_SETTINGS.gnProfile(ctx, body); }, // section "Ghost network"
     gnShare(ctx, body) { return GN_SETTINGS.gnShare(ctx, body); },
@@ -4565,9 +4569,13 @@
       g = setGroup(body);
       setRow(g, { icon: "settings", tint: "#636366", label: "Advanced", onClick: () => { try { window.dgOpenSettings && window.dgOpenSettings(); } catch (e) {} } });
       setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "About Ghost", onClick: () => pushSettingsPage(ctx, "about") });
+      setRow(g, { icon: "bug", tint: "linear-gradient(135deg,#ff5c5c,#ff9433)", label: "Report a Bug or Idea", onClick: () => pushSettingsPage(ctx, "feedback") });
     },
     notify(ctx, body) { return notifySettingsPage(ctx, body); }, // section "Notifications while Ghost is closed"
     notifySetup(ctx, body) { return notifySetupPage(ctx, body); },
+    feedback(ctx, body) { return feedbackPage(ctx, body); }, // section "Feedback"
+    feedbackBug(ctx, body, page) { return feedbackFormPage(ctx, body, page, "bug"); },
+    feedbackIdea(ctx, body, page) { return feedbackFormPage(ctx, body, page, "feature"); },
     tiktok(ctx, body) {
       const g = setGroup(body, null, "Off removes the TikTok tab and Ghost stops loading TikTok completely. Your TikTok sign-in stays until you sign out.");
       setRow(g, { icon: "reels", tint: "linear-gradient(135deg,#25c5e8,#f0366a)", label: "TikTok Tab", toggle: { get: () => pref("tiktokTab") !== false, set: (v) => { setPref(ctx, "tiktokTab", v); paintAcct(); paintDM(); paintFeed(); } } });
@@ -5283,6 +5291,7 @@
   }
   function openSettingsAt(ctx, name, rootLabel) {
     haptic();
+    ctx.settingsFrom = fbScreenNow(ctx);
     const s = ctx.settings;
     s.el.innerHTML = ""; s.stack = []; s.rootLabel = rootLabel || "Chat";
     s.el.dataset.open = "1";
@@ -5294,7 +5303,8 @@
   // Mozilla push address the PC relay holds; the relay forwards "Jacob: Sent you a chat" to the ntfy app. Ghost's part:
   // take the pairing link (dltnpghost://notify-setup?c=...), hand Snapchat that address (bridge pushRegister, the same
   // RegisterDevice call Snapchat Web makes) and the account's web-push setting, re-register on every launch while on,
-  // and read the relay's private control topic for a new address. Ghost never sends anything to the relay.
+  // and read the relay's private control topic for a new address. The one thing Ghost sends the relay is the
+  // Notification Delivery setting, over that same encrypted topic (section below, relay 1.2.0+).
   // Proven on the phone 2026-09-29: pushes arrive within ~1 s with Ghost closed, none while it's open, none for
   // silenced chats. Contract with the relay: ghost-notify/README.md.
   // =====================================================================================================
@@ -5353,8 +5363,11 @@
     const ok = await confirmSheet(ctx, (again ? "Pair again with “" : "Pair with “") + cfg.name + "”? When Ghost is closed, your Snapchat notifications will come through that PC to the ntfy app (only who it's from, never the message).", "Pair");
     if (!ok) return;
     const wasOn = !!(notifyCfg && notifyCfg.on);
+    const oldRx = !again && notifyCfg && notifyCfg.rx && notifyCfg.rx.on; // another relay: friends stop using the old one's inbox
+    if (again) for (const k of ["delivery", "ping", "deliveryRev", "deliveryPending", "rx", "rpRev", "rpSig", "rpPending"]) if (notifyCfg[k] !== undefined) cfg[k] = notifyCfg[k]; // the relay keeps its settings (and its report inbox)
     notifyCfg = cfg;
     await notifySave();
+    if (oldRx && gnOn()) gn.net.setReportInbox(null).catch(() => {});
     if (wasOn) { try { await notifyTurnOn(ctx); ctx.showToast("Paired with " + cfg.name); } catch (e) { ctx.showToast("Paired - turn it on in Settings > Notifications"); } }
     else ctx.showToast("Paired with " + cfg.name + " - turn it on in Settings > Notifications");
     // paired from the Set Up page: back to Notifications, which now shows the switch
@@ -5380,7 +5393,13 @@
   }
   const uiTrailN = (t) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST notify " + String(t).slice(0, 200) }).catch(() => {}); } catch (e) {} };
   // the relay's control topic: a newer push address (Mozilla reset the old one). AES-256-GCM, nonce || ciphertext.
-  async function notifyPollControl() {
+  // one read at a time: a slow answer finishing after a newer one would move the cursor back
+  let notifyPollBusy = null;
+  function notifyPollControl() {
+    if (!notifyPollBusy) notifyPollBusy = notifyPollControlNow().finally(() => { notifyPollBusy = null; });
+    return notifyPollBusy;
+  }
+  async function notifyPollControlNow() {
     const c = notifyCfg;
     if (!c || !c.ctl) return false;
     const url = "https://ntfy.sh/" + c.ctl.topic + "/json?poll=1&since=" + encodeURIComponent(c.since || "all");
@@ -5388,7 +5407,7 @@
     if (!r || r.status !== 200 || typeof r.body !== "string") return false;
     const text = new TextDecoder().decode(b64uBytes(r.body.replace(/\+/g, "-").replace(/\//g, "_")));
     const key = await crypto.subtle.importKey("raw", b64uBytes(c.ctl.key), "AES-GCM", false, ["decrypt"]);
-    let changed = false, lastId = c.since;
+    let changed = false, dirty = false, rxNew = false, lastId = c.since;
     for (const line of text.split("\n")) {
       let m = null; try { m = JSON.parse(line); } catch (e) { continue; }
       if (!m || m.event !== "message" || typeof m.message !== "string") continue;
@@ -5399,21 +5418,97 @@
         const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: new TextEncoder().encode(NOTIFY_CTL_AAD) }, key, raw.slice(12));
         const j = JSON.parse(new TextDecoder().decode(plain));
         if (j && j.type === "subscription" && Number(j.ts) > (c.subTs || 0)) { c.sub = notifyCheckSub(j.sub); c.subTs = Number(j.ts); changed = true; }
+        if (j && j.type === "settings-ack" && j.v === 1 && Number.isInteger(j.rev) && NOTIFY_DELIVERY.some(([k]) => k === j.delivery) && (j.ping === undefined || notifyPingOk(j.ping))) dirty = notifyDeliveryAck(c, j) || dirty;
+        // relay 1.5.0+: its report inbox (section "Feedback"), and its answer to the list of who may send reports
+        if (j && j.type === "reports") { const rx = fbValidRx(j); if (rx && rx.rev > ((c.rx && c.rx.rev) || 0)) { c.rx = rx; c.rpPending = true; c.rxFresh = true; rxNew = true; dirty = true; } }
+        if (j && j.type === "reporters-ack" && j.v === 1 && Number.isSafeInteger(j.rev) && c.rpPending && c.rpRev && j.rev >= c.rpRev) { c.rpPending = false; dirty = true; }
       } catch (e) { /* not ours / tampered: ignored */ }
     }
-    if (lastId !== c.since || changed) { c.since = lastId; await notifySave(); }
+    if (lastId !== c.since || changed || dirty) { c.since = lastId; await notifySave(); }
+    if (rxNew) setTimeout(() => fbOwnerSync(fbCtx), 0);
     return changed;
+  }
+  // Notification Delivery: "grouped" (the relay's default: one banner per chat and type a minute, a newer one replaces
+  // a waiting one) or "every" (a banner per message), plus "ping", the seconds between a ringing call's banners (3-15)
+  // or "once" (relay 1.4.0+). Sent together as {type:"settings", v:1, rev, delivery, ping}, AES-GCM with the pairing
+  // key like the relay's own messages; the relay applies a higher rev, saves it and posts "settings-ack" with that rev
+  // and what it applied. Until then the section shows Pending and is sent again on every launch.
+  const NOTIFY_DELIVERY = [["grouped", "Grouped"], ["every", "Every Message"]];
+  const NOTIFY_PING_MIN = 3, NOTIFY_PING_MAX = 15, NOTIFY_PING_DEFAULT = 5; // the slider's far right (MAX + 1) = "once"
+  function notifyDelivery(c) { return c && c.delivery === "every" ? "every" : "grouped"; }
+  function notifyPingOk(v) { return v === "once" || (Number.isInteger(v) && v >= NOTIFY_PING_MIN && v <= NOTIFY_PING_MAX); }
+  function notifyPing(c) { return c && notifyPingOk(c.ping) ? c.ping : NOTIFY_PING_DEFAULT; }
+  function notifyPingLabel(v) { return v === "once" ? "Once" : "Every " + v + " s"; }
+  // notifications for a 30 s call that nobody answers: the ring banners plus one missed-call banner
+  function notifyPingCost(v) { return (v === "once" ? 1 : Math.ceil(30 / v)) + 1; }
+  // the relay answers every settings message with what it has applied: confirm ours, or take the relay's if it's
+  // newer (a re-pair, another copy of Ghost, a clock that went back); older answers are ignored
+  function notifyDeliveryAck(c, j) {
+    const rev = c.deliveryRev || 0;
+    // a relay before 1.4.0 has no "ping": it can't confirm a ping setting (stays Pending), and a newer one means the default
+    if (j.rev > rev) { c.delivery = j.delivery; c.ping = j.ping === undefined ? NOTIFY_PING_DEFAULT : j.ping; c.deliveryRev = j.rev; c.deliveryPending = false; return true; }
+    if (j.rev === rev && j.delivery === notifyDelivery(c) && j.ping === notifyPing(c) && c.deliveryPending) { c.deliveryPending = false; return true; }
+    return false;
+  }
+  async function notifyCtlEncrypt(c, obj) {
+    const key = await crypto.subtle.importKey("raw", b64uBytes(c.ctl.key), "AES-GCM", false, ["encrypt"]);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: new TextEncoder().encode(NOTIFY_CTL_AAD) }, key, new TextEncoder().encode(JSON.stringify(obj))));
+    const raw = new Uint8Array(12 + ct.length); raw.set(iv); raw.set(ct, 12);
+    let bin = ""; for (const b of raw) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  let notifyAckTimer = 0;
+  async function notifyDeliverySync(ctx) {
+    const c = notifyCfg;
+    if (!c || !c.ctl || !c.deliveryPending) return;
+    try { await notifyPollControl(); } catch (e) {} // an ack may have come in while Ghost was closed
+    if (notifyCfg !== c || !c.deliveryPending) { notifyRefreshPage(ctx); return; }
+    try {
+      const msg = await notifyCtlEncrypt(c, { type: "settings", v: 1, rev: c.deliveryRev, delivery: notifyDelivery(c), ping: notifyPing(c), ts: Date.now() });
+      const r = await dgPost("gnet", { url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg) });
+      if (!r || r.status < 200 || r.status >= 300) uiTrailN("settings not sent " + (r && r.status));
+    } catch (e) { uiTrailN("settings " + (e && e.message)); }
+    // the relay reads the topic about every 20 s: look for its ack a few times while Ghost is open
+    clearTimeout(notifyAckTimer);
+    const waits = [25e3, 30e3, 60e3, 120e3];
+    const step = (i) => { notifyAckTimer = setTimeout(async () => {
+      if (notifyCfg !== c || !c.deliveryPending) return;
+      try { await notifyPollControl(); } catch (e) {}
+      if (!c.deliveryPending) notifyRefreshPage(ctx);
+      else if (i + 1 < waits.length) step(i + 1);
+    }, waits[i]); };
+    step(0);
+  }
+  // change = { delivery } and/or { ping }; both go to the relay in one message
+  async function notifySetDelivery(ctx, change) {
+    const c = notifyCfg;
+    if (!c) return;
+    const delivery = change.delivery || notifyDelivery(c), ping = change.ping !== undefined ? change.ping : notifyPing(c);
+    if (!notifyPingOk(ping)) return;
+    if (notifyDelivery(c) === delivery && notifyPing(c) === ping && c.deliveryRev && !c.deliveryPending) return; // only a confirmed choice is skipped
+    c.delivery = delivery; c.ping = ping; c.deliveryRev = Math.max(Date.now(), (c.deliveryRev || 0) + 1); c.deliveryPending = true;
+    await notifySave();
+    notifyRefreshPage(ctx);
+    await notifyDeliverySync(ctx);
   }
   // every launch while on: Snapchat Web refreshes its registration on load too; a new address from the relay first
   async function notifyStart(ctx) {
     window.__ghostOpenURL = (u) => { dgPost("takeOpenURL", {}).catch(() => {}); handleGhostURL(ctx, u).catch((e) => uiTrailN("url " + (e && e.message))); };
-    ctx.notifyTest = { poll: () => notifyPollControl(), cfg: () => notifyCfg, start: () => notifyStart(ctx) }; // rig only
+    ctx.notifyTest = { poll: () => notifyPollControl(), cfg: () => notifyCfg, start: () => notifyStart(ctx), setDelivery: (m) => notifySetDelivery(ctx, typeof m === "string" ? { delivery: m } : m) }; // rig only
+    ctx.fbTest = { state: () => fbState, acks: () => fbPollAcks(ctx), owner: () => fbOwnerSync(ctx), dests: () => fbDestinations(ctx), screen: () => fbScreenLabel(ctx), app: () => fbAppInfo() }; // rig only
     let pending = null; try { pending = await dgPost("takeOpenURL", {}); } catch (e) {}
     await notifyLoad();
     if (typeof pending === "string" && pending) setTimeout(() => handleGhostURL(ctx, pending).catch(() => {}), 1200);
-    if (!notifyCfg || !notifyCfg.on) return;
-    await new Promise((r) => setTimeout(r, 6000)); // Snapchat's services are up by then
+    if (notifyCfg && notifyCfg.deliveryPending) notifyDeliverySync(ctx).catch(() => {}); // not confirmed last time: send again
+    fbCtx = ctx;
+    fbLoad().then((f) => { if (f.sent.some((s) => s.st === "sent" || s.st === "received" || s.st === "held")) fbAckSoon(ctx); }).catch(() => {}); // answers to reports
+    if (!notifyCfg) return;
+    await new Promise((r) => setTimeout(r, window.__ghostMockFast ? 200 : 6000)); // Snapchat's services are up by then
+    // (read while paired even with notifications off: the relay's report inbox comes this way too)
     try { await notifyPollControl(); } catch (e) { uiTrailN("control " + (e && e.message)); }
+    if (notifyCfg && notifyCfg.rx) fbOwnerSync(ctx);
+    if (!notifyCfg || !notifyCfg.on) return;
     try {
       const r = await api.pushRegister(notifyCfg.sub);
       notifyCfg.status = r && r.ok ? "working" : "failed";
@@ -5440,6 +5535,10 @@
       } } });
       const st = !c.on ? "Off" : c.status === "working" ? "Working" : c.status === "repair" ? "Re-pair needed" : c.status === "failed" ? "Couldn't reach Snapchat" : "Starting";
       setRow(g, { label: "Status", value: st });
+      const foot = (p) => "Grouped: one banner per chat a minute; a newer one replaces one still waiting. Every Message: one for every chat and snap (iOS may still stack them). Calls are never grouped: a 30 s call sends about " + notifyPingCost(p) + " notifications." + (c.deliveryPending ? " Pending: your PC's relay hasn't confirmed yet (it needs ghost-notify 1.4.0 or newer); Ghost sends it again each time it opens." : "");
+      const gd = setGroup(body, "Notification Delivery" + (c.deliveryPending ? " · Pending" : ""), foot(notifyPing(c)));
+      setChoice(gd, NOTIFY_DELIVERY, () => notifyDelivery(notifyCfg), (v) => { notifySetDelivery(ctx, { delivery: v }).catch((e) => uiTrailN("delivery " + (e && e.message))); });
+      notifyPingRow(gd, notifyPing(c), (p) => { const f = gd.nextElementSibling; if (f && f.classList.contains("gh-set-group-foot")) f.textContent = foot(p); }, (p) => { notifySetDelivery(ctx, { ping: p }).catch((e) => uiTrailN("ping " + (e && e.message))); });
       const g2 = setGroup(body, "Relay");
       setRow(g2, { label: "Paired with", value: c.name });
       // the ntfy iOS app has no subscribe link: copy the topic to paste into ntfy's "Subscribe to topic"
@@ -5447,9 +5546,34 @@
       setRow(g2, { label: "Pair Again", onClick: () => pushSettingsPage(ctx, "notifySetup") });
       setRow(g2, { label: "Unpair", danger: true, onClick: async () => {
         if (!(await confirmSheet(ctx, "Unpair from “" + c.name + "”? Notifications while Ghost is closed stop.", "Unpair"))) return;
+        const hadRx = !!(c.rx && c.rx.on);
         await notifyTurnOff(ctx); notifyCfg = null; await notifySave(); ctx.showToast("Unpaired"); notifyRefreshPage(ctx);
+        if (hadRx && gnOn()) gn.net.setReportInbox(null).catch(() => {}); // friends stop sending reports to that PC
       } });
     }
+  }
+  // the call ringing slider: 3-15 s in 1 s steps, the far-right stop is "Once". The label and the cost line follow the
+  // finger (onMove); the relay is told on release (onSet), so a drag is one message
+  function notifyPingRow(group, value, onMove, onSet) {
+    const row = el("div", "gh-set-row gh-set-ping-row");
+    const top = el("div", "gh-set-ping-top");
+    const label = el("span", "gh-set-label"); label.textContent = "Call Banners";
+    const val = el("span", "gh-set-value"); val.textContent = notifyPingLabel(value);
+    top.append(label, val);
+    const line = el("div", "gh-set-ping-line");
+    const lo = el("span", "gh-set-slider-cap gh-set-ping-cap"); lo.textContent = NOTIFY_PING_MIN + " s";
+    const input = el("input"); input.type = "range"; input.className = "gh-set-slider";
+    input.min = NOTIFY_PING_MIN; input.max = NOTIFY_PING_MAX + 1; input.step = 1;
+    input.value = value === "once" ? NOTIFY_PING_MAX + 1 : value;
+    const hi = el("span", "gh-set-slider-cap gh-set-ping-cap"); hi.textContent = "Once";
+    line.append(lo, input, hi);
+    row.append(top, line);
+    const read = () => { const n = Number(input.value); return n > NOTIFY_PING_MAX ? "once" : n; };
+    let last = read();
+    input.addEventListener("input", () => { const p = read(); val.textContent = notifyPingLabel(p); onMove(p); if (p !== last) { last = p; haptic("light"); } });
+    input.addEventListener("change", () => onSet(read()));
+    group.appendChild(row);
+    return row;
   }
   function notifySetupPage(ctx, body) {
     const g = setGroup(body, "On your PC", "The relay is a small program in the Ghost repo (snapchat-ios-app/ghost-notify/README.md has every step, written so your PC's Claude can do it for you).");
@@ -5465,6 +5589,381 @@
       const v = await promptSheet(ctx, "Pairing link (starts with dltnpghost://)", "", 6000);
       if (v) handleGhostURL(ctx, v).catch(() => {});
     } });
+  }
+
+  // =====================================================================================================
+  // Feedback (1.16): Settings > Report a Bug or Idea > Report a Bug / Request a Feature, with screenshots. A report goes
+  // to a PC relay that takes reports (ghost-notify `reports enable`: the owner's PC, where each one becomes a GupWorks
+  // ticket): this Ghost's own relay when it does, else a connected Ghost friend's (network.js "rx", handed out by that
+  // friend's Ghost). network.js sendReport seals it with this Ghost's keys, so the relay knows who sent it and ntfy.sh
+  // sees nothing. The relay answers on a one-off topic only that report knows: {rid, st, n?, why?}, st = received /
+  // filed (as ticket n) / held / limited / rejected, AES-GCM with a key from the report. The owner's Ghost also tells
+  // its relay who may send reports and under which name (section end). Contract: ghost-notify/README.md "Bug reports
+  // and feature requests".
+  // =====================================================================================================
+  const FB_KEY = "ghostFeedback";
+  const FB_ACK_AAD = "ghost-report-ack-v1";
+  const FB_MAX_TEXT = 4000, FB_MAX_PICS = 4, FB_PIC_MAX_BYTES = 1400 * 1024, FB_PIC_EDGE = 2048;
+  const FB_LIMITS = [[3600e3, 3], [86400e3, 8]]; // the same as the relay's per sender
+  const FB_ACK_FOR = 12 * 3600e3; // ntfy.sh keeps the answer 12 h
+  const FB_STATUSES = ["received", "filed", "held", "limited", "rejected"];
+  const FB_B32 = "abcdefghijkmnpqrstuvwxyz23456789";
+  let fbState; // {v: 1, sent: [{rid, kind, excerpt, ts, to, ack: {t, k}, since, st, n?, why?}]}
+  let fbCtx = null;
+  const fbDraft = { bug: null, feature: null }; // what you typed and picked, kept while Ghost runs
+  async function fbLoad() {
+    if (!fbState) { const v = await storage.get(FB_KEY, null); fbState = v && v.v === 1 && Array.isArray(v.sent) ? v : { v: 1, sent: [] }; }
+    return fbState;
+  }
+  async function fbSave() { if (fbState) { fbState.sent = fbState.sent.slice(-30); await storage.set(FB_KEY, fbState); } }
+  // cut by characters, not UTF-16 units: half an emoji would reach the relay as an unreadable lone surrogate
+  function fbCut(v, n) { const a = Array.from(String(v == null ? "" : v)); return a.length > n ? a.slice(0, n).join("") : a.join(""); }
+  function fbRand32(n) { const r = crypto.getRandomValues(new Uint8Array(n)); let s = ""; for (const x of r) s += FB_B32[x & 31]; return s; }
+  function fbB64u(bytes) {
+    const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes); let bin = "";
+    for (let i = 0; i < b.length; i += 0x8000) bin += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  async function fbSha(bytes) { return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (x) => x.toString(16).padStart(2, "0")).join(""); }
+  function fbRefresh(ctx) {
+    const top = ctx && ctx.settings && ctx.settings.el && ctx.settings.el.dataset.open === "1" && ctx.settings.stack[ctx.settings.stack.length - 1];
+    if (top && top.refresh && top.name === "feedback") top.refresh();
+  }
+
+  // ---- what goes with a report: the screen, the app and the phone ----
+  // the screen Settings was opened from, and the ones before it (openConversationScreen, openGallery, openTikTok and
+  // openCamera note theirs)
+  function fbScreenNow(ctx) {
+    const open = (x) => !!(x && x.el && x.el.dataset.open === "1");
+    if (ctx.state.currentConvId) { const cd = ctx.state.convById.get(ctx.state.currentConvId); return cd && cd.isGroup ? "Group chat" : "Chat"; }
+    if (open(ctx.tiktok)) return "TikTok";
+    if (open(ctx.gallery)) return "Gallery";
+    return "Chats list";
+  }
+  function fbNoteScreen(ctx, name) {
+    const t = ctx.fbTrail || (ctx.fbTrail = []);
+    if (t[t.length - 1] !== name) t.push(name);
+    if (t.length > 6) t.shift();
+  }
+  function fbScreenLabel(ctx) {
+    const from = ctx.settingsFrom || "Chats list";
+    const earlier = (ctx.fbTrail || []).filter((x) => x !== from).slice(-3);
+    return ("Settings, opened from " + from + (earlier.length ? "; earlier: " + earlier.join(", ") : "")).slice(0, 120);
+  }
+  // native fills window.__ghostApp {version, build, model, os}; without it (a browser, the rig) the user agent
+  function fbAppInfo() {
+    const a = window.__ghostApp || {}, ua = navigator.userAgent || "";
+    const m = /OS (\d+)[_.](\d+)(?:[_.](\d+))?/.exec(ua);
+    return {
+      version: String(a.version || "").slice(0, 20), build: String(a.build || "").slice(0, 12),
+      model: String(a.model || (/iPad/.test(ua) ? "iPad" : /iPhone/.test(ua) ? "iPhone" : "unknown")).slice(0, 40),
+      os: String(a.os || (m ? m[1] + "." + m[2] + (m[3] ? "." + m[3] : "") : "")).slice(0, 20),
+    };
+  }
+
+  // ---- where a report can go ----
+  // this Ghost's own relay first (the owner's phone), then each connected Ghost friend whose relay takes reports
+  function fbDestinations(ctx) {
+    const out = [], c = notifyCfg;
+    if (c && c.rx && c.rx.on && c.rx.t) out.push({ key: "own", label: "Your PC (" + (c.name || "relay") + ")", inbox: { t: c.rx.t, k: c.rx.k, n: c.rx.n } });
+    if (gnOn()) {
+      for (const d of gn.net.reportInboxes()) {
+        const cd = Array.from(ctx.state.convById.values()).find((x) => !x.isGroup && x.participants && x.participants[0] && x.participants[0].id === d.snap);
+        out.push({ key: d.friendId, label: (cd && cd.title) || d.name || "A Ghost friend", inbox: { t: d.t, k: d.k, n: d.n } });
+      }
+    }
+    return out;
+  }
+  function fbLimitText() {
+    const sent = (fbState ? fbState.sent : []).filter((s) => s.st !== "limited" && s.st !== "rejected");
+    for (const [win, n] of FB_LIMITS) {
+      if (sent.filter((s) => Date.now() - s.ts < win).length >= n) return win < 86400e3 ? "That's " + n + " reports this hour. Try again a bit later." : "That's the most for today (" + n + "). Try again tomorrow.";
+    }
+    return null;
+  }
+  function fbStatusLabel(s) {
+    if (s.st === "filed") return "Received" + (s.n ? " · #" + s.n : "");
+    if (s.st === "received") return "Received";
+    if (s.st === "held") return "Received · Waiting";
+    if (s.st === "limited") return "Too Many · Try Later";
+    if (s.st === "rejected") return "Not Accepted";
+    return Date.now() - s.ts > FB_ACK_FOR ? "Sent · No Answer" : "Sent";
+  }
+
+  // ---- pictures: re-drawn as JPEG (no photo metadata goes along), at most 2048 px and about 1.4 MB ----
+  async function fbPrepPicture(file) {
+    const d = await decodePhoto(file);
+    try {
+      let edge = FB_PIC_EDGE, q = 0.85, blob = null, w = 0, h = 0;
+      for (let i = 0; i < 6; i++) {
+        const k = Math.min(1, edge / Math.max(d.w, d.h));
+        w = Math.max(1, Math.round(d.w * k)); h = Math.max(1, Math.round(d.h * k));
+        const c = document.createElement("canvas"); c.width = w; c.height = h;
+        c.getContext("2d").drawImage(d.src, 0, 0, w, h);
+        blob = await new Promise((res) => c.toBlob(res, "image/jpeg", q));
+        c.width = c.height = 0; // the canvas memory goes now, not at the next GC
+        if (blob && blob.size <= FB_PIC_MAX_BYTES) break;
+        if (q > 0.6) q -= 0.15; else edge = Math.round(edge * 0.75);
+      }
+      if (!blob || blob.size > FB_PIC_MAX_BYTES) throw new Error("picture too big");
+      return { bytes: new Uint8Array(await blob.arrayBuffer()), type: "image/jpeg", w, h, url: URL.createObjectURL(blob) };
+    } finally { if (d.url) URL.revokeObjectURL(d.url); if (d.src && d.src.close) d.src.close(); }
+  }
+
+  // ---- sending ----
+  async function fbSend(ctx, kind, d, dest) {
+    if (!gnOn() || !gn.net.myId()) throw new Error("ghost network off");
+    await fbLoad();
+    const rid = fbB64u(crypto.getRandomValues(new Uint8Array(16)));
+    const ack = { t: "gh-ra-" + fbRand32(26), k: fbB64u(crypto.getRandomValues(new Uint8Array(32))) };
+    const imgs = [];
+    for (const p of d.pics) imgs.push({ type: p.type, size: p.bytes.length, sha: await fbSha(p.bytes), w: p.w, h: p.h });
+    const me = ctx.state.me || {}, prof = gn.net.profile(), info = fbAppInfo();
+    const text = fbCut(d.text.trim(), FB_MAX_TEXT);
+    const r = JSON.stringify({ v: 1, rid, kind, text, screen: fbCut(d.screen, 120), app: { version: info.version, build: info.build },
+      device: { model: info.model, os: info.os }, name: fbCut(prof.name || me.name || me.username || "", 40), ts: Date.now(), ack, imgs });
+    await gn.net.sendReport(dest.inbox, r, d.pics.map((p) => p.bytes));
+    const first = (text.split("\n").find((x) => x.trim()) || "").trim();
+    fbState.sent.push({ rid, kind, excerpt: Array.from(first).length > 60 ? fbCut(first, 59) + "…" : first, ts: Date.now(), to: dest.label, ack, since: "", st: "sent" });
+    await fbSave();
+    fbAckSoon(ctx);
+  }
+  function fbErrorText(e) {
+    const m = String(e && e.message || e);
+    if (/ghost network off|no Ghost identity/.test(m)) return "turn on Ghost Network first (Settings > Privacy)";
+    if (/429|busy/.test(m)) return "ntfy.sh is busy, try again in a few minutes";
+    if (/too big/.test(m)) return "it's too big, try fewer pictures";
+    return "check your connection and try again";
+  }
+  // the relay's answer: read while Ghost is open, a few times after sending and whenever the Feedback page opens
+  let fbAckBusy = null, fbAckTimer = 0;
+  function fbPollAcks(ctx) {
+    if (!fbAckBusy) fbAckBusy = fbPollAcksNow(ctx).catch((e) => uiTrailN("feedback answers " + (e && e.message))).finally(() => { fbAckBusy = null; });
+    return fbAckBusy;
+  }
+  async function fbPollAcksNow(ctx) {
+    await fbLoad();
+    const open = fbState.sent.filter((s) => s.ack && Date.now() - s.ts < FB_ACK_FOR && !["filed", "limited", "rejected"].includes(s.st));
+    let changed = false;
+    for (const s of open) {
+      let r = null;
+      try { r = await dgPost("gnet", { url: "https://ntfy.sh/" + s.ack.t + "/json?poll=1&since=" + encodeURIComponent(s.since || "all"), method: "GET" }); } catch (e) { continue; }
+      if (!r || r.status !== 200 || typeof r.body !== "string") continue;
+      const text = new TextDecoder().decode(b64uBytes(r.body.replace(/\+/g, "-").replace(/\//g, "_")));
+      const key = await crypto.subtle.importKey("raw", b64uBytes(s.ack.k), "AES-GCM", false, ["decrypt"]);
+      for (const line of text.split("\n")) {
+        let m = null; try { m = JSON.parse(line); } catch (e) { continue; }
+        if (!m || m.event !== "message" || typeof m.message !== "string") continue;
+        if (typeof m.id === "string" && /^[A-Za-z0-9]{6,40}$/.test(m.id) && m.id !== s.since) { s.since = m.id; changed = true; }
+        try {
+          const raw = b64uBytes(m.message);
+          if (raw.length < 29 || raw.length > 4096) continue;
+          const j = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: new TextEncoder().encode(FB_ACK_AAD) }, key, raw.slice(12))));
+          if (!j || j.rid !== s.rid || !FB_STATUSES.includes(j.st)) continue;
+          s.st = j.st;
+          if (Number.isSafeInteger(j.n) && j.n > 0) s.n = j.n;
+          if (typeof j.why === "string") s.why = j.why.slice(0, 30);
+          changed = true;
+        } catch (e) { /* not the relay's (wrong key) */ }
+      }
+    }
+    if (changed) { await fbSave(); fbRefresh(ctx); }
+    return changed;
+  }
+  function fbAckSoon(ctx) {
+    clearTimeout(fbAckTimer);
+    const waits = window.__ghostMockFast ? [300, 600, 1200] : [20e3, 45e3, 90e3, 180e3];
+    const step = (i) => { fbAckTimer = setTimeout(async () => {
+      await fbPollAcks(ctx);
+      const waiting = fbState && fbState.sent.some((s) => Date.now() - s.ts < FB_ACK_FOR && (s.st === "sent" || s.st === "received" || s.st === "held"));
+      if (waiting && i + 1 < waits.length) step(i + 1);
+    }, waits[i]); };
+    step(0);
+  }
+
+  // ---- Settings > Report a Bug or Idea ----
+  function feedbackPage(ctx, body) {
+    if (!fbState) fbLoad().then(() => fbRefresh(ctx));
+    const dests = fbDestinations(ctx);
+    let foot;
+    if (dests.length) {
+      foot = (dests[0].key === "own" ? "Reports go to your PC (" + (notifyCfg.name || "relay") + ") and become tickets there." : "Reports go to " + dests[0].label + "'s PC" + (dests.length > 1 ? " (or another one you pick)" : "") + ", where whoever makes Ghost works through them.")
+        + " Bugs go on the list to fix; feature ideas wait until the owner decides. Each one includes your Ghost name, the Ghost version, your phone model and the screen you were on.";
+    } else {
+      foot = "Reports go to the PC of whoever makes Ghost, over Ghost Network. Connect your Ghost with theirs (open your chat with them > tap their name > Connect on Ghost); the buttons work once their Ghost tells yours where to send reports."
+        + (notifyCfg ? " Your own PC's relay can take reports too: run `reports enable` there (ghost-notify README)." : "");
+    }
+    const g = setGroup(body, null, foot);
+    setRow(g, { icon: "bug", tint: "linear-gradient(135deg,#ff5c5c,#ff9433)", label: "Report a Bug", onClick: () => pushSettingsPage(ctx, "feedbackBug") });
+    setRow(g, { icon: "bulb", tint: "linear-gradient(135deg,#f0b232,#ffcf33)", label: "Request a Feature", onClick: () => pushSettingsPage(ctx, "feedbackIdea") });
+    const sent = fbState ? fbState.sent.slice().reverse().slice(0, 15) : [];
+    if (sent.length) {
+      const gs = setGroup(body, "Sent", "The answer comes from the PC that took the report while Ghost is open, for about 12 hours. Received · #12 = ticket 12 on that PC.");
+      for (const s of sent) {
+        const row = setRow(gs, { label: (s.kind === "bug" ? "Bug · " : "Idea · ") + (s.excerpt || "…"), value: fbStatusLabel(s) });
+        row.classList.add("gh-fb-sent-row");
+        row.dataset.st = s.st;
+      }
+    }
+    // the owner's phone: a relay that just turned reports on (or off) shows up here without a relaunch
+    if (notifyCfg && notifyCfg.rx && notifyCfg.rpPending) fbOwnerSync(ctx);
+    if (notifyCfg && notifyCfg.ctl && Date.now() - (ctx.fbCtlAt || 0) > 30e3) {
+      ctx.fbCtlAt = Date.now();
+      notifyPollControl().then((changedSub) => { if (notifyCfg && notifyCfg.rxFresh) { notifyCfg.rxFresh = false; fbRefresh(ctx); } return changedSub; }).catch(() => {});
+    }
+    fbPollAcks(ctx).catch(() => {});
+  }
+  function feedbackFormPage(ctx, body, page, kind) {
+    const d = fbDraft[kind] || (fbDraft[kind] = { text: "", screen: "", pics: [], to: "" });
+    if (!d.screenEdited) d.screen = fbScreenLabel(ctx); // where Settings was opened from this time (a kept draft too)
+    const dests = fbDestinations(ctx);
+    if (!dests.some((x) => x.key === d.to)) d.to = dests.length ? dests[0].key : "";
+    const bug = kind === "bug";
+    let g = setGroup(body, bug ? "What went wrong?" : "What should Ghost do?");
+    const box = el("div", "gh-fb-box");
+    const ta = el("textarea", "gh-fb-text");
+    ta.maxLength = FB_MAX_TEXT; ta.rows = 6;
+    ta.placeholder = bug ? "What happened, and what did you expect? The steps to make it happen again help a lot." : "Describe the idea: what it would do and where in Ghost it would go.";
+    ta.value = d.text;
+    const count = el("div", "gh-fb-count");
+    box.append(ta, count); g.appendChild(box);
+    setRow(g, { label: "Screen", value: d.screen || "-", onClick: async (row) => {
+      const v = await promptSheet(ctx, bug ? "Where did it happen? (e.g. a group chat, the camera)" : "Where would it go?", d.screen, 120);
+      if (v != null) { d.screen = v; d.screenEdited = true; row._value.textContent = v || "-"; }
+    } }).classList.add("gh-fb-screen-row");
+    g = setGroup(body, "Screenshots & Photos", "Up to " + FB_MAX_PICS + ". They're re-saved as plain pictures (no location or other photo details) and go with the report.");
+    const grid = el("div", "gh-fb-pics"); g.appendChild(grid);
+    const add = setRow(g, { icon: "photo", tint: "#ff9433", label: "Add Screenshot or Photo", onClick: async () => {
+      if (d.pics.length >= FB_MAX_PICS || add.dataset.busy) return; // (one still being prepared counts)
+      const f = await pickPhoto(); if (!f || d.pics.length >= FB_MAX_PICS) return;
+      add.dataset.busy = "1";
+      try { d.pics.push(await fbPrepPicture(f)); } catch (e) { ctx.showToast("Couldn't use that picture"); uiTrailN("feedback picture " + (e && e.message)); }
+      delete add.dataset.busy;
+      paintPics(); paint();
+    } });
+    function paintPics() {
+      grid.innerHTML = "";
+      d.pics.forEach((p, i) => {
+        const t = el("div", "gh-fb-pic");
+        const im = el("img"); im.alt = ""; im.src = p.url; t.appendChild(im);
+        const x = el("button", "gh-fb-pic-x"); x.setAttribute("aria-label", "Remove picture"); x.appendChild(icon("close", 14));
+        x.addEventListener("click", (e) => { e.stopPropagation(); haptic("light"); URL.revokeObjectURL(p.url); d.pics.splice(i, 1); paintPics(); paint(); });
+        t.appendChild(x); grid.appendChild(t);
+      });
+      grid.style.display = d.pics.length ? "" : "none";
+      add.style.display = d.pics.length >= FB_MAX_PICS ? "none" : "";
+    }
+    if (dests.length > 1) {
+      g = setGroup(body, "Send To");
+      setChoice(g, dests.map((x) => [x.key, x.label]), () => d.to, (v) => { d.to = v; });
+    }
+    const info = fbAppInfo();
+    const note = el("div", "gh-set-group-foot gh-fb-note");
+    note.textContent = (dests.length ? "Goes to " + (dests.find((x) => x.key === d.to) || dests[0]).label + ". " : "")
+      + "Sent with it: your Ghost name, Ghost " + (info.version || "(version unknown)") + (info.build ? " (" + info.build + ")" : "") + ", " + info.model + (info.os ? " on iOS " + info.os : "") + " and the screen above."
+      + (bug ? "" : " Feature ideas wait until the owner decides.");
+    const send = el("button", "gh-fb-send gh-press");
+    body.append(note, send);
+    let busy = false;
+    function paint() {
+      count.textContent = d.text.length + " / " + FB_MAX_TEXT;
+      send.disabled = busy || !d.text.trim() || !dests.length;
+      send.textContent = busy ? "Sending…" : !dests.length ? "No One to Send It To Yet" : bug ? "Send Bug Report" : "Send Feature Request";
+    }
+    ta.addEventListener("input", () => { d.text = ta.value; paint(); });
+    send.addEventListener("click", async () => {
+      if (busy) return;
+      busy = true; // (before any await: a second tap can't send it twice)
+      haptic("light");
+      paint();
+      try {
+        await fbLoad();
+        const lim = fbLimitText();
+        const dest = fbDestinations(ctx).find((x) => x.key === d.to);
+        if (lim) { ctx.showToast(lim); return; }
+        if (add.dataset.busy) { ctx.showToast("One moment, the picture is still being prepared"); return; }
+        if (!dest || !d.text.trim()) return;
+        await fbSend(ctx, kind, d, dest);
+        for (const p of d.pics) URL.revokeObjectURL(p.url);
+        fbDraft[kind] = null;
+        ctx.showToast(bug ? "Bug report sent · thanks!" : "Feature request sent · thanks!");
+        const st = ctx.settings.stack;
+        if (st.length && st[st.length - 1].page === page) popSettingsPage(ctx);
+      } catch (e) {
+        uiTrailN("feedback send " + (e && e.message));
+        ctx.showToast("Couldn't send it: " + fbErrorText(e));
+      } finally { busy = false; paint(); }
+    });
+    paintPics(); paint();
+  }
+
+  // ---- the owner's side: this Ghost's relay takes reports ----
+  // The relay posts {type:"reports", v:1, rev, on, inbox:{t, k, n}} on the control topic. Ghost keeps it (notifyCfg.rx),
+  // hands the inbox to connected Ghost friends (network.js setReportInbox, null when off) and tells the relay who may
+  // send reports, with the names this Ghost shows them: {type:"reporters", v:1, rev, part, parts, rx: the inbox rev it
+  // has, me:{id, name}, friends:[{id, name}]} (25 friends a part). The relay answers {type:"reporters-ack", rev}; until
+  // then it's sent again on every launch, and whenever the list changes.
+  function fbValidRx(j) {
+    if (!j || j.v !== 1 || !Number.isSafeInteger(j.rev) || j.rev <= 0 || typeof j.on !== "boolean") return null;
+    if (!j.on) return { rev: j.rev, on: false };
+    const i = j.inbox || {};
+    if (!/^gh-rp-[a-z2-9]{26}$/.test(i.t || "") || !i.k || typeof i.k.x !== "string" || typeof i.k.y !== "string" || i.k.x.length > 64 || i.k.y.length > 64) return null;
+    return { rev: j.rev, on: true, t: i.t, k: { x: i.k.x, y: i.k.y }, n: fbCut(String(i.n || "").replace(/[\u0000-\u001f\u007f]/g, "").trim(), 40) };
+  }
+  function fbReporters(ctx) {
+    const myId = gn.net && gn.net.myId();
+    if (!myId) return null;
+    const me = ctx.state.me || {};
+    const friends = gn.net.friends().filter((f) => f.state === "connected").map((f) => {
+      const cd = Array.from(ctx.state.convById.values()).find((x) => !x.isGroup && x.participants && x.participants[0] && x.participants[0].id === f.snap);
+      const u = cd && cd.participants[0];
+      const name = fbCut(String((cd && cd.title) || (u && u.name) || (f.profile && f.profile.name) || "Ghost friend").replace(/[\u0000-\u001f\u007f]/g, " ").trim(), 40);
+      return { id: f.id, name: fbCut(name + (u && u.username ? " (@" + u.username + ")" : ""), 60) };
+    }).sort((a, b) => (a.id < b.id ? -1 : 1));
+    return { me: { id: myId, name: fbCut(String(me.name || me.username || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim(), 40) }, friends };
+  }
+  let fbOwnerBusy = null, fbOwnerTimer = 0;
+  function fbOwnerSync(ctx) {
+    if (!ctx) return Promise.resolve();
+    if (!fbOwnerBusy) fbOwnerBusy = fbOwnerSyncNow(ctx).catch((e) => uiTrailN("reports " + (e && e.message))).finally(() => { fbOwnerBusy = null; });
+    return fbOwnerBusy;
+  }
+  async function fbOwnerSyncNow(ctx) {
+    const c = notifyCfg;
+    if (!c || !c.rx || !c.ctl || !gnOn()) return;
+    // friends' Ghosts learn (or forget) where to send reports; the same inbox again changes nothing
+    try { await gn.net.setReportInbox(c.rx.on ? { t: c.rx.t, k: c.rx.k, n: c.rx.n } : null); } catch (e) { uiTrailN("rx " + (e && e.message)); }
+    const list = fbReporters(ctx);
+    if (!list || !ctx.state.convById.size) return; // names come from the chat list: wait for it
+    const sig = JSON.stringify([c.rx.rev, list]);
+    if (sig === c.rpSig && !c.rpPending) return;
+    // the same list, still not confirmed (relay off, or too old to answer): at most every 10 minutes (ntfy.sh's daily allowance)
+    if (sig === c.rpSig && Date.now() - (c.rpPostedAt || 0) < 10 * 60e3) return;
+    if (sig !== c.rpSig) { c.rpRev = Math.max(Date.now(), (c.rpRev || 0) + 1); c.rpSig = sig; c.rpPending = true; }
+    c.rpPostedAt = Date.now();
+    await notifySave();
+    // parts of at most 25 friends and ~2.4 KB of JSON: encrypted and base64'd that stays under ntfy's 4096-byte message
+    const te = new TextEncoder(), parts = [[]];
+    for (const f of list.friends) {
+      const cur = parts[parts.length - 1];
+      if (cur.length >= 25 || (cur.length && te.encode(JSON.stringify(cur.concat([f]))).length > 2400)) parts.push([f]); else cur.push(f);
+    }
+    for (let i = 0; i < parts.length; i++) {
+      try {
+        const msg = await notifyCtlEncrypt(c, { type: "reporters", v: 1, rev: c.rpRev, part: i, parts: parts.length, rx: c.rx.rev, me: list.me, friends: parts[i], ts: Date.now() });
+        const r = await dgPost("gnet", { url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg) });
+        if (!r || r.status < 200 || r.status >= 300) uiTrailN("reporters not sent " + (r && r.status));
+      } catch (e) { uiTrailN("reporters " + (e && e.message)); }
+    }
+    // the relay reads the topic about every 20 s: look for its answer a few times while Ghost is open
+    clearTimeout(fbOwnerTimer);
+    const waits = window.__ghostMockFast ? [300, 900] : [25e3, 60e3, 120e3];
+    const step = (i) => { fbOwnerTimer = setTimeout(async () => {
+      if (notifyCfg !== c || !c.rpPending) return;
+      try { await notifyPollControl(); } catch (e) {}
+      if (c.rpPending && i + 1 < waits.length) step(i + 1);
+    }, waits[i]); };
+    step(0);
   }
 
   // ---- new-message notifications while Ghost is in the background ----------------------------------------------
@@ -7446,6 +7945,7 @@
   function openCamera(ctx, opts) {
     const c = ctx.camera;
     haptic();
+    fbNoteScreen(ctx, "Camera");
     c.preselect = (opts && opts.to) || null;
     const conv = c.preselect && ctx.state.convById.get(c.preselect);
     c.toEl.textContent = conv ? conv.title : "";
@@ -9931,6 +10431,7 @@
   function openGallery(ctx) {
     const g = ctx.gallery;
     g.el.dataset.open = "1";
+    fbNoteScreen(ctx, "Gallery");
     if (g.seg) { g.seg.dataset.show = galTikTokOn() ? "1" : "0"; if (g.mode === "tiktok") { if (galTikTokOn()) { ttBmLoad(true).then(() => paintGalTikTok(ctx)); } else setGalMode(ctx, "photos"); } }
     if (!g.loaded && !g.loading) loadGallery(ctx);
     else {
@@ -10159,6 +10660,7 @@
     const T = ctx.tiktok;
     if (!T || pref("tiktokTab") === false) return;
     T.el.dataset.open = "1";
+    fbNoteScreen(ctx, "TikTok");
     if (!ttBM.loaded) ttBmLoad(); // which videos are bookmarked in Ghost (the rail's bookmark state)
     ttPost("active", { on: true }).catch(() => {});
     if (!T.started) {
@@ -13871,7 +14373,8 @@
       refreshAvatars(ctx);
       if (ctx.conv && ctx.state.currentConvId) { try { paintWindow(ctx, ctx.conv); } catch (e) {} }
       const top = ctx.settings && ctx.settings.el && ctx.settings.el.dataset.open === "1" && ctx.settings.stack[ctx.settings.stack.length - 1];
-      if (top && top.refresh && /^(gn|friend$|privacy$|main$)/.test(top.name)) top.refresh();
+      if (top && top.refresh && /^(gn|friend$|privacy$|main$|feedback$)/.test(top.name)) top.refresh();
+      if (notifyCfg && notifyCfg.rx) fbOwnerSync(ctx); // my relay takes reports: friends and names may have changed
     }, 60);
   }
   async function gnStart(ctx) {
@@ -13909,6 +14412,7 @@
       itemCheck: (kind, cur, inc) => kind !== "game" || typeof GhostGames === "undefined" || GhostGames.check(cur && cur.data, cur ? cur.v : 0, inc.data, inc.v).ok, // (chat extras: a friend asks again for a picture sticker you put on)
       onChange: (what, d) => {
         if (what === "item") { if (d && d.kind === "game") ggOnItem(ctx, d); return; } // Ghost games (names/pictures didn't change)
+        if (what === "rx") { fbRefresh(ctx); return; } // a friend's Ghost takes reports now (or not): section "Feedback"
         if (what === "extras") { if (d && d.snap) gxChangedSnap(ctx, d.snap); return; }
         if (d && d.keyChanged) { const cd = Array.from(ctx.state.convById.values()).find((c) => !c.isGroup && c.participants && c.participants[0] && c.participants[0].id === d.snap); ctx.showToast(((cd && cd.title) || "A friend") + "'s Ghost has new keys (reinstalled?) · reconnected"); }
         gnChanged(ctx);

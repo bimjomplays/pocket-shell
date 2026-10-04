@@ -241,7 +241,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         if Self.ghostMode {
             // Ghost: only the plumbing + the new UI (no Snapchat restyling at all). __ghostScale lets the UI undo the
             // page scale, so 1 CSS px of Ghost = 1 point on the phone.
-            worldScripts = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON); window.__ghostScale = \(Double(Self.appScale));"]
+            worldScripts = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON); window.__ghostScale = \(Double(Self.appScale)); window.__ghostApp = \(Self.appInfoJSON);"]
             worldScripts += ["gm-shim", "settings", "bridge", "perf", "ghost-ui"].map { Self.resource($0) }
         } else {
             worldScripts = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON);"]
@@ -707,6 +707,22 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
               let literal = String(data: json, encoding: .utf8) else { return "" }
         return "(() => { if (window.top !== window) return; const add = () => { if (!document.documentElement) return void setTimeout(add, 10);"
             + " const s = document.createElement('style'); s.textContent = \(literal)[0]; document.documentElement.appendChild(s); }; add(); })();"
+    }
+
+    /// Ghost's version and this phone ({version, build, model "iPhone15,2", os "17.5"}), sent with a bug report
+    /// (ui.js section "Feedback")
+    private static var appInfoJSON: String {
+        var u = utsname()
+        uname(&u)
+        let model = withUnsafeBytes(of: u.machine) { raw in String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self) }
+        let info: [String: String] = [
+            "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
+            "model": model,
+            "os": UIDevice.current.systemVersion,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: info), let text = String(data: data, encoding: .utf8) else { return "{}" }
+        return text
     }
 
     private static func resource(_ name: String) -> String {
