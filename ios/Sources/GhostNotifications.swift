@@ -7,11 +7,14 @@ import UserNotifications
 /// so these are LOCAL notifications Ghost posts itself when ghost/ui.js sees a new chat arrive while the app is in
 /// the background. They only happen while iOS keeps Ghost running (Keep Ghost Awake helps; not guaranteed).
 /// Tapping one opens that chat. Streak Keeper's scheduled reminders ("ghost-streak-*") pass through untouched.
+/// Apple pushes from the PC relay (GhostPush.swift) carry the chat as "ghostChat" too, so they open it the same way.
+/// One shared instance, made when the app finishes launching: a tap that cold-launches Ghost needs the delegate then.
 final class GhostNotifications: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = GhostNotifications()
     private weak var webView: WKWebView?
     private var pendingChat: String?
 
-    override init() {
+    private override init() {
         super.init()
         UNUserNotificationCenter.current().delegate = self
     }
@@ -35,15 +38,17 @@ final class GhostNotifications: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    /// op "clearMessageNotifications" {id?}: when a chat is opened in Ghost, its notification goes away.
+    /// op "clearMessageNotifications" {id?}: when a chat is opened in Ghost, its notifications go away (Ghost's own and
+    /// the relay's Apple pushes for that chat).
     func clear(id: String?) {
         let center = UNUserNotificationCenter.current()
-        if let id {
-            center.removeDeliveredNotifications(withIdentifiers: ["ghost-msg-" + id])
-        } else {
-            center.getDeliveredNotifications { list in
-                center.removeDeliveredNotifications(withIdentifiers: list.map(\.request.identifier).filter { $0.hasPrefix("ghost-msg-") })
-            }
+        center.getDeliveredNotifications { list in
+            let ids = list.filter { n in
+                let chat = n.request.content.userInfo["ghostChat"] as? String
+                if let id { return n.request.identifier == "ghost-msg-" + id || chat == id }
+                return n.request.identifier.hasPrefix("ghost-msg-") || chat != nil
+            }.map(\.request.identifier)
+            center.removeDeliveredNotifications(withIdentifiers: ids)
         }
     }
 
@@ -54,8 +59,10 @@ final class GhostNotifications: NSObject, UNUserNotificationCenterDelegate {
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        // in the foreground the chat list already shows it; Streak Keeper reminders still show as banners
-        if notification.request.identifier.hasPrefix("ghost-msg-") { completionHandler([]) } else { completionHandler([.banner, .sound]) }
+        // in the foreground the chat list already shows it (a message notification, or the relay's Apple push for a
+        // chat); Streak Keeper reminders still show as banners
+        let chat = notification.request.content.userInfo["ghostChat"] != nil
+        if notification.request.identifier.hasPrefix("ghost-msg-") || chat { completionHandler([]) } else { completionHandler([.banner, .sound]) }
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,

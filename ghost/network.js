@@ -51,7 +51,8 @@ const GhostNetCore = (() => {
   const RX_RE = /^gh-rp-[a-z2-9]{26}$/;       // a relay's report inbox
   const REPORT_MAX = 8 * 1024 * 1024;          // the relay refuses bigger report files
   const NTFY_FILE_MAX = 2 * 1024 * 1024;       // ntfy.sh's limit for one file (anonymous: /v1/account attachment_file_size)
-  const PUB_EVERY = 3 * 60e3; // the public inbox (invites, Ghosts before build 81) is read this often when nothing waits there
+  const PUB_EVERY = 15 * 60e3; // the public inbox (invites, Ghosts before build 81) is read this often when nothing waits there
+  const PI_SEEN_WINDOW = 3600e3; // a new friend that hasn't written to my private inbox yet: the public one is read every round for this long
   const SLOW_MIN = 30e3, SLOW_MAX = 10 * 60e3; // after a 429: no requests for 30 s, doubling to 10 min while it lasts
   const MAX_PIC = 3 * 1024 * 1024;
   const LIMITS = { name: 40, bio: 300, status: 60 };
@@ -62,6 +63,8 @@ const GhostNetCore = (() => {
   const ITEM_PER_FRIEND = 40;         // items kept per friend (oldest go first), so a friend's Ghost can't fill storage
   const ITEM_MAX = 3200;              // JSON chars of an item's data (a sealed message must stay under 6000)
   const ITEM_RESEND = 10 * 60e3;      // an unconfirmed item goes again after this long (a minute when forced)
+  const ITEM_BATCH = 2400;            // plain JSON chars of one "items" message (sealed it must stay under MAX_ENVELOPE)
+  const ITEM_BATCH_COUNT = 12;        // items in one "items" message (the receiver reads up to 20)
   const ACCENTS = ["blue", "purple", "pink", "red", "orange", "yellow", "green", "teal"];
   const INVITE_RE = /^\s*ghost:connect\s+([2-9A-HJ-NP-Z]{4})-([2-9A-HJ-NP-Z]{4})-([2-9A-HJ-NP-Z]{4})\s*$/i;
 
@@ -351,9 +354,31 @@ const GhostNetCore = (() => {
       const theirs = Object.values(st.items || {}).filter((i) => i.with === fid).sort((a, b) => (a.at || 0) - (b.at || 0));
       while (theirs.length >= ITEM_PER_FRIEND) delete st.items[theirs.shift().key];
     }
-    const itemMsg = (it) => ({ type: "item", key: it.key, kind: it.kind, v: it.v, data: it.data });
+    const itemMsg = (it) => ({ type: "item", key: it.key, kind: it.kind, v: it.v, data: it.data, bi: 1 });
+    // unconfirmed items go to a friend in as few messages as fit (one request each against ntfy.sh's limit), to friends
+    // whose Ghost said it reads "items" (bi); an older Ghost gets them one by one. Returns false when a send failed.
+    async function sendItems(f, list) {
+      const groups = [];
+      if (f.bi === 1) {
+        let cur = [], size = 0;
+        for (const it of list) {
+          const len = JSON.stringify(it.data).length + 60;
+          if (cur.length && (size + len > ITEM_BATCH || cur.length >= ITEM_BATCH_COUNT)) { groups.push(cur); cur = []; size = 0; }
+          cur.push(it); size += len;
+        }
+        if (cur.length) groups.push(cur);
+      } else for (const it of list) groups.push([it]);
+      for (const g of groups) {
+        try {
+          if (g.length === 1) await send(f, itemMsg(g[0]));
+          else await send(f, { type: "items", list: g.map((it) => ({ key: it.key, kind: it.kind, v: it.v, data: it.data })), bi: 1 });
+        } catch (e) { log("item resend: " + e.message); return false; }
+        for (const it of g) it.sentAt = now();
+      }
+      return true;
+    }
     // what every message that sets up or keeps a connection carries: where to reach me privately
-    const piInfo = () => ({ pi: st.pi, cap: 2 });
+    const piInfo = () => ({ pi: st.pi, cap: 2, bi: 1 });
     function learnPi(f, obj) { if (f && obj && obj.cap >= 2 && PI_RE.test(obj.pi || "") && (f.pi !== obj.pi || f.cap !== 2)) { f.pi = obj.pi; f.cap = 2; return true; } return false; }
     const canShare = (f) => st.share === "all" || (st.shareWith || []).includes(f.id);
     async function sendProfile(f) {
@@ -524,7 +549,7 @@ const GhostNetCore = (() => {
       if (now() - pubAt >= PUB_EVERY) return true;
       if (Object.values(st.invites).some((i) => !i.used && now() - i.created < INVITE_TTL)) return true;
       if (Object.values(st.joined).some((j) => j.state === "connecting")) return true;
-      return Object.values(st.friends).some((f) => f.state !== "connected" || !(f.cap >= 2) || (!f.piSeen && now() - (f.since || 0) < INVITE_TTL));
+      return Object.values(st.friends).some((f) => f.state !== "connected" || !(f.cap >= 2) || (!f.piSeen && now() - (f.since || 0) < PI_SEEN_WINDOW));
     }
     const senderKey = (id) => (st.friends[id] && st.friends[id].s) || (st.gone[id] && st.gone[id].s) || null;
     async function handle(msg, viaPi) {
@@ -546,7 +571,9 @@ const GhostNetCore = (() => {
       if (f && f.since && obj.ts < f.since - 10 * 60e3 && obj.type !== "welcome") return; // older than this connection (replayed; 10 min for clock drift)
       if (f && f.state === "connected") f.heard = now(); // "Last heard from" on their profile
       if (f && viaPi) f.piSeen = true; // they know my private inbox (needPublic)
-      if (f && learnPi(f, obj)) await save();
+      let learnt = f ? learnPi(f, obj) : false;
+      if (f && obj.bi === 1 && f.bi !== 1) { f.bi = 1; learnt = true; } // their Ghost reads batched "items"
+      if (learnt) await save();
       switch (obj.type) {
         case "accept": return onAccept(got);
         case "welcome": {
@@ -646,42 +673,31 @@ const GhostNetCore = (() => {
           await save(); changed("friends", { id: from, snap: f.snap, removed: true });
           return;
         }
-        // a shared item (a game...) from a connected friend: the higher version wins; the same version with other data
-        // goes to the Ghost with the larger id (both sides end up with the same copy). Always answered, so the sender
-        // stops re-sending: "itemack" when we have theirs, our own copy when ours is newer.
+        // a shared item (a game...) from a connected friend (rules in onItem)
         case "item": {
           if (!f || f.state !== "connected") return;
-          if (!ITEM_KEY_RE.test(obj.key || "") || !ITEM_KIND_RE.test(obj.kind || "") || !Number.isInteger(obj.v) || obj.v < 1 || obj.v > 1e6) return;
-          let js = ""; try { js = JSON.stringify(obj.data); } catch (e) { return; }
-          if (!js || js.length > ITEM_MAX || obj.key.split(":")[0] !== obj.kind) return;
-          if (!st.items) st.items = {};
-          const cur = st.items[obj.key];
-          if (cur && cur.with !== from) return; // an id another friend's item already uses
-          const take = !cur || obj.v > cur.v || (obj.v === cur.v && JSON.stringify(cur.data) !== js && from > me.id);
-          // the app checks a new version against its rules (games replay the moves); refused = kept out, but confirmed
-          // so their Ghost stops re-sending it. (A same-version clash is settled by id only: nothing to replay from.)
-          if (take && (!cur || obj.v > cur.v) && deps.itemCheck) {
-            let ok = false;
-            try { ok = deps.itemCheck(obj.kind, cur ? { v: cur.v, data: cur.data } : null, { v: obj.v, data: JSON.parse(js) }) !== false; } catch (e) { ok = false; }
-            if (!ok) { log("item refused " + obj.key.slice(0, 12) + " v" + obj.v); try { await send(f, { type: "itemack", key: obj.key, v: obj.v }); } catch (e) {} return; }
-          }
-          if (take && !cur) itemRoom(from);
-          if (take) {
-            const prev = cur ? { v: cur.v, data: cur.data } : null;
-            st.items[obj.key] = { key: obj.key, kind: obj.kind, with: from, v: obj.v, data: JSON.parse(js), at: now(), by: from, acked: obj.v, sentAt: now() };
-            await save(); changed("item", { key: obj.key, kind: obj.kind, with: from, snap: f.snap, prev });
-          }
-          const mine = st.items[obj.key];
-          try {
-            if (mine.v > obj.v || (mine.v === obj.v && !take && JSON.stringify(mine.data) !== js)) { await send(f, itemMsg(mine)); mine.sentAt = now(); await save(); }
-            else await send(f, { type: "itemack", key: obj.key, v: mine.v });
-          } catch (e) { log("item reply: " + e.message); }
+          const ack = await onItem(f, from, me, obj);
+          if (ack) { try { await send(f, { type: "itemack", key: ack.key, v: ack.v }); } catch (e) { log("item reply: " + e.message); } }
+          return;
+        }
+        // several items in one message (a resend): answered with one "itemack" that lists them all
+        case "items": {
+          if (!f || f.state !== "connected" || !Array.isArray(obj.list)) return;
+          const acks = [];
+          for (const e of obj.list.slice(0, 20)) { const ack = e && typeof e === "object" ? await onItem(f, from, me, e) : null; if (ack) acks.push(ack); }
+          if (acks.length === 1) { try { await send(f, { type: "itemack", key: acks[0].key, v: acks[0].v }); } catch (e) { log("item reply: " + e.message); } }
+          else if (acks.length) { try { await send(f, { type: "itemack", acks }); } catch (e) { log("item reply: " + e.message); } }
           return;
         }
         case "itemack": {
-          const it = st.items && st.items[obj.key];
-          if (!f || !it || it.with !== from || obj.v !== it.v || it.acked === it.v) return;
-          it.acked = it.v; await save();
+          if (!f) return;
+          let any = false;
+          for (const a of Array.isArray(obj.acks) ? obj.acks.slice(0, 20) : [obj]) {
+            const it = a && st.items && st.items[a.key];
+            if (!it || it.with !== from || a.v !== it.v || it.acked === it.v) continue;
+            it.acked = it.v; any = true;
+          }
+          if (any) await save();
           return;
         }
         case "bye": {
@@ -693,6 +709,38 @@ const GhostNetCore = (() => {
           return;
         }
       }
+    }
+    // a shared item (a game...) from a connected friend: the higher version wins; the same version with other data
+    // goes to the Ghost with the larger id (both sides end up with the same copy). Always answered, so the sender
+    // stops re-sending: returns {key, v} to confirm (we have theirs, or it was refused), or null when our own newer
+    // copy was sent back instead.
+    async function onItem(f, from, me, obj) {
+      if (!ITEM_KEY_RE.test(obj.key || "") || !ITEM_KIND_RE.test(obj.kind || "") || !Number.isInteger(obj.v) || obj.v < 1 || obj.v > 1e6) return null;
+      let js = ""; try { js = JSON.stringify(obj.data); } catch (e) { return null; }
+      if (!js || js.length > ITEM_MAX || obj.key.split(":")[0] !== obj.kind) return null;
+      if (!st.items) st.items = {};
+      const cur = st.items[obj.key];
+      if (cur && cur.with !== from) return null; // an id another friend's item already uses
+      const take = !cur || obj.v > cur.v || (obj.v === cur.v && JSON.stringify(cur.data) !== js && from > me.id);
+      // the app checks a new version against its rules (games replay the moves); refused = kept out, but confirmed
+      // so their Ghost stops re-sending it. (A same-version clash is settled by id only: nothing to replay from.)
+      if (take && (!cur || obj.v > cur.v) && deps.itemCheck) {
+        let ok = false;
+        try { ok = deps.itemCheck(obj.kind, cur ? { v: cur.v, data: cur.data } : null, { v: obj.v, data: JSON.parse(js) }) !== false; } catch (e) { ok = false; }
+        if (!ok) { log("item refused " + obj.key.slice(0, 12) + " v" + obj.v); return { key: obj.key, v: obj.v }; }
+      }
+      if (take && !cur) itemRoom(from);
+      if (take) {
+        const prev = cur ? { v: cur.v, data: cur.data } : null;
+        st.items[obj.key] = { key: obj.key, kind: obj.kind, with: from, v: obj.v, data: JSON.parse(js), at: now(), by: from, acked: obj.v, sentAt: now() };
+        await save(); changed("item", { key: obj.key, kind: obj.kind, with: from, snap: f.snap, prev });
+      }
+      const mine = st.items[obj.key];
+      if (mine.v > obj.v || (mine.v === obj.v && !take && JSON.stringify(mine.data) !== js)) {
+        try { await send(f, itemMsg(mine)); mine.sentAt = now(); await save(); } catch (e) { log("item reply: " + e.message); }
+        return null;
+      }
+      return { key: obj.key, v: mine.v };
     }
     async function onAccept({ from, obj, card }) {
       if (!card || typeof obj.p !== "string") return;
@@ -932,18 +980,20 @@ const GhostNetCore = (() => {
       },
       // one round: read the inbox, repost rendezvous cards about to expire, resend accepts that are still waiting.
       // full (launch, back to the front): the public inbox too, which otherwise is read only while something can
-      // arrive there (see needPublic) or every PUB_EVERY - each read is a request against ntfy.sh's per-IP limit
+      // arrive there (see needPublic) or every PUB_EVERY - each read is a request against ntfy.sh's per-IP limit.
+      // "pi": the private inbox only (the game view waiting for a friend's move: games only run between Ghosts that
+      // have private inboxes)
       async poll(full) {
         await state();
         if (!st.on || leaving) return 0;
-        if (busy) { if (full) pubAt = 0; return busy; } // (a full round asked for meanwhile: the next one reads both)
+        if (busy) { if (full && full !== "pi") pubAt = 0; return busy; } // (a full round asked for meanwhile: the next one reads both)
         busy = (async () => {
           await farewells();
           const me = await identity(false);
           if (!me) return 0;
           let n = 0;
           // the private inbox (connected friends on build 81+) and the public one (invites, older builds)
-          const topics = full || needPublic() ? [st.pi, me.inbox] : [st.pi];
+          const topics = full === "pi" ? [st.pi] : full || needPublic() ? [st.pi, me.inbox] : [st.pi];
           for (const topic of topics) {
             let msgs = [];
             try { msgs = await poll(topic, st.since[topic]); } catch (e) { if (topic === me.inbox) throw e; log("poll pi: " + e.message); continue; }
@@ -991,10 +1041,11 @@ const GhostNetCore = (() => {
             if (st.status.v && f.sentSV !== st.status.v && f.cap >= 2) { try { await sendStatus(f); } catch (e) { log("status retry: " + e.message); } }
             if (st.rx.v && f.sentRV !== st.rx.v && f.cap >= 2) { try { await sendRx(f); } catch (e) { log("rx retry: " + e.message); } }
             // shared items the friend hasn't confirmed yet (a move they may have missed while offline for days)
-            for (const it of Object.values(st.items || {})) {
-              if (it.with !== f.id || it.acked === it.v || now() - (it.sentAt || 0) < (force ? 60e3 : ITEM_RESEND)) continue;
-              try { await send(f, itemMsg(it)); it.sentAt = now(); } catch (e) { log("item resend: " + e.message); break; }
-            }
+            // (all in one message per friend; a friend not heard from for an hour only gets them with the hourly sync)
+            const quiet = now() - (f.heard || f.since || 0) > SYNC_FORCED;
+            const gap = quiet ? SYNC_FORCED : force ? 60e3 : ITEM_RESEND;
+            const owed = Object.values(st.items || {}).filter((it) => it.with === f.id && it.acked !== it.v && now() - (it.sentAt || 0) >= gap);
+            if (owed.length) await sendItems(f, owed);
             if (now() - (f.lastSync || 0) < (force ? SYNC_FORCED : SYNC_EVERY)) continue;
             await send(f, Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v }, piInfo(), xsyncInfo(f), rxInfo(f)));
             f.lastSync = now();

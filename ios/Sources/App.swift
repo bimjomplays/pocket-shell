@@ -6,13 +6,31 @@ import Vision
 import CoreImage
 import Photos
 import UserNotifications
+import Network
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // the notification delegate has to be in place before launching ends, or a tap on a banner that
+        // cold-launches Ghost (an Apple push from the relay, or one of Ghost's own) never reaches it
+        if WebViewController.ghostMode { _ = GhostNotifications.shared }
+        return true
+    }
+
+    func application(_ application: UIApplication,
                      configurationForConnecting session: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         UISceneConfiguration(name: "Default", sessionRole: session.role)
+    }
+
+    // Apple push device token (GhostPush.swift): only asked for when Ghost's profile has Push
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        GhostPush.didRegister(deviceToken: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        GhostPush.didFail(error: error)
     }
 }
 
@@ -105,6 +123,28 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var lastGhostSafe = ""
     private var speakerOn = false
     private var keepAwake: GhostKeepAwake?
+    /// Ghost: wifi <-> mobile data, or back online. ui.js (window.__ghostNetChanged) then tries what waits on ntfy.sh
+    /// at once (queued bug reports): ntfy.sh's limits are per IP address, so another network can get through.
+    private var pathMonitor: NWPathMonitor?
+    private var pathKey: String?
+    private func startPathMonitor() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let up = path.status == .satisfied
+            let key = "\(up)|\(path.usesInterfaceType(.wifi))|\(path.usesInterfaceType(.cellular))|\(path.usesInterfaceType(.wiredEthernet))"
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let first = self.pathKey == nil
+                let changed = self.pathKey != key
+                self.pathKey = key
+                if !first && changed && up {
+                    self.webView?.ghostEval("window.__ghostNetChanged && window.__ghostNetChanged()")
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.dltnp.ghost.path"))
+        pathMonitor = monitor
+    }
     // Ghost's built-in photo/gallery picker (composer's gallery button): PhotoKit behind a WKURLSchemeHandler,
     // registered on the config below before the web view exists. nil outside Ghost mode.
     private var photoPicker: GhostPhotoPicker?
@@ -264,7 +304,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             let eyes = GhostVault(presenter: self)
             config.setURLSchemeHandler(eyes, forURLScheme: GhostVault.scheme)
             vault = eyes
-            notifications = GhostNotifications()
+            notifications = GhostNotifications.shared
         }
 
         Self.preferHighRefresh(config.preferences)
@@ -328,6 +368,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                                                    name: UIScreen.capturedDidChangeNotification, object: nil)
         }
         if Self.ghostMode { keepAwake = GhostKeepAwake() }
+        if Self.ghostMode { startPathMonitor() }
         TouchWindow.onTouch = { [weak self] in self?.renderFast(for: 2.5) }
         buildTabBar()
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
@@ -881,6 +922,10 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "clearMessageNotifications":
             notifications?.clear(id: body["id"] as? String)
             replyHandler(true, nil)
+        case "pushInfo": // Apple push: can this install get one (its profile has Push), and the token (GhostPush.swift)
+            replyHandler(GhostPush.info(), nil)
+        case "pushRegister": // Apple push: permission + device token, for ui.js to hand to the PC relay
+            GhostPush.register(reply: replyHandler)
         case "pendingChat": // a notification tapped before ui.js was ready
             if let id = notifications?.takePendingChat() { replyHandler(id, nil) } else { replyHandler(nil, nil) }
         case let vaultOp where vaultOp.hasPrefix("vault"): // My Eyes Only (Vault.swift)

@@ -3412,7 +3412,9 @@
     sheet.style.display = "";
     backdrop.dataset.open = "1";
     sheet.classList.add("gh-anim");
-    requestAnimationFrame(() => { sheet.dataset.open = "1"; });
+    // slide up on the next frame, unless it was closed before that frame came (a quick tap on the backdrop): setting
+    // it then would leave the sheet up with no backdrop, covering the tab bar until the next sheet opens
+    requestAnimationFrame(() => { if (backdrop.dataset.open === "1") sheet.dataset.open = "1"; });
   }
   function openActionSheet(ctx, message, wrapEl) {
     const s = ctx.actionSheet;
@@ -3509,11 +3511,37 @@
   // Every ntfy.sh request from this phone (Ghost Network, the relay's control topic, answers to reports) goes through
   // here. ntfy.sh limits requests per IP and the PC relay on the same wifi shares it: after a 429 nothing goes out until
   // the wait is over (30 s, doubling to 10 min while 429s last; any answer resets it), since asking again keeps it full.
-  const ntfyGate = { until: 0, wait: 0 };
+  // code = ntfy's own reason for the last 429 (42901 too many requests, 42908 the IP's daily message quota is used up)
+  const ntfyGate = { until: 0, wait: 0, code: 0 };
+  // One trail line per request that actually went out ("GHOST ntfy GET pi 200"; class pi = private inbox, pub = public
+  // inbox, rv = rendezvous card, file = picture/report file, ctl = relay control topic, ack = a report's answer topic)
+  // and one count per minute ("GHOST ntfy/min 7 pi=5 pub=1 ctl=1", written with the first request of the next minute),
+  // so the real rate is readable from trail.txt. args.cls names the class where the topic can't (the relay's own topics).
+  const ntfyStat = { minute: 0, n: 0, by: {} };
+  const ntfyTrailLine = (t) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST ntfy" + t }).catch(() => {}); } catch (e) {} };
+  function ntfyClass(args) {
+    if (args.cls) return args.cls;
+    const path = String(args.url || "").replace(/^https:\/\/ntfy\.sh\//, "");
+    if (/^file\//.test(path)) return "file";
+    const m = /^gh-([a-z]+)-/.exec(path);
+    return m ? ({ pi: "pi", in: "pub", rv: "rv", f: "file", rp: "file" })[m[1]] || "other" : "other";
+  }
+  function ntfyCount(args, status) {
+    const cls = ntfyClass(args), minute = Math.floor(Date.now() / 60e3);
+    if (minute !== ntfyStat.minute) {
+      if (ntfyStat.n) ntfyTrailLine("/min " + ntfyStat.n + " " + Object.keys(ntfyStat.by).sort().map((k) => k + "=" + ntfyStat.by[k]).join(" "));
+      ntfyStat.minute = minute; ntfyStat.n = 0; ntfyStat.by = {};
+    }
+    ntfyTrailLine(" " + String(args.method || "GET").toUpperCase() + " " + cls + " " + status);
+    ntfyStat.n++; ntfyStat.by[cls] = (ntfyStat.by[cls] || 0) + 1;
+  }
   async function ntfyNet(args) {
     if (Date.now() < ntfyGate.until) throw new Error("ntfy busy");
-    const r = await dgPost("gnet", args);
+    let r;
+    try { r = await dgPost("gnet", args); } catch (e) { ntfyCount(args, "err"); throw e; }
+    ntfyCount(args, r && r.status ? r.status : "err");
     if (r && r.status === 429) {
+      try { ntfyGate.code = Number(JSON.parse(atob(r.body || "")).code) || 0; } catch (e) { ntfyGate.code = 0; }
       ntfyGate.wait = Math.min(Math.max(ntfyGate.wait * 2, 30e3), 600e3);
       ntfyGate.until = Date.now() + ntfyGate.wait;
       uiTrailN("ntfy 429: nothing sent for " + Math.round(ntfyGate.wait / 1000) + " s");
@@ -5365,8 +5393,9 @@
   // Mozilla push address the PC relay holds; the relay forwards "Jacob: Sent you a chat" to the ntfy app. Ghost's part:
   // take the pairing link (dltnpghost://notify-setup?c=...), hand Snapchat that address (bridge pushRegister, the same
   // RegisterDevice call Snapchat Web makes) and the account's web-push setting, re-register on every launch while on,
-  // and read the relay's private control topic for a new address. The one thing Ghost sends the relay is the
-  // Notification Delivery setting, over that same encrypted topic (section below, relay 1.2.0+).
+  // and read the relay's private control topic for a new address. Ghost sends the relay the Notification Delivery
+  // setting over that same encrypted topic (section below, relay 1.2.0+), and, when Ghost is signed with Push, its
+  // Apple push device token (section "Apple push", relay 1.7.0+): then banners come straight to Ghost.
   // Proven on the phone 2026-09-29: pushes arrive within ~1 s with Ghost closed, none while it's open, none for
   // silenced chats. Contract with the relay: ghost-notify/README.md.
   // =====================================================================================================
@@ -5426,7 +5455,7 @@
     if (!ok) return;
     const wasOn = !!(notifyCfg && notifyCfg.on);
     const oldRx = !again && notifyCfg && notifyCfg.rx && notifyCfg.rx.on; // another relay: friends stop using the old one's inbox
-    if (again) for (const k of ["delivery", "ping", "deliveryRev", "deliveryPending", "rx", "rpRev", "rpSig", "rpPending"]) if (notifyCfg[k] !== undefined) cfg[k] = notifyCfg[k]; // the relay keeps its settings (and its report inbox)
+    if (again) for (const k of ["delivery", "ping", "deliveryRev", "deliveryPending", "rx", "rpRev", "rpSig", "rpPending", "apns"]) if (notifyCfg[k] !== undefined) cfg[k] = notifyCfg[k]; // the relay keeps its settings (and its report inbox, and Ghost's Apple push token)
     notifyCfg = cfg;
     await notifySave();
     if (oldRx && gnOn()) gn.net.setReportInbox(null).catch(() => {});
@@ -5446,6 +5475,7 @@
     if (!r || !r.ok) throw new Error("Snapchat didn't take the address");
     notifyCfg.on = true; notifyCfg.status = "working"; notifyCfg.lastOk = Date.now();
     await notifySave();
+    notifyApnsSync(ctx).catch((e) => uiTrailN("apns " + (e && e.message)));
   }
   async function notifyTurnOff(ctx) {
     await notifyLoad();
@@ -5465,7 +5495,7 @@
     const c = notifyCfg;
     if (!c || !c.ctl) return false;
     const url = "https://ntfy.sh/" + c.ctl.topic + "/json?poll=1&since=" + encodeURIComponent(c.since || "all");
-    let r = null; try { r = await ntfyNet({ url, method: "GET" }); } catch (e) { return false; }
+    let r = null; try { r = await ntfyNet({ url, method: "GET", cls: "ctl" }); } catch (e) { return false; }
     if (!r || r.status !== 200 || typeof r.body !== "string") return false;
     const text = new TextDecoder().decode(b64uBytes(r.body.replace(/\+/g, "-").replace(/\//g, "_")));
     const key = await crypto.subtle.importKey("raw", b64uBytes(c.ctl.key), "AES-GCM", false, ["decrypt"]);
@@ -5481,6 +5511,7 @@
         const j = JSON.parse(new TextDecoder().decode(plain));
         if (j && j.type === "subscription" && Number(j.ts) > (c.subTs || 0)) { c.sub = notifyCheckSub(j.sub); c.subTs = Number(j.ts); changed = true; }
         if (j && j.type === "settings-ack" && j.v === 1 && Number.isInteger(j.rev) && NOTIFY_DELIVERY.some(([k]) => k === j.delivery) && (j.ping === undefined || notifyPingOk(j.ping))) dirty = notifyDeliveryAck(c, j) || dirty;
+        if (j && j.type === "apns-ack" && j.v === 1 && Number.isSafeInteger(j.rev) && NOTIFY_APNS_STATES.includes(j.state)) dirty = notifyApnsAck(c, j) || dirty;
         // relay 1.5.0+: its report inbox (section "Feedback"), and its answer to the list of who may send reports
         if (j && j.type === "reports") { const rx = fbValidRx(j); if (rx && rx.rev > ((c.rx && c.rx.rev) || 0)) { c.rx = rx; c.rpPending = true; c.rxFresh = true; rxNew = true; dirty = true; } }
         if (j && j.type === "reporters-ack" && j.v === 1 && Number.isSafeInteger(j.rev) && c.rpPending && c.rpRev && j.rev >= c.rpRev) { c.rpPending = false; dirty = true; }
@@ -5528,7 +5559,7 @@
     if (notifyCfg !== c || !c.deliveryPending) { notifyRefreshPage(ctx); return; }
     try {
       const msg = await notifyCtlEncrypt(c, { type: "settings", v: 1, rev: c.deliveryRev, delivery: notifyDelivery(c), ping: notifyPing(c), ts: Date.now() });
-      const r = await ntfyNet({ url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg) });
+      const r = await ntfyNet({ url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg), cls: "ctl" });
       if (!r || r.status < 200 || r.status >= 300) uiTrailN("settings not sent " + (r && r.status));
     } catch (e) { uiTrailN("settings " + (e && e.message)); }
     // relay 1.6+ gets it at once over its subscription (1.5 read the topic every 20 s): look for its ack a few times
@@ -5555,17 +5586,131 @@
     notifyRefreshPage(ctx);
     await notifyDeliverySync(ctx);
   }
+  // Apple push (relay 1.7.0+, NOTIFY_PLAN.md Phase 2). A Ghost signed with Push (aps-environment in its profile: a paid
+  // developer account, livecontainer-refresh LCR_GHOST_PUSH=on; GhostPush.swift) hands the relay its device token over
+  // the control topic: {type:"apns", v:1, rev, on:true, token, topic, env, team}, or {type:"apns", v:1, rev, on:false}
+  // when Settings > Notifications > Banners From Ghost is off. The relay then sends banners with Apple push (Ghost's
+  // icon, grouped per chat, a tap opens the chat) and falls back to the ntfy app whenever Apple refuses or can't be
+  // reached. It answers "apns-ack" {rev, state}: ready / no-key (its PC has no Apple key yet) / bad-token (Apple refused
+  // this phone's token) / key-refused / off, and sends a new answer when that changes. Ghost asks iOS for the token on
+  // every launch while on and sends it again only when it changed or wasn't confirmed. A Ghost without Push (friends on
+  // a free account) never sends anything here: the ntfy path as before.
+  const NOTIFY_APNS_STATES = ["ready", "no-key", "bad-token", "key-refused", "off"];
+  const NOTIFY_APNS_TOKEN_RE = /^[0-9a-f]{64,200}$/, NOTIFY_APNS_TOPIC_RE = /^com\.dltnp\.ghost(\.[A-Z0-9]{10})?$/, NOTIFY_APNS_TEAM_RE = /^[A-Z0-9]{10}$/;
+  let notifyPushInfo = null; // native "pushInfo": {env, team, topic, token}; env null = no Push in this install
+  async function notifyApnsInfo() {
+    if (!notifyPushInfo) { try { notifyPushInfo = (await dgPost("pushInfo", {})) || { env: null }; } catch (e) { notifyPushInfo = { env: null }; } }
+    return notifyPushInfo;
+  }
+  function notifyApnsAck(c, j) {
+    const a = c.apns;
+    if (!a || j.rev !== a.rev || (!a.pending && a.state === j.state)) return false; // an answer to an older message
+    a.pending = false; a.state = j.state;
+    return true;
+  }
+  // one sync at a time; a call while one runs (the switch flipped meanwhile) runs it once more afterwards. A revision
+  // still Pending is sent once per launch (notifyApnsSentRev); its answer is looked for by the timers below.
+  let notifyApnsTimer = 0, notifyApnsBusy = null, notifyApnsAgain = false, notifyApnsSentRev = 0;
+  function notifyApnsSync(ctx) {
+    if (notifyApnsBusy) { notifyApnsAgain = true; return notifyApnsBusy; }
+    notifyApnsBusy = (async () => { do { notifyApnsAgain = false; await notifyApnsSyncNow(ctx); } while (notifyApnsAgain); })().finally(() => { notifyApnsBusy = null; });
+    return notifyApnsBusy;
+  }
+  async function notifyApnsSyncNow(ctx) {
+    const c = notifyCfg;
+    if (!c || !c.ctl) return;
+    const info = await notifyApnsInfo();
+    const push = !!info && (info.env === "development" || info.env === "production");
+    // no Push: the ntfy app only (re-signed without Push after having it: the relay is told to stop, below)
+    if (!push && !(c.apns && c.apns.on)) return;
+    let want = { on: false };
+    if (push && c.on && !(c.apns && c.apns.off)) {
+      let reg = null;
+      try { reg = await dgPost("pushRegister", {}); } catch (e) { uiTrailN("apns register " + (e && e.message)); }
+      if (!reg) return; // no token this time (offline, iOS slow): the relay keeps what it has
+      c.apnsDenied = reg.allowed === false;
+      const ok = NOTIFY_APNS_TOKEN_RE.test(String(reg.token || "")) && NOTIFY_APNS_TOPIC_RE.test(String(reg.topic || "")) && (reg.env === "development" || reg.env === "production") && NOTIFY_APNS_TEAM_RE.test(String(reg.team || ""));
+      c.apnsInvalid = !ok;
+      if (ok && !c.apnsDenied) want = { on: true, token: reg.token, topic: reg.topic, env: reg.env, team: reg.team };
+      // (banners Ghost isn't allowed to show would vanish: the ntfy app then)
+    }
+    if (notifyCfg !== c) return;
+    const a = c.apns || {}; // read after the wait above: the switch may have been flipped meanwhile
+    if (a.off) want = { on: false };
+    if (!a.rev && !want.on) { await notifySave(); return; } // never sent: nothing to switch off
+    // the same as last time and not refused: nothing new (a token Apple refused is sent again with a new revision,
+    // once per launch: the relay then tries it again)
+    const same = a.rev && a.on === want.on && (!want.on || ["token", "topic", "env", "team"].every((k) => a[k] === want[k])) && a.state !== "bad-token";
+    if (!same) c.apns = Object.assign({ off: !!a.off, state: "" }, want, { rev: Math.max(Date.now(), (a.rev || 0) + 1), pending: true });
+    await notifySave();
+    if (!c.apns.pending || notifyApnsSentRev === c.apns.rev) return;
+    try { await notifyPollControl(); } catch (e) {} // its answer may be there already
+    if (notifyCfg !== c || !c.apns.pending) { notifyRefreshPage(ctx); return; }
+    const x = c.apns;
+    const send = async () => {
+      const msg = { type: "apns", v: 1, rev: x.rev, on: x.on, ts: Date.now() };
+      if (x.on) Object.assign(msg, { token: x.token, topic: x.topic, env: x.env, team: x.team });
+      notifyApnsSentRev = x.rev;
+      try {
+        const r = await ntfyNet({ url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(await notifyCtlEncrypt(c, msg)) });
+        if (r && r.status >= 200 && r.status < 300) return;
+        uiTrailN("apns not sent " + (r && r.status));
+      } catch (e) { uiTrailN("apns " + (e && e.message)); }
+      if (notifyApnsSentRev === x.rev) notifyApnsSentRev = 0; // not sent (ntfy.sh busy, offline): again at the next look
+    };
+    await send();
+    notifyRefreshPage(ctx);
+    // the relay answers at once over its subscription: look a few times while Ghost is open (like the settings above),
+    // sending it again first if it didn't go out
+    clearTimeout(notifyApnsTimer);
+    const waits = [6e3, 25e3, 60e3];
+    const step = (i) => { notifyApnsTimer = setTimeout(async () => {
+      const now = () => notifyCfg === c && c.apns && c.apns.rev === x.rev && c.apns.pending; // a newer revision has its own looks
+      if (!now()) return;
+      if (notifyApnsSentRev !== x.rev) await send();
+      else { try { await notifyPollControl(); } catch (e) {} }
+      if (!now()) notifyRefreshPage(ctx);
+      else if (i + 1 < waits.length) step(i + 1);
+    }, waits[i]); };
+    step(0);
+  }
+  async function notifySetApns(ctx, on) {
+    const c = notifyCfg;
+    if (!c) return;
+    c.apns = Object.assign({}, c.apns, { off: !on });
+    await notifySave();
+    await notifyApnsSync(ctx);
+    notifyRefreshPage(ctx);
+  }
+  // Settings > Notifications: which way banners come
+  function notifyApnsLabel(c) {
+    const a = c.apns || {};
+    if (!c.on) return "Off";
+    if (a.off) return "Off - ntfy app";
+    if (c.apnsDenied) return "Not allowed in iOS Settings";
+    if (c.apnsInvalid) return "Not available";
+    if (!a.rev) return "Starting";
+    if (a.pending) return "Pending";
+    return { ready: "Working", "no-key": "PC needs the Apple key", "bad-token": "Apple refused this phone", "key-refused": "Apple refused the PC's key", off: "ntfy app" }[a.state] || "Pending";
+  }
+
   // every launch while on: Snapchat Web refreshes its registration on load too; a new address from the relay first
   async function notifyStart(ctx) {
     window.__ghostOpenURL = (u) => { dgPost("takeOpenURL", {}).catch(() => {}); handleGhostURL(ctx, u).catch((e) => uiTrailN("url " + (e && e.message))); };
-    ctx.notifyTest = { poll: () => notifyPollControl(), cfg: () => notifyCfg, start: () => notifyStart(ctx), setDelivery: (m) => notifySetDelivery(ctx, typeof m === "string" ? { delivery: m } : m) }; // rig only
-    ctx.fbTest = { state: () => fbState, acks: () => fbPollAcks(ctx), owner: () => fbOwnerSync(ctx), dests: () => fbDestinations(ctx), app: () => fbAppInfo(), outbox: () => fbOutboxRun(ctx), gate: () => Object.assign({}, ntfyGate) }; // rig only
+    ctx.notifyTest = { poll: () => notifyPollControl(), cfg: () => notifyCfg, start: () => notifyStart(ctx), setDelivery: (m) => notifySetDelivery(ctx, typeof m === "string" ? { delivery: m } : m), apns: () => notifyApnsSync(ctx), setApns: (on) => notifySetApns(ctx, on) }; // rig only
+    ctx.fbTest = { state: () => fbState, acks: () => fbPollAcks(ctx), owner: () => fbOwnerSync(ctx), dests: () => fbDestinations(ctx), app: () => fbAppInfo(), outbox: () => fbOutboxRun(ctx), gate: () => Object.assign({}, ntfyGate), kick: (why) => fbOutboxKick(ctx, why) }; // rig only
     let pending = null; try { pending = await dgPost("takeOpenURL", {}); } catch (e) {}
     await notifyLoad();
     if (typeof pending === "string" && pending) setTimeout(() => handleGhostURL(ctx, pending).catch(() => {}), 1200);
     if (notifyCfg && notifyCfg.deliveryPending) notifyDeliverySync(ctx).catch(() => {}); // not confirmed last time: send again
     fbCtx = ctx;
     fbLoad().then((f) => { if (f.sent.some((s) => s.st === "sent" || s.st === "received" || s.st === "held")) fbAckSoon(ctx); fbOutboxSoon(ctx); }).catch(() => {}); // answers to reports, reports still waiting
+    if (!fbHooked) { // back in front, back online, on another network (native NWPathMonitor): reports still waiting go now
+      fbHooked = true;
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) fbOutboxKick(fbCtx, "front"); });
+      window.addEventListener("online", () => fbOutboxKick(fbCtx, "online"));
+      window.__ghostNetChanged = () => fbOutboxKick(fbCtx, "network");
+    }
     if (!notifyCfg) return;
     await new Promise((r) => setTimeout(r, window.__ghostMockFast ? 200 : 6000)); // Snapchat's services are up by then
     // (read while paired even with notifications off: the relay's report inbox comes this way too)
@@ -5579,6 +5724,7 @@
     } catch (e) { notifyCfg.status = /bad push/.test(String(e && e.message)) ? "repair" : "failed"; uiTrailN("register " + (e && e.message)); }
     await notifySave();
     notifyRefreshPage(ctx);
+    notifyApnsSync(ctx).catch((e) => uiTrailN("apns " + (e && e.message))); // Apple push: the token, if it changed
   }
   function notifyRefreshPage(ctx) {
     const top = ctx.settings && ctx.settings.el && ctx.settings.el.dataset.open === "1" && ctx.settings.stack[ctx.settings.stack.length - 1];
@@ -5586,8 +5732,10 @@
   }
   function notifySettingsPage(ctx, body) {
     if (notifyCfg === undefined) notifyLoad().then(() => notifyRefreshPage(ctx)); // normally loaded at startup
+    if (!notifyPushInfo) notifyApnsInfo().then((i) => { if (i && i.env) notifyRefreshPage(ctx); });
     const c = notifyCfg || null;
-    const g = setGroup(body, null, "When Ghost is closed, Snapchat's notifications come through the relay on your PC to the ntfy app: who it's from and whether it's a chat or a snap, never the message itself. Nothing arrives while that PC is off or asleep, or while Ghost is open (Snapchat holds them back itself). Snapchat doesn't notify for chats you've set to silent.");
+    const push = !!(notifyPushInfo && notifyPushInfo.env);
+    const g = setGroup(body, null, "When Ghost is closed, Snapchat's notifications come through the relay on your PC to " + (push ? "Ghost itself (Apple push) or the ntfy app" : "the ntfy app") + ": who it's from and whether it's a chat or a snap, never the message itself. Nothing arrives while that PC is off or asleep, or while Ghost is open (Snapchat holds them back itself). Snapchat doesn't notify for chats you've set to silent.");
     if (!c) {
       setRow(g, { icon: "bell", tint: "linear-gradient(135deg,#ff5c5c,#ff9433)", label: "When Ghost Is Closed", value: "Not set up", onClick: () => pushSettingsPage(ctx, "notifySetup") });
     } else {
@@ -5602,6 +5750,11 @@
       const gd = setGroup(body, "Notification Delivery" + (c.deliveryPending ? " · Pending" : ""), foot(notifyPing(c)));
       setChoice(gd, NOTIFY_DELIVERY, () => notifyDelivery(notifyCfg), (v) => { notifySetDelivery(ctx, { delivery: v }).catch((e) => uiTrailN("delivery " + (e && e.message))); });
       notifyPingRow(gd, notifyPing(c), (p) => { const f = gd.nextElementSibling; if (f && f.classList.contains("gh-set-group-foot")) f.textContent = foot(p); }, (p) => { notifySetDelivery(ctx, { ping: p }).catch((e) => uiTrailN("ping " + (e && e.message))); });
+      if (push) {
+        const ga = setGroup(body, "Apple Push", "This Ghost is signed with Push, so your PC's relay can send banners straight to Ghost (its icon, grouped per chat, a tap opens the chat) instead of the ntfy app. Whenever Apple can't take one, it goes to the ntfy app instead. The relay needs ghost-notify 1.7.0 or newer and the Apple push key (its README, \u201cApple push\u201d).");
+        setRow(ga, { label: "Banners From Ghost", toggle: { get: () => !(notifyCfg && notifyCfg.apns && notifyCfg.apns.off), set: (v) => { notifySetApns(ctx, v).catch((e) => uiTrailN("apns " + (e && e.message))); } } });
+        setRow(ga, { label: "Status", value: notifyApnsLabel(c) });
+      }
       const g2 = setGroup(body, "Relay");
       setRow(g2, { label: "Paired with", value: c.name });
       // the ntfy iOS app has no subscribe link: copy the topic to paste into ntfy's "Subscribe to topic"
@@ -5663,10 +5816,11 @@
   // filed (as ticket n) / held / limited / rejected, AES-GCM with a key from the report. The owner's Ghost also tells
   // its relay who may send reports and under which name (section end). Contract: ghost-notify/README.md "Bug reports
   // and feature requests".
-  // A report is sealed once and kept (wallDB "fbq:<rid>") until ntfy.sh takes it: when ntfy.sh is busy (its per-IP
-  // request limit, shared with the PC relay at home) or the phone is offline, it waits as "Waiting to Send" and Ghost
-  // tries again by itself while open, for a day. The sealed file must fit ntfy.sh's 2 MB limit per file: the pictures
-  // are made smaller until it does.
+  // A report is sealed once and kept (Ghost's saved settings "ghostFbq:<rid>", next to the list of reports) until
+  // ntfy.sh takes it: when ntfy.sh is busy (its per-IP limits, shared with the PC relay at home) or the phone is offline,
+  // it waits as "Waiting" and Ghost tries again by itself while open (30 s doubling to 10 min, never inside a 429 wait),
+  // at once when Ghost comes back to the front, comes back online or moves to another network, and on Send Now; for a
+  // day. The sealed file must fit ntfy.sh's 2 MB limit per file: the pictures are made smaller until it does.
   // =====================================================================================================
   const FB_KEY = "ghostFeedback";
   const FB_ACK_AAD = "ghost-report-ack-v1";
@@ -5675,10 +5829,12 @@
   const FB_ACK_FOR = 12 * 3600e3; // ntfy.sh keeps the answer 12 h
   const FB_STATUSES = ["received", "filed", "held", "limited", "rejected"];
   const FB_QUEUE_FOR = 24 * 3600e3; // a report not sent by then is given up (the relay refuses reports over 48 h old)
-  const fbOutbox = new Map(); // rid -> sealed report bytes, while waiting (also in wallDB, for after a relaunch)
+  const fbOutbox = new Map(); // rid -> sealed report bytes, while waiting (also saved, for after a relaunch)
+  const FB_FILE_KEY = "ghostFbq:"; // + rid: the sealed file, base64url (1.17.0 kept it in wallDB "fbq:<rid>", still read)
+  const FB_UPLOAD_FOR = window.__ghostMockFast ? 3000 : 120e3; // an upload with no answer by then counts as offline
   const FB_B32 = "abcdefghijkmnpqrstuvwxyz23456789";
-  let fbState; // {v: 1, sent: [{rid, kind, excerpt, ts, to, ack: {t, k}, since, st, n?, why?, inbox?, tries?, next?}]}
-  let fbCtx = null;
+  let fbState; // {v: 1, sent: [{rid, kind, excerpt, ts, to, ack: {t, k}, since, st, n?, why?, inbox?, tries?, next?, wait?}]}
+  let fbCtx = null, fbHooked = false;
   const fbDraft = { bug: null, feature: null }; // what you typed and picked, kept while Ghost runs
   async function fbLoad() {
     if (!fbState) { const v = await storage.get(FB_KEY, null); fbState = v && v.v === 1 && Array.isArray(v.sent) ? v : { v: 1, sent: [] }; }
@@ -5737,7 +5893,7 @@
     if (s.st === "held") return "Received · Waiting";
     if (s.st === "limited") return "Too Many · Try Later";
     if (s.st === "rejected") return "Not Accepted";
-    if (s.st === "queued") return "Waiting to Send";
+    if (s.st === "queued") return fbUploading.has(s.rid) ? "Sending…" : (s.next || 0) > Date.now() + 5e3 ? "Waiting · " + fbClock(s.next) : "Waiting";
     if (s.st === "failed") return "Not Sent";
     return Date.now() - (s.sentAt || s.ts) > FB_ACK_FOR ? "Sent · No Answer" : "Sent";
   }
@@ -5796,29 +5952,80 @@
     const first = (text.split("\n").find((x) => x.trim()) || "").trim();
     const s = { rid, kind, excerpt: Array.from(first).length > 60 ? fbCut(first, 59) + "…" : first, ts: Date.now(), to: dest.label, ack, since: "", st: "queued", inbox: Object.assign({}, dest.inbox), tries: 0, next: 0 };
     fbState.sent.push(s);
-    fbOutbox.set(rid, blob);
-    try { await wallDB.put("fbq:" + rid, new Blob([blob])); } catch (e) { uiTrailN("feedback keep " + (e && e.message)); } // (memory only then)
+    await fbKeep(rid, blob);
     await fbSave();
     const res = await fbUpload(ctx, s);
     if (res === "failed") { fbState.sent = fbState.sent.filter((x) => x !== s); await fbSave(); throw Object.assign(new Error(s.why || "ntfy.sh refused it"), { said: true }); }
     return res;
   }
-  async function fbForget(rid) { fbOutbox.delete(rid); try { await wallDB.del("fbq:" + rid); } catch (e) {} }
+  // the sealed file goes into the same saved store as fbState (UserDefaults on the phone), so a relaunch keeps both or
+  // neither; an IndexedDB copy (1.17.0) could go missing on its own and the report was then lost. At most 2 MB
+  // (ntfy.sh's file limit) = ~2.8 MB of base64: keep it under UserDefaults' 4 MB per value if that limit ever grows
+  async function fbKeep(rid, blob) { fbOutbox.set(rid, blob); await storage.set(FB_FILE_KEY + rid, fbB64u(blob)); }
+  async function fbKept(rid) {
+    if (fbOutbox.has(rid)) return fbOutbox.get(rid);
+    try { const v = await storage.get(FB_FILE_KEY + rid, null); if (typeof v === "string" && v) { const b = b64uBytes(v); fbOutbox.set(rid, b); return b; } } catch (e) {}
+    try { const b = await wallDB.get("fbq:" + rid); if (b) return new Uint8Array(b instanceof Blob ? await b.arrayBuffer() : b); } catch (e) {}
+    return null;
+  }
+  async function fbForget(rid) { fbOutbox.delete(rid); await storage.set(FB_FILE_KEY + rid, null); try { await wallDB.del("fbq:" + rid); } catch (e) {} }
+  function fbClock(t) { try { return new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; } }
+  // why a report waits, from the upload's error: busy (ntfy.sh's request limit), daily (the IP's daily message quota,
+  // ntfy code 42908, until midnight UTC), offline (no answer), down (ntfy.sh 5xx), full (413: this IP's file storage)
+  function fbWaitKind(m) {
+    if (/ntfy 413/.test(m)) return "full";
+    if (/429|busy/.test(m)) return ntfyGate.code === 42908 ? "daily" : "busy";
+    if (/ntfy 5\d\d/.test(m)) return "down";
+    return "offline";
+  }
+  function fbWaitText(s) {
+    const k = s && s.wait;
+    if (k === "daily") { const d = new Date(); d.setUTCHours(24, 0, 0, 0); return "ntfy.sh (the free server reports go through) has had all the messages it takes from your internet connection today; that resets at " + fbClock(d.getTime()) + ". On mobile data it can go sooner."; }
+    if (k === "busy") return "ntfy.sh (the free server reports go through) is busy for your internet connection and asked Ghost to wait.";
+    if (k === "full") return "ntfy.sh has no room for more files from your internet connection for a while.";
+    if (k === "down") return "ntfy.sh had a problem.";
+    return "Ghost couldn't reach ntfy.sh (no connection?).";
+  }
   // one try at uploading a kept report; on a busy ntfy.sh or no network it waits (30 s, doubling to 10 min, never
   // before ntfy.sh's own wait is over) and fbOutboxSoon tries again
   const fbUploading = new Set(); // rids being uploaded right now (Send and the outbox timer can meet)
+  const fbInFlight = new Map(); // rid -> {p, done, ok, err}: the upload request itself, which can outlive a timed-out try
   async function fbUpload(ctx, s) {
     if (s.st !== "queued") return s.st === "failed" ? "failed" : "sent"; // (gone out, or given up, meanwhile)
     if (fbUploading.has(s.rid)) return "queued";
     fbUploading.add(s.rid);
+    fbRefresh(ctx); // "Sending…"
     try { return await fbUploadNow(ctx, s); } finally { fbUploading.delete(s.rid); }
   }
   async function fbUploadNow(ctx, s) {
-    let blob = fbOutbox.get(s.rid);
-    if (!blob) { try { const b = await wallDB.get("fbq:" + s.rid); if (b) blob = new Uint8Array(await b.arrayBuffer()); } catch (e) {} }
-    if (!blob || !s.inbox) { s.st = "failed"; s.why = "lost"; await fbSave(); return "failed"; }
+    const blob = await fbKept(s.rid);
+    if (!blob || !s.inbox) { s.st = "failed"; s.why = "it was lost, please send it again"; delete s.inbox; delete s.next; await fbSave(); fbRefresh(ctx); return "failed"; }
+    const gate = fbGateFor();
+    if (gate > 0) { // inside a 429 wait (a relaunch, Ghost Network meanwhile): not a try, just later
+      s.wait = ntfyGate.code === 42908 ? "daily" : "busy";
+      s.next = Math.max(s.next || 0, Date.now() + gate);
+      await fbSave(); fbRefresh(ctx); fbOutboxSoon(ctx);
+      return "queued";
+    }
     try {
-      await gn.net.uploadReport(s.inbox, blob);
+      // an answer that never comes (Ghost sent to the background mid-upload) must not hold the outbox: after
+      // FB_UPLOAD_FOR it counts as offline. An upload still going then is waited for again, not started twice (each
+      // copy would use up the home IP's ntfy.sh file allowance); one that ends late counts as soon as it does
+      let up = fbInFlight.get(s.rid);
+      if (up && ((up.done && !up.ok) || (!up.done && Date.now() - up.at > 3 * FB_UPLOAD_FOR))) { fbInFlight.delete(s.rid); up = null; } // (failed, or its answer is lost for good)
+      if (!up) {
+        up = { done: false, ok: false, at: Date.now() };
+        up.p = gn.net.uploadReport(s.inbox, blob).then(() => { up.ok = true; }, (e) => { up.err = e; }).finally(() => {
+          up.done = true;
+          if (up.ok && !fbUploading.has(s.rid) && s.st === "queued") fbUpload(ctx, s).catch(() => {}); // (ended after the wait)
+        });
+        fbInFlight.set(s.rid, up);
+      }
+      let timer = 0;
+      await Promise.race([up.p, new Promise((res, rej) => { timer = setTimeout(() => rej(new Error("Ghost network isn't reachable (no answer)")), FB_UPLOAD_FOR); })])
+        .finally(() => clearTimeout(timer));
+      if (!up.ok) throw up.err || new Error("upload failed");
+      fbInFlight.delete(s.rid);
     } catch (e) {
       const m = String(e && e.message || e);
       uiTrailN("feedback upload " + m);
@@ -5827,22 +6034,54 @@
       const keep = /busy|429|reachable|ntfy 5\d\d|upload failed/.test(m) || (n413 && n413 <= 2);
       if (!keep || Date.now() - s.ts > FB_QUEUE_FOR) {
         s.st = "failed"; s.why = n413 ? "it's too big, try fewer pictures" : fbErrorText(e);
-        delete s.inbox; delete s.next; await fbForget(s.rid); await fbSave(); fbRefresh(ctx);
+        delete s.inbox; delete s.next; await fbSave(); await fbForget(s.rid); fbRefresh(ctx); // (saved first: a kill between leaves a spare file, not a lost one)
         return "failed";
       }
       s.tries = (s.tries || 0) + 1;
-      const own = Math.min(30e3 * Math.pow(2, s.tries - 1), 10 * 60e3);
-      s.next = Date.now() + Math.max(n413 ? 15 * 60e3 : own, gn.net.busyFor ? gn.net.busyFor() : 0, ntfyGate.until - Date.now());
+      s.wait = /reachable/.test(m) && fbGateFor() > 0 ? (ntfyGate.code === 42908 ? "daily" : "busy") : fbWaitKind(m); // (a 429 elsewhere shut the gate mid-try)
+      // the daily message quota only comes back at midnight UTC: asking every 10 min until then is pointless
+      const own = Math.max(Math.min(30e3 * Math.pow(2, s.tries - 1), 10 * 60e3), s.wait === "daily" ? 30 * 60e3 : 0);
+      s.next = Date.now() + Math.max(n413 ? 15 * 60e3 : own, fbGateFor(), 0);
+      uiTrailN("feedback " + s.rid.slice(0, 6) + " waits (" + s.wait + "), next try in " + Math.round((s.next - Date.now()) / 1000) + " s");
       await fbSave(); fbRefresh(ctx);
       fbOutboxSoon(ctx);
       return "queued";
     }
     s.st = "sent"; s.sentAt = Date.now();
-    delete s.inbox; delete s.tries; delete s.next; delete s.n413;
-    await fbForget(s.rid);
-    await fbSave(); fbRefresh(ctx);
+    uiTrailN("feedback " + s.rid.slice(0, 6) + " sent" + (s.tries ? " after " + s.tries + " waits" : ""));
+    delete s.inbox; delete s.tries; delete s.next; delete s.n413; delete s.wait;
+    await fbSave(); await fbForget(s.rid); fbRefresh(ctx);
     fbAckSoon(ctx);
     return "sent";
+  }
+  // ms until ntfy.sh may be asked again after a 429 (both gates: ui.js's for every request, network.js's own)
+  function fbGateFor() { return Math.max(0, ntfyGate.until - Date.now(), gnOn() && gn.net && gn.net.busyFor ? gn.net.busyFor() : 0); }
+  // back in front / online / on another network: what waits on its own backoff is tried now (a 429 wait still holds).
+  // iOS stops Ghost's timers in the background, so a wait that ran out meanwhile would need Ghost open for all of it again
+  function fbOutboxKick(ctx, why) {
+    if (!ctx || !fbState) return;
+    const waiting = fbState.sent.filter((s) => s.st === "queued");
+    if (!waiting.length) return;
+    const at = Date.now() + fbGateFor();
+    for (const s of waiting) s.next = Math.min(s.next || 0, at);
+    uiTrailN("feedback outbox: " + why + ", " + waiting.length + " waiting");
+    fbOutboxSoon(ctx, window.__ghostMockFast ? 50 : 2500); // (a moment for the network to come up after a resume)
+  }
+  // Send Now: every waiting report, right away (or right after a 429 wait). Answers "sent", "queued" or "wait"
+  async function fbSendNow(ctx) {
+    await fbLoad();
+    const waiting = fbState.sent.filter((s) => s.st === "queued");
+    if (!waiting.length) return "sent";
+    if (!gnOn() || !gn.net || !gn.net.myId()) return "off";
+    const gate = fbGateFor();
+    for (const s of waiting) { s.next = Date.now() + gate; const up = fbInFlight.get(s.rid); if (up && !up.done && !fbUploading.has(s.rid)) fbInFlight.delete(s.rid); } // (you asked: a fresh try)
+    await fbSave();
+    if (gate > 0) { fbRefresh(ctx); fbOutboxSoon(ctx); return "wait"; }
+    for (let i = 0; i < 40 && fbOutboxBusy; i++) await new Promise((r) => setTimeout(r, 250)); // (a run already going)
+    await fbOutboxRun(ctx);
+    fbRefresh(ctx);
+    if (fbUploading.size) return "sending";
+    return fbState.sent.some((s) => s.st === "queued") ? "queued" : "sent";
   }
   // the next try for reports still waiting, while Ghost is open (and at every launch / return to the front)
   let fbOutboxTimer = 0, fbOutboxBusy = false;
@@ -5892,7 +6131,7 @@
     let changed = false;
     for (const s of open) {
       let r = null;
-      try { r = await ntfyNet({ url: "https://ntfy.sh/" + s.ack.t + "/json?poll=1&since=" + encodeURIComponent(s.since || "all"), method: "GET" }); } catch (e) { continue; }
+      try { r = await ntfyNet({ url: "https://ntfy.sh/" + s.ack.t + "/json?poll=1&since=" + encodeURIComponent(s.since || "all"), method: "GET", cls: "ack" }); } catch (e) { continue; }
       if (!r || r.status !== 200 || typeof r.body !== "string") continue;
       const text = new TextDecoder().decode(b64uBytes(r.body.replace(/\+/g, "-").replace(/\//g, "_")));
       const key = await crypto.subtle.importKey("raw", b64uBytes(s.ack.k), "AES-GCM", false, ["decrypt"]);
@@ -5926,6 +6165,22 @@
     step(0);
   }
 
+  let fbNowBusy = false;
+  async function fbSendNowTap(ctx) {
+    if (fbNowBusy) return;
+    fbNowBusy = true;
+    try {
+      const r = await fbSendNow(ctx);
+      const left = fbState.sent.filter((s) => s.st === "queued");
+      if (r === "off") ctx.showToast("Turn on Ghost Network first (Settings > Privacy)");
+      else if (r === "wait") ctx.showToast("ntfy.sh asked Ghost to wait until " + fbClock(Date.now() + fbGateFor()) + " · it sends right after");
+      else if (r === "sent") ctx.showToast("Sent · thanks!");
+      else if (r === "sending") ctx.showToast("Sending…");
+      else ctx.showToast("Still waiting: " + fbWaitText(left[0]).replace(/\.$/, ""));
+    } catch (e) { uiTrailN("feedback send now " + (e && e.message)); }
+    finally { fbNowBusy = false; fbRefresh(ctx); }
+  }
+
   // ---- Settings > Report a Bug or Idea ----
   function feedbackPage(ctx, body) {
     if (!fbState) fbLoad().then(() => fbRefresh(ctx));
@@ -5943,13 +6198,18 @@
     setRow(g, { icon: "bulb", tint: "linear-gradient(135deg,#f0b232,#ffcf33)", label: "Request a Feature", onClick: () => pushSettingsPage(ctx, "feedbackIdea") });
     const sent = fbState ? fbState.sent.slice().reverse().slice(0, 15) : [];
     if (sent.length) {
+      const waiting = sent.filter((s) => s.st === "queued"), failed = sent.find((s) => s.st === "failed");
+      const latest = waiting.slice().sort((a, b) => (b.next || 0) - (a.next || 0))[0];
       const gs = setGroup(body, "Sent", "The answer comes from the PC that took the report while Ghost is open, for about 12 hours. Received · #12 = ticket 12 on that PC."
-        + (sent.some((s) => s.st === "queued") ? " Waiting to Send: ntfy.sh is busy or you're offline; Ghost sends it by itself while it's open." : ""));
+        + (latest ? " Waiting: " + fbWaitText(latest) + " Ghost tries again by itself while it's open, as soon as you come back to it and when your connection changes; Send Now tries right away." : "")
+        + (failed && failed.why ? " Not Sent: " + failed.why + "." : ""));
       for (const s of sent) {
-        const row = setRow(gs, { label: (s.kind === "bug" ? "Bug · " : "Idea · ") + (s.excerpt || "…"), value: fbStatusLabel(s) });
+        const tap = s.st === "queued" ? () => fbSendNowTap(ctx) : s.st === "failed" ? () => ctx.showToast("Not sent: " + (s.why || "ntfy.sh refused it")) : null;
+        const row = setRow(gs, { label: (s.kind === "bug" ? "Bug · " : "Idea · ") + (s.excerpt || "…"), value: fbStatusLabel(s), onClick: tap || undefined });
         row.classList.add("gh-fb-sent-row");
         row.dataset.st = s.st;
       }
+      if (waiting.length) setRow(gs, { icon: "send", tint: "var(--gh-accent)", label: "Send Now", onClick: () => fbSendNowTap(ctx) }).classList.add("gh-fb-send-now");
     }
     // the owner's phone: a relay that just turned reports on (or off) shows up here without a relaunch
     if (notifyCfg && notifyCfg.rx && notifyCfg.rpPending) fbOwnerSync(ctx);
@@ -6028,7 +6288,7 @@
         for (const p of d.pics) URL.revokeObjectURL(p.url);
         fbDraft[kind] = null;
         ctx.showToast(res === "sent" ? (bug ? "Bug report sent · thanks!" : "Feature request sent · thanks!")
-          : (bug ? "Bug report saved · Ghost sends it as soon as ntfy.sh lets it" : "Feature request saved · Ghost sends it as soon as ntfy.sh lets it"));
+          : (bug ? "Bug report saved · Ghost sends it as soon as ntfy.sh lets it (see Sent)" : "Feature request saved · Ghost sends it as soon as ntfy.sh lets it (see Sent)"));
         const st = ctx.settings.stack;
         if (st.length && st[st.length - 1].page === page) popSettingsPage(ctx);
       } catch (e) {
@@ -6093,7 +6353,7 @@
     for (let i = 0; i < parts.length; i++) {
       try {
         const msg = await notifyCtlEncrypt(c, { type: "reporters", v: 1, rev: c.rpRev, part: i, parts: parts.length, rx: c.rx.rev, me: list.me, friends: parts[i], ts: Date.now() });
-        const r = await ntfyNet({ url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg) });
+        const r = await ntfyNet({ url: "https://ntfy.sh/" + c.ctl.topic, method: "POST", body: btoa(msg), cls: "ctl" });
         if (!r || r.status < 200 || r.status >= 300) uiTrailN("reporters not sent " + (r && r.status));
       } catch (e) { uiTrailN("reporters " + (e && e.message)); }
     }
@@ -14516,6 +14776,8 @@
       if (notifyCfg && notifyCfg.rx) fbOwnerSync(ctx); // my relay takes reports: friends and names may have changed
     }, 60);
   }
+  const [GN_BEAT_FAST, GN_BEAT_SLOW, GN_FAST_FOR] = window.__ghostBeats || [20e3, 60e3, 120e3]; // (the test rig sets window.__ghostBeats)
+  let gnSchedule = () => {};
   async function gnStart(ctx) {
     if (gn.net || typeof GhostNetCore === "undefined") return;
     if (!(window.crypto && crypto.subtle)) { gnTrail("no WebCrypto here - Ghost Network unavailable"); return; } // https pages only
@@ -14561,10 +14823,19 @@
     // always, not only with friends: this also loads YOUR saved Ghost picture/banner (with no connected friends yet,
     // they stayed blank after every launch until the next edit - phone 2026-09-29)
     gnChanged(ctx);
+    // withSync: "force" = both inboxes + sync (launch, back to the front), true = the timer's round (private inbox, a
+    // due sync), "pi" = the private inbox only, no sync (the open game waiting for a move), "sync" = only a due sync, no
+    // read (the timer's round while that game already reads the inbox), false = like true without sync
     const round = async (withSync) => {
       if (document.hidden || !gn.net.hasWork() || gn.polling) return;
       gn.polling = true;
-      try { await gn.net.poll(withSync === "force"); if (withSync) await gn.net.sync(withSync === "force"); }
+      try {
+        if (withSync !== "sync") {
+          const got = await gn.net.poll(withSync === "force" ? true : withSync === "pi" ? "pi" : false);
+          if (got) gn.activeAt = Date.now(); // a message came in: stay on the fast beat for a while
+        }
+        if (withSync && withSync !== "pi") await gn.net.sync(withSync === "force");
+      }
       catch (e) { gnTrail("poll " + (e && e.message)); }
       finally { gn.polling = false; }
       // a status that just ran out disappears from headers and profiles without waiting for a message
@@ -14573,8 +14844,33 @@
     };
     gn.round = round;
     setTimeout(() => round("force"), window.__ghostMockFast ? 50 : 3000);
-    gn.timer = setInterval(() => round(true), 20000);
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) setTimeout(() => round("force"), 1000); });
+    // The timer's rounds: every 20 s for 2 minutes after a message arrived or the user did something, then every 60 s
+    // (each round is a request against ntfy.sh's per-IP limit; gn.beat() is the delay a round after `at` waits)
+    gn.activeAt = Date.now();
+    gn.beat = () => (Date.now() - gn.activeAt < GN_FAST_FOR ? GN_BEAT_FAST : GN_BEAT_SLOW);
+    const tick = async () => {
+      gn.timer = 0;
+      gn.lastTick = Date.now();
+      // an open game waiting for the friend's move already reads the private inbox: the round only does the sync, which
+      // still re-sends my moves that didn't get out (a send that failed during a 429 waits for this)
+      try { await round(gg.watch ? "sync" : true); } finally { gnSchedule(); }
+    };
+    gn.tick = tick; // (the rig runs a round of the timer without waiting for it)
+    gnSchedule = () => {
+      clearTimeout(gn.timer);
+      gn.timer = setTimeout(tick, Math.max(1000, (gn.lastTick || 0) + gn.beat() - Date.now()));
+    };
+    gn.lastTick = Date.now();
+    gnSchedule();
+    // the user touching or typing counts as an action: back to the fast beat (and a round due sooner than the slow one)
+    const touched = () => {
+      if (gg.view) return; // (the open game looks for the friend's move on its own beat)
+      const slow = Date.now() - gn.activeAt >= GN_FAST_FOR;
+      gn.activeAt = Date.now();
+      if (slow) gnSchedule();
+    };
+    for (const ev of ["pointerdown", "keydown"]) document.addEventListener(ev, touched, { capture: true, passive: true });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) { gn.activeAt = Date.now(); setTimeout(() => round("force"), 1000); if (gg.view) ggWatch(ctx); } });
   }
 
   // ---- the Connect card (a "ghost:connect" message in a 1:1 chat) ----
@@ -14679,7 +14975,7 @@
   // check it. Each match is a card in the chat timeline (with 1.10's chat extras: gxTimeline asks ggTimeline), placed at
   // its latest move like GamePigeon; tapping it opens the full-screen game view.
   // =====================================================================================================
-  const gg = { view: null, fast: null, lastTurn: new Map() };
+  const gg = { view: null, watch: 0, lastTurn: new Map() };
   gn.gg = gg; // (tests reach the open game through ctx.gn.gg)
   const ggOn = () => gnOn() && typeof GhostGames !== "undefined" && GhostGames.list().length > 0;
   const ggMe = () => (gn.net && gn.net.myId()) || "";
@@ -14834,7 +15130,7 @@
       try { game = def.view(body, { state: it.data.s, me: me < 0 ? null : def.playerIds ? ggMe() : me, players: it.data.p.slice(), names, theme: ggTheme(ctx), onMove: (move) => ggMove(ctx, key, move), onClose: () => ggClose(ctx), embedded: true }); }
       catch (e) { gnTrail("game view: " + (e && e.message)); body.textContent = "Couldn't show this game."; }
     } else body.textContent = "This game needs a newer Ghost.";
-    gg.view = { key, wrap, game: game || { update() {}, destroy() {} }, def };
+    gg.view = { key, wrap, game: game || { update() {}, destroy() {} }, def, moveAt: Date.now(), v: it.v };
     if (ctx.host) ctx.host.setAttribute("data-game", "1"); // toasts show above the game
     const close = () => ggClose(ctx);
     wrap.querySelector(".gh-gg-back").addEventListener("click", close);
@@ -14851,10 +15147,24 @@
       if (f) await ggStart(ctx, f, cur.data.g, key);
     });
     ggPaintView(ctx, it);
-    // while a game is open, check for the friend's move every few seconds instead of every 20
-    clearInterval(gg.fast);
-    gg.fast = setInterval(() => { if (gn.round) gn.round(); }, window.__ghostMockFast ? 400 : 4000);
-    if (gn.round) gn.round();
+    if (gn.round) gn.round("pi");
+  }
+  // While a game is open and it's the friend's turn: look for their move in the private inbox every 10 s, every 30 s after a
+  // minute without a move; nothing on my turn or when it's over (each look is a request against ntfy.sh's per-IP limit,
+  // about 2-6 a minute here; the timer's round still runs on its own beat)
+  const GG_WATCH_FAST = window.__ghostMockFast ? 300 : 10e3, GG_WATCH_SLOW = window.__ghostMockFast ? 900 : 30e3, GG_WATCH_FOR = window.__ghostMockFast ? 2e3 : 60e3;
+  function ggWatch(ctx) {
+    clearTimeout(gg.watch); gg.watch = 0;
+    const v = gg.view, it = v && gn.net && gn.net.item(v.key);
+    if (!it || document.hidden) return;
+    const st = ggStatusText(ctx, it);
+    if (st.mine || st.over) return;
+    gg.watch = setTimeout(async () => {
+      gg.watch = 0;
+      if (gg.view !== v || document.hidden) return; // (coming back to the front starts a full round and the next paint rewatches)
+      if (gn.round) await gn.round("pi");
+      ggWatch(ctx);
+    }, Date.now() - v.moveAt < GG_WATCH_FOR ? GG_WATCH_FAST : GG_WATCH_SLOW);
   }
   function ggPaintView(ctx, it) {
     const v = gg.view;
@@ -14868,9 +15178,11 @@
     // always the framework's copy (after our own move too): the view never keeps a state the rules didn't produce
     try { v.game.update(it.data.s); } catch (e) { gnTrail("game update: " + (e && e.message)); }
     gg.lastTurn.set(it.key, st.text);
+    if (v.v !== it.v) { v.v = it.v; v.moveAt = Date.now(); } // a move (mine or theirs): back to the quick look
+    ggWatch(ctx);
   }
   function ggClose(ctx) {
-    clearInterval(gg.fast); gg.fast = null;
+    clearTimeout(gg.watch); gg.watch = 0;
     if (!gg.view) return;
     if (ctx.host) ctx.host.removeAttribute("data-game");
     try { gg.view.game.destroy(); } catch (e) {}
