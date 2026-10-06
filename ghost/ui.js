@@ -679,6 +679,7 @@
     root.addEventListener("touchend", (e) => { if (e.changedTouches && e.changedTouches.length === 1) secondTap(e); }, true);
     root.addEventListener("click", secondTap, true);
     try { if (typeof window.dgOnSettings === "function") window.dgOnSettings(() => syncPresence(ctx)); } catch (e) {}
+    if (gdOn()) gdInit(ctx); // Ghost desktop only (section "Desktop layout")
   }
 
   async function loadInitialData(ctx) {
@@ -1231,6 +1232,7 @@
       const e = list.querySelector(".gh-empty");
       if (e) e.remove();
     }
+    if (ctx.gd) gdSyncRows(ctx);
   }
 
   function buildHomeRow(ctx, conv) {
@@ -1729,7 +1731,7 @@
         entry = { messages: res.messages || [], hasMore: !!res.hasMore };
         ctx.state.messagesByConv.set(convId, entry);
       } catch (e) { openConversationScreen(ctx, convId); return; }
-      const unopened = entry.messages.filter((m) => m.kind === "snap" && !isFromMe(ctx, m) && !m.opened && !m.onlyInApp);
+      const unopened = entry.messages.filter((m) => m.kind === "snap" && !isFromMe(ctx, m) && !m.opened && !m.onlyInApp && !phoneSnapMarked(convId, m.id));
       if (!unopened.length) { openConversationScreen(ctx, convId); return; }
       openSnapPlaythrough(ctx, unopened, "unopened", {
         title: cd.title || "Snaps", convId,
@@ -1886,6 +1888,7 @@
     if (ctx.conv.liveWall) ctx.conv.liveWall.stop();
     stopVoice();
     syncPresence(ctx);
+    if (ctx.gd) gdSync(ctx);
   }
   function closeConversationScreen(ctx) {
     leaveConversation(ctx);
@@ -2048,6 +2051,7 @@
     for (const w of oldWraps.values()) forgetChatVideos(w); // (bubbles that weren't reused are gone for good)
     conv.messages.replaceChildren(conv.topSpacer, frag, conv.bottomSpacer);
     if (gxConv) gxPaintPinbar(ctx);
+    if (ctx.gd && ctx.gd.sel && ctx.gd.sel.ids.size) gdSelPaint(ctx); // Ghost desktop: the selection follows the repaint
     conv._anchor = anchor ? Object.assign(anchor, { until: nowMs() + 1500, top: mEl.scrollTop }) : null;
     const restore = () => {
       conv.stickUntil = nowMs() + 150;
@@ -2189,7 +2193,7 @@
     const reply = m.replyTo ? (m.replyTo.messageId || "") + ":" + (m.replyTo.text || "") + ":" + ((m.replyTo.from && m.replyTo.from.name) || "") : "";
     const convId = ctx.state.currentConvId;
     return [m.kind, m.ts, m.text || "", reacts, media, reply, m.saved ? 1 : 0, m.opened ? 1 : 0, m.replayable ? 1 : 0, m.snapSound ? 1 : 0,
-      m.onlyInApp ? (phoneSnapShownOpened(ctx, m) ? 2 : 1) : 0, m.edited ? 1 : 0, m.pending ? 1 : 0, m.failed ? 1 : 0, m.retained ? 1 : 0, m.retainedMedia ? 1 : 0, m.mediaUnavailable ? 1 : 0,
+      (m.onlyInApp ? 1 : 0) + (phoneSnapShownOpened(ctx, m) ? 2 : 0) + (phoneSnapFailed.has((m.conversationId || convId) + "|" + m.id) ? 4 : 0), m.edited ? 1 : 0, m.pending ? 1 : 0, m.failed ? 1 : 0, m.retained ? 1 : 0, m.retainedMedia ? 1 : 0, m.mediaUnavailable ? 1 : 0,
       m.status || "", isMe ? 1 : 0, isLast ? 1 : 0, (ctx.conv && ctx.conv.searchQ) || "", convId && isBookmarked(convId, m.id) ? 1 : 0, gnCardSig(ctx, m, isMe), gxStickerSig(ctx, m)].join("\u0001");
   }
   function reusedWrapEl(ctx, oldWraps, m, isMe, isLast, paintKey) {
@@ -2206,6 +2210,7 @@
     const fl = ctx.conv && ctx.conv._flash;
     if (fl && fl.id === m.id && nowMs() - fl.at < 1500) { wrap.classList.add("gh-msg-flash"); wrap.style.setProperty("--gh-flash-delay", -Math.round(nowMs() - fl.at) + "ms"); }
     if (m.retained) wrap.dataset.retained = "1";
+    if (ctx.gd && ctx.gd.sel && ctx.gd.sel.ids.has(m.id)) wrap.dataset.gdPicked = "1"; // Ghost desktop: selected
     const swipe = el("div", "gh-msg-swipe");
     const hint = el("div", "gh-reply-hint");
     hint.appendChild(icon("reply", 18));
@@ -2649,21 +2654,27 @@
   // the Snapchat app before anyone saw it. So the sender sees no "Opened" and the snap stays new in the Snapchat app.
   // prefs.phoneSnapsOpened = ["convId|messageId", ...] (newest last); prefs.phoneSnapsChats = { convId: lastActivityTs }
   // = that chat's list row stops showing New Snap while its newest event is still the one it had when marked.
+  // #239: the same for a snap that failed to load ("Couldn't load that Snap": expired, download or decrypt failed). It
+  // stays New in Snapchat's feed forever, so any unopened received snap can be marked, and a snap that just failed to
+  // load gets the tile button too (phoneSnapFailed = "convId|messageId" of this session's failed loads).
   const PHONE_SNAPS_MAX = 300;
+  const phoneSnapFailed = new Set();
   let phoneSnapCache = { src: null, set: new Set() };
   function phoneSnapMarked(convId, id) {
     const list = pref("phoneSnapsOpened") || [];
     if (phoneSnapCache.src !== list) phoneSnapCache = { src: list, set: new Set(list) };
     return phoneSnapCache.set.has(convId + "|" + id);
   }
-  // shown as opened: a received, still unopened app-only snap the owner marked
+  // shown as opened: a received, still unopened snap the owner marked
   function phoneSnapShownOpened(ctx, m) {
-    return !!(m && m.kind === "snap" && m.onlyInApp && !m.opened && !isFromMe(ctx, m) && phoneSnapMarked(m.conversationId || ctx.state.currentConvId, m.id));
+    return !!(m && m.kind === "snap" && !m.opened && !isFromMe(ctx, m) && phoneSnapMarked(m.conversationId || ctx.state.currentConvId, m.id));
   }
   // the chat-list row of a chat whose unread snaps were all marked: no New Snap / unread dot until something newer comes
   function phoneSnapsCleared(conv) {
     const at = (pref("phoneSnapsChats") || {})[conv.id];
-    if (at === undefined || !conv.hasUnreadSnap || conv.unreadCount > 1 || at !== conv.lastActivityTs) return conv;
+    // a group chat can report several unread (unreadCount > 1; #239): they were all marked, so the whole row clears.
+    // Anything newer than the newest event at marking time brings it back.
+    if (at === undefined || !conv.hasUnreadSnap || (conv.lastActivityTs || 0) > at) return conv;
     const p = conv.preview || {};
     if (p.fromMe) return conv;
     const state = p.state && Object.assign({}, p.state, { status: p.state.status === "new" ? "received" : p.state.status });
@@ -2678,7 +2689,7 @@
     if (on) {
       // every unopened snap you received in the loaded chat is now opened or marked: its list row can stop saying New Snap
       const entry = ctx.state.messagesByConv.get(convId);
-      const left = ((entry && entry.messages) || []).some((x) => x.kind === "snap" && !x.opened && !isFromMe(ctx, x) && x.id !== m.id && !(x.onlyInApp && list.includes(convId + "|" + x.id)));
+      const left = ((entry && entry.messages) || []).some((x) => x.kind === "snap" && !x.opened && !isFromMe(ctx, x) && x.id !== m.id && !list.includes(convId + "|" + x.id));
       const cd = ctx.state.convById.get(convId);
       if (!left && cd && cd.lastActivityTs) chats[convId] = cd.lastActivityTs;
     }
@@ -2728,7 +2739,7 @@
     const time = el("span", "gh-snap-time"); time.textContent = fmtClock(m.ts);
     b.append(mark, label, time);
     if (saveBtn) b.appendChild(saveBtn);
-    if (!isMe && !m.opened && m.onlyInApp && !marked) {
+    if (!isMe && !m.opened && !marked && (m.onlyInApp || phoneSnapFailed.has((m.conversationId || ctx.state.currentConvId) + "|" + m.id))) {
       // stop it sitting in the chat as new forever: marked opened in Ghost only (setPhoneSnapOpened says why)
       const markBtn = el("button", "gh-snap-markopen");
       markBtn.textContent = "Mark opened";
@@ -2784,7 +2795,7 @@
         const entry = ctx.state.messagesByConv.get(convId);
         const all = (entry && entry.messages) || [m];
         const idx = all.findIndex((x) => x.id === m.id);
-        const msgs = idx < 0 ? [m] : snapRunFrom(all, idx, (x) => x.kind === "snap" && !isFromMe(ctx, x) && !x.opened && !x.onlyInApp);
+        const msgs = idx < 0 ? [m] : snapRunFrom(all, idx, (x) => x.kind === "snap" && !isFromMe(ctx, x) && !x.opened && !x.onlyInApp && !phoneSnapMarked(convId, x.id));
         openSnapPlaythrough(ctx, msgs, "unopened", {
           title: (m.from && m.from.name) || "Snap", convId,
           onDone: () => { if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv); },
@@ -3589,7 +3600,7 @@
     s.replyItem.onclick = () => { setReplyTo(ctx, message); ctx.conv.textarea.focus(); s.close(); };
     s.copyItem.onclick = () => { copyToClipboard(message.text || ""); s.close(); };
     // a phone-only snap (#208): mark it opened in Ghost, or back to new (setPhoneSnapOpened)
-    const phoneSnap = message.kind === "snap" && message.onlyInApp && !message.opened && !isFromMe(ctx, message);
+    const phoneSnap = message.kind === "snap" && !message.opened && !isFromMe(ctx, message);
     const phoneMarked = phoneSnap && phoneSnapShownOpened(ctx, message);
     s.phoneSnapItem.style.display = phoneSnap ? "" : "none";
     const phoneLabel = el("span"); phoneLabel.textContent = phoneMarked ? "Mark as New" : "Mark as Opened";
@@ -3679,7 +3690,8 @@
   const ntfyGate = { until: 0, wait: 0, code: 0 };
   const gsx = { core: null, piCovered: false }; // the Ghost Network stream (1.19.0, section "Ghost network": gsStart)
   // One trail line per request that actually went out ("GHOST ntfy GET pi 200"; class pi = private inbox, pub = public
-  // inbox, rv = rendezvous card, file = picture/report file, ctl = relay control topic, ack = a report's answer topic)
+  // inbox, rv = rendezvous card, file = picture/report file, ctl = relay control topic, ack = a report's answer topic,
+  // link = Link Ghost Desktop's one-time topic; never the topic itself)
   // and one count per minute ("GHOST ntfy/min 7 pi=5 pub=1 ctl=1", written with the first request of the next minute),
   // so the real rate is readable from trail.txt. args.cls names the class where the topic can't (the relay's own topics).
   const ntfyStat = { minute: 0, n: 0, by: {} };
@@ -3689,7 +3701,7 @@
     const path = String(args.url || "").replace(/^https:\/\/ntfy\.sh\//, "");
     if (/^file\//.test(path)) return "file";
     const m = /^gh-([a-z]+)-/.exec(path);
-    return m ? ({ pi: "pi", in: "pub", rv: "rv", f: "file", rp: "file" })[m[1]] || "other" : "other";
+    return m ? ({ pi: "pi", in: "pub", rv: "rv", f: "file", rp: "file", lk: "link" })[m[1]] || "other" : "other";
   }
   function ntfyCount(args, status) {
     const cls = ntfyClass(args), minute = Math.floor(Date.now() / 60e3);
@@ -4118,6 +4130,7 @@
     tile.addEventListener("touchend", clearPress, { passive: true });
     tile.addEventListener("touchcancel", clearPress, { passive: true });
     expandBtn.addEventListener("click", (e) => { e.stopPropagation(); openPickerPreview(ctx, index); });
+    if (gdOn()) gdContext(tile, () => openPickerPreview(ctx, index)); // desktop: right-click = the hold
     return tile;
   }
   function releasePickerTile(tile) {
@@ -4423,6 +4436,7 @@
     s.stack.push(entry);
     page.dataset.in = "0";
     requestAnimationFrame(() => requestAnimationFrame(() => { if (prev) prev.page.dataset.under = "1"; page.dataset.in = "1"; }));
+    if (ctx.gd) gdSetPaged(ctx); // Ghost desktop: two-column Settings (section "Desktop screens")
     // values shown on this page (e.g. the theme name) are rebuilt when you come back to it
     entry.refresh = () => { if (entry.dispose) entry.dispose(); body.innerHTML = ""; const d = SETTINGS_PAGES[name](ctx, body, page); entry.dispose = typeof d === "function" ? d : null; };
     // swipe from the left edge to go back, like every iOS screen
@@ -4441,6 +4455,7 @@
     prev.page.dataset.under = "0";
     if (prev.refresh) prev.refresh();
     setTimeout(() => top.page.remove(), 320);
+    if (ctx.gd) gdSetPaged(ctx);
   }
 
   // ---- building blocks -------------------------------------------------------------------------------
@@ -4497,12 +4512,13 @@
     return box;
   }
 
-  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile", gnPreview: "How Friends See You", gnVerify: "Verify Connection", tiktok: "TikTok", notify: "Notifications", notifySetup: "Set Up on Your PC", feedback: "Feedback", feedbackBug: "Report a Bug", feedbackIdea: "Request a Feature" };
+  const SETTINGS_TITLES = { doubletap: "Double-Tap Reaction", gallery: "Media & Links", bookmarks: "Bookmarks", friends: "Friends", friend: "Friend", hidden: "Hidden Chats", main: "Settings", appearance: "Appearance", chats: "Chats", privacy: "Privacy", media: "Stickers & GIFs", storage: "Storage & Data", about: "About Ghost", gnProfile: "Ghost Profile", gnShare: "Share My Profile", gnPreview: "How Friends See You", gnVerify: "Verify Connection", gnLink: "Link Ghost Desktop", tiktok: "TikTok", notify: "Notifications", notifySetup: "Set Up on Your PC", feedback: "Feedback", feedbackBug: "Report a Bug", feedbackIdea: "Request a Feature" };
   const SETTINGS_PAGES = {
     gnProfile(ctx, body) { return GN_SETTINGS.gnProfile(ctx, body); }, // section "Ghost network"
     gnShare(ctx, body) { return GN_SETTINGS.gnShare(ctx, body); },
     gnPreview(ctx, body) { return GN_SETTINGS.gnPreview(ctx, body); },
     gnVerify(ctx, body) { return GN_SETTINGS.gnVerify(ctx, body); },
+    gnLink(ctx, body) { return GN_SETTINGS.gnLink(ctx, body); },
     // Every photo/video (and saved snap) and every link in the open chat, newest first. Older history loads on
     // demand. Only what Snapchat Web can still fetch shows up (media that has expired on Snapchat's side can't).
     gallery(ctx, body) {
@@ -4637,6 +4653,7 @@
         const n = el("div", "gh-friend-name"); n.textContent = u.name || u.username || "Snapchatter";
         const un = el("div", "gh-friend-user"); un.textContent = [u.username ? "@" + u.username : "", u.source || ""].filter(Boolean).join(" \u00b7 ");
         col.append(n, un); row.appendChild(col);
+        if (ctx.gd && !actions.length) row._gdUser = u; // Ghost desktop: hover tools + right-click menu
         for (const a of actions) {
           const b = el("button", "gh-friend-btn gh-press" + (a.ghost ? " gh-friend-btn-ghost" : ""));
           b.textContent = a.label; b.disabled = !!a.disabled;
@@ -5282,11 +5299,13 @@
   }
 
   // small in-app confirm and text prompt (never window.confirm/prompt - those freeze the web view)
-  function confirmSheet(ctx, text, okLabel) {
+  // big: an optional line under the text in large monospace (a code to compare, e.g. Link Ghost Desktop's Ghost ID)
+  function confirmSheet(ctx, text, okLabel, big) {
     return new Promise((res) => {
       const ov = el("div", "gh-confirm");
       ov.innerHTML = '<div class="gh-confirm-box"><div class="gh-confirm-text"></div><div class="gh-confirm-row"><button data-v="0">Cancel</button><button data-v="1" class="gh-confirm-ok"></button></div></div>';
       ov.querySelector(".gh-confirm-text").textContent = text;
+      if (big) { const b = el("div", "gh-confirm-big"); b.textContent = big; ov.querySelector(".gh-confirm-text").after(b); }
       ov.querySelector(".gh-confirm-ok").textContent = okLabel || "OK";
       ov.addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b && e.target !== ov) return; ov.remove(); res(!!(b && b.dataset.v === "1")); });
       ctx.root.appendChild(ov);
@@ -5460,6 +5479,7 @@
   function openChatSearch(ctx) {
     const conv = ctx.conv;
     if (!conv) return;
+    if (ctx.gd && ctx.gd.wide) { gdDrawer(ctx, "search"); return; } // Ghost desktop: a drawer beside the chat
     if (conv.searchBar) { conv.searchBar.querySelector("input").focus(); return; }
     const bar = el("div", "gh-chat-search");
     bar.innerHTML = `<div class="gh-chat-search-field"><input type="search" placeholder="Search this chat" enterkeyhint="search" autocomplete="off"></div>
@@ -7156,6 +7176,7 @@
     mic.addEventListener("touchend", () => finish(false));
     mic.addEventListener("touchcancel", () => finish(true));
     mic.addEventListener("click", (e) => { if (!("ontouchstart" in window)) { if (r.cur) finish(false); else start(e.clientX); } });
+    conv.voice = { recording: () => !!r.cur, cancel: () => finish(true) }; // (Ghost desktop: Esc cancels, there's no finger to slide)
   }
 
   // ---- Save to Photos (the app writes to the camera roll; nothing is sent to Snapchat) ------------------
@@ -7381,6 +7402,7 @@
     tile.addEventListener("touchmove", cancel, { passive: true });
     tile.addEventListener("touchend", cancel, { passive: true });
     tile.addEventListener("touchcancel", cancel, { passive: true });
+    if (gdOn()) gdContext(tile, () => fn()); // desktop: right-click = the hold
     return () => { if (fired) { fired = false; return true; } return false; };
   }
   async function toggleFav(ctx, key, item, same) {
@@ -7703,6 +7725,7 @@
     s.createBtn.disabled = true;
     openSheetGeneric(s.backdrop, s.sheet);
     runFriendSearch(ctx, s);
+    if (ctx.gd) gdNewChatOpened(ctx);
   }
   async function runFriendSearch(ctx, s) {
     const mySeq = ++s.seq;
@@ -7711,7 +7734,7 @@
     try { results = await api.searchFriends(q); } catch (e) { results = []; }
     if (mySeq !== s.seq) return;
     s.list.innerHTML = "";
-    if (!results || !results.length) { const n = el("div", "gh-empty"); n.textContent = "No friends found"; s.list.appendChild(n); return; }
+    if (!results || !results.length) { const n = el("div", "gh-empty"); n.textContent = "No friends found"; s.list.appendChild(n); if (ctx.gd) gdNewChatPainted(ctx, s, []); return; }
     for (const u of results) {
       const row = el("div", "gh-friend-row gh-press");
       row.dataset.picked = s.picked.has(u.id) ? "1" : "0";
@@ -7728,6 +7751,7 @@
       });
       s.list.appendChild(row);
     }
+    if (ctx.gd) gdNewChatPainted(ctx, s, results);
   }
 
   // =====================================================================================================
@@ -8287,6 +8311,11 @@
     }
     maybePrefetchNext(ctx, q, idx);
   }
+  // a snap that couldn't be loaded stays unopened (a tap retries); remember it so its tile offers "Mark opened" (#239)
+  function snapLoadFailed(ctx, q, idx) {
+    const m = q.mode === "unopened" && q.msgs[idx];
+    if (m) phoneSnapFailed.add((m.conversationId || q.convId || ctx.state.currentConvId) + "|" + m.id);
+  }
   async function paintSnapQueueItem(ctx, idx) {
     const v = ctx.viewer;
     const q = v.snapQ;
@@ -8299,6 +8328,7 @@
       q.preloaded.delete(idx);
       if (pre.ref && pre.video) { showSnapVideo(ctx, q, idx, pre.ref, pre.video); return; }
       if (pre.ref) { showSnapImage(ctx, q, idx, pre.ref); return; }
+      snapLoadFailed(ctx, q, idx);
       paintSnapQueueItem(ctx, idx + 1); return; // that prefetch failed to resolve - skip it, same as a fresh failure below
     }
     v.media.innerHTML = "";
@@ -8310,7 +8340,8 @@
       // the snap stays unopened, so a tap tries again; one Snapchat Web can't show at all (expired, or a kind only
       // the phone app plays) says so instead
       const why = (q.errors && q.errors.get(idx)) || "";
-      if (idx === 0) ctx.showToast(/ - unavailable:/.test(why) ? "That Snap can only be opened in the Snapchat app" : "Couldn't load that Snap. Tap it to try again.");
+      snapLoadFailed(ctx, q, idx);
+      if (idx === 0) ctx.showToast(/ - unavailable:/.test(why) ? "That Snap can only be opened in the Snapchat app" : "Couldn't load that Snap. Tap it to try again, or Mark opened to clear it.");
       paintSnapQueueItem(ctx, idx + 1);
       return;
     }
@@ -11395,13 +11426,14 @@
       goTikTok(ctx, clamp(P.index + (e.deltaY > 0 ? 1 : -1), 0, Math.max(0, P.items.length - 1)), 0, P);
     }, { passive: false });
     P.pager.addEventListener("click", (e) => { if (!("ontouchstart" in window) && !openTTLink(ctx, e.target, P)) toggleTikTokPause(ctx, P); });
+    if (gdOn()) gdContext(P.pager, (e) => { if (!(e.target.closest && e.target.closest("[data-ttlink], [data-rail]"))) openTTMenu(ctx, P); }); // desktop: right-click = the hold
   }
   function tikTokCovered(ctx) {
     const T = ctx.tiktok;
     if (!T || T.el.dataset.open !== "1" || document.hidden) return true;
     if (ctx.settings && ctx.settings.el.dataset.open === "1") return true;
     if (ctx.camera && ctx.camera.el.dataset.open === "1") return true;
-    if (ctx.state.currentConvId) return true;
+    if (ctx.state.currentConvId && !(ctx.gd && ctx.gd.wide)) return true; // (desktop two panes: TikTok is a panel over the open chat)
     if (ctx.viewer && ctx.viewer.el && ctx.viewer.el.dataset.open === "1") return true;
     return false;
   }
@@ -13508,6 +13540,7 @@
     const endPress = () => { clearTimeout(pressTimer); pressTimer = null; };
     tile.addEventListener("touchend", endPress, { passive: true });
     tile.addEventListener("touchcancel", endPress, { passive: true });
+    if (gdOn()) gdContext(tile, () => { if (!tile._item) return; if (!g.selecting) setGalSelecting(ctx, true); if (!g.selected.includes(tile._item.id)) toggleGalSelect(ctx, tile._item); }); // desktop: right-click = the hold
     tile.addEventListener("click", () => {
       if (longPressed) { longPressed = false; return; }
       if (!tile._item) return;
@@ -15152,7 +15185,7 @@
       refreshAvatars(ctx);
       if (ctx.conv && ctx.state.currentConvId) { try { paintWindow(ctx, ctx.conv); } catch (e) {} }
       const top = ctx.settings && ctx.settings.el && ctx.settings.el.dataset.open === "1" && ctx.settings.stack[ctx.settings.stack.length - 1];
-      if (top && top.refresh && /^(gn|friend$|privacy$|main$|feedback$)/.test(top.name)) top.refresh();
+      if (top && top.refresh && /^(gn(?!Link$)|friend$|privacy$|main$|feedback$)/.test(top.name)) top.refresh(); // (not Link Ghost Desktop: a code may be half typed)
       if (notifyCfg && notifyCfg.rx) fbOwnerSync(ctx); // my relay takes reports: friends and names may have changed
     }, 60);
     gsRefresh(); // (a first invite or friend: my inboxes join the stream)
@@ -15763,6 +15796,7 @@
         const l = el("span", "gh-set-label"); l.textContent = u.name || "Ghost friend"; row.appendChild(l);
         row.appendChild(icon("back", 16, "gh-set-chev"));
         row.addEventListener("click", () => { haptic("light"); ctx.settings.friendTarget = u; pushSettingsPage(ctx, "friend"); });
+        if (ctx.gd) row._gdUser = u;
         g.appendChild(row);
       }
       // invites you sent that nobody has accepted yet
@@ -15817,6 +15851,66 @@
         setRow(g, { icon: "check", tint: "#23a55a", label: "Codes Match", onClick: async () => { await gn.net.setVerified(f.id, true); ctx.showToast("Verified"); gnChanged(ctx); } });
       }
     },
+    // Privacy > Link Ghost Desktop (#250): Ghost desktop on your PC becomes this same Ghost (network.js "Link desktop",
+    // format desktop/LINK_FORMAT.md). The PC shows a code for 5 minutes, you type it here, linkCheck finds the PC's
+    // beacon, you confirm "only link your own PC", and linkSend uploads the sealed identity ONCE. The trail only gets
+    // the outcome's kind ("link desktop: sent / nopc / expired ..."), never the code, the keys or what was sent.
+    // Link format v2 (#255): the confirm and the page after sending show the WHOLE Ghost ID (7 groups, link.showId),
+    // and the owner accepts on the PC only if every group matches (v1 showed 8 characters, which can be ground out).
+    gnLink(ctx, body) {
+      if (!gn.net) return;
+      if (!gnOn()) { const g0 = setGroup(body, null, "Ghost Network is off. Turn it on in Settings > Privacy first."); setRow(g0, { label: "Privacy Settings", onClick: () => pushSettingsPage(ctx, "privacy") }); return; }
+      const g = setGroup(body, "Ghost Desktop", "Use Ghost on your PC as this same Ghost: the same Ghost ID and the same Ghost friends, who see no \"new keys\". On your PC, open Ghost desktop and choose Link with Phone. It shows a code for 5 minutes: type it here.");
+      const row = el("div", "gh-set-row gh-gn-link-row");
+      const inp = el("input", "gh-gn-link-code", { type: "text", placeholder: "Code from your PC", maxlength: "29", autocapitalize: "characters", autocomplete: "off", autocorrect: "off", spellcheck: "false", enterkeyhint: "go", "aria-label": "Link code" });
+      row.appendChild(inp); g.appendChild(row);
+      inp.addEventListener("input", () => { // groups of 4 as you type (network.js checks the code itself)
+        const v = inp.value.toUpperCase().replace(/[^0-9A-Z]/g, "").slice(0, 24).replace(/(.{4})(?=.)/g, "$1-");
+        if (v !== inp.value) inp.value = v;
+      });
+      const g2 = setGroup(body);
+      const go = setRow(g2, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Link This PC", onClick: () => run() });
+      const note = el("div", "gh-set-group-foot gh-gn-link-note"); body.appendChild(note);
+      const say = (t) => { note.textContent = t; };
+      const idBox = el("div", "gh-gn-safety gh-gn-link-id"); body.appendChild(idBox); // (the Ghost ID the PC must show, after sending)
+      const showId = (gid) => {
+        idBox.textContent = "";
+        if (!gid) return;
+        const who = el("div", "gh-gn-safety-who"); who.textContent = "Your PC must show this Ghost ID";
+        const code = el("div", "gh-gn-safety-code"); code.textContent = gid;
+        idBox.append(who, code);
+      };
+      let running = false;
+      async function run() {
+        if (running) return;
+        running = true; go.disabled = true; inp.disabled = true;
+        let ticket = null;
+        try {
+          say("Checking the code…"); showId("");
+          ticket = await gn.net.linkCheck(inp.value);
+          say("");
+          if (!(await confirmSheet(ctx, "Link this PC? This gives the desktop your Ghost identity: your Ghost keys, your Ghost friends and what they send you. Only link your own PC. Your PC will then show a Ghost ID: accept there only if every group matches this one:", "Link PC", ticket.ghostId))) { say("Not linked. Nothing was sent."); return; }
+          say("Sending…");
+          let stream = null; try { stream = await storage.get("ghostNetStream", null); } catch (e) {}
+          const t = ticket; ticket = null;
+          const r = await gn.net.linkSend(t, { stream, app: { version: String((window.__ghostApp && window.__ghostApp.version) || ""), platform: "ios" } });
+          inp.value = "";
+          say("Sent. Your PC now shows a Ghost ID: accept it there only if every group matches the one below. If anything differs, cancel on your PC." + (r.missing ? " Some friends' pictures were too big to include: your PC asks them for those." : ""));
+          showId(r.ghostId || GhostNetCore.link.showId(r.id));
+          ctx.showToast("Sent to your PC");
+          gnTrail("link desktop: sent");
+        } catch (e) {
+          const kind = (e && e.link) || "error";
+          gnTrail("link desktop: " + kind); // (the kind only: an error's text could carry anything)
+          say(e && e.link ? e.message : "Couldn't link. On your PC, start Link with Phone again and type the new code.");
+          if (/^(used|sent|expired|twice|raced|oldpc|newpc)$/.test(kind)) inp.value = "";
+        } finally {
+          if (ticket) gn.net.linkDrop(ticket); // (cancelled: its secrets go now)
+          running = false; go.disabled = false; inp.disabled = false;
+        }
+      }
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); run(); } });
+    },
     // Privacy > Share My Profile With
     gnShare(ctx, body) {
       const sh = gn.net.share();
@@ -15839,10 +15933,27 @@
   // Privacy page: the Ghost Network group
   function gnPrivacyRows(ctx, body) {
     if (!gn.net) return;
-    let g = setGroup(body, "Ghost Network", "Connect with friends who also use Ghost: they see your Ghost profile and you see theirs. Invites are normal messages you can see, and nothing is hidden in your Snapchat chats. Off: no invites shown or accepted, and Ghost stops checking for Ghost messages.");
+    if (!gdOn()) { gnPrivacyBody(ctx, body, null); return; }
+    // Ghost desktop is the phone's same Ghost (Link with Phone): no Leave (it would end the PHONE's connections), "Unlink
+    // This PC" (the shell asks first) when linked, "Link with Phone" when not. The shell knows if it is linked.
+    const hold = el("div"); hold.style.display = "contents"; body.appendChild(hold);
+    dgPost("gdLink", { do: "status" }).then((st) => (st && typeof st === "object" ? !!st.linked : gn.net.isOn()), () => gn.net.isOn()).then((linked) => gnPrivacyBody(ctx, hold, { linked }));
+  }
+  // desk: null on the phone; {linked} on Ghost desktop
+  function gnPrivacyBody(ctx, body, desk) {
+    let g = setGroup(body, "Ghost Network", desk && !desk.linked
+      ? "Use Ghost on this PC as your phone's same Ghost: the same Ghost ID and the same Ghost friends. Link with your phone to turn Ghost Network on here."
+      : "Connect with friends who also use Ghost: they see your Ghost profile and you see theirs. Invites are normal messages you can see, and nothing is hidden in your Snapchat chats. Off: no invites shown or accepted, and Ghost stops checking for Ghost messages.");
+    if (desk && !desk.linked) { setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Link with Phone", onClick: () => { dgPost("gdLink", { do: "open" }).catch(() => {}); } }); return; }
     setRow(g, { icon: "ghost", tint: "linear-gradient(135deg,#5865f2,#3e88f7)", label: "Ghost Network", toggle: { get: () => gn.net.isOn(), set: async (v) => { await gn.net.setOn(v); if (v && gn.round) gn.round("force"); } } });
-    if (!gn.net.isOn()) return;
-    setRow(g, { label: "Share My Profile With", value: gn.net.share().mode === "chosen" ? "Chosen Friends" : "All", onClick: () => pushSettingsPage(ctx, "gnShare") });
+    if (!gn.net.isOn() && !desk) return;
+    if (gn.net.isOn()) setRow(g, { label: "Share My Profile With", value: gn.net.share().mode === "chosen" ? "Chosen Friends" : "All", onClick: () => pushSettingsPage(ctx, "gnShare") });
+    if (desk) { // (linked, even with Ghost Network switched off here: Unlink stays)
+      g = setGroup(body, null, "Ghost desktop is the same Ghost as your phone. Unlinking only takes Ghost Network off this PC: your phone and your Ghost friends don't notice anything.");
+      setRow(g, { label: "Unlink This PC", danger: true, onClick: () => { dgPost("gdLink", { do: "unlink" }).catch(() => {}); } }); // (the shell asks first)
+      return;
+    }
+    const at = gn.net.linkedAt(); setRow(g, { label: "Link Ghost Desktop", value: at ? fmtDaySeparator(at) : "", onClick: () => pushSettingsPage(ctx, "gnLink") });
     g = setGroup(body, null, "Tells your connected Ghost friends you left, then deletes your Ghost keys, your Ghost profile and every profile you received.");
     setRow(g, { label: "Leave Ghost Network", danger: true, onClick: async () => {
       if (!(await confirmSheet(ctx, "Leave Ghost Network? Everyone you're connected with has to connect again if you come back.", "Leave"))) return;
@@ -16099,6 +16210,7 @@
     const ix = convId ? gxIndex(ctx, convId) : { pins: [] };
     const pins = ix.pins;
     conv._pins = pins;
+    if (ctx.gd && ctx.gd.drawer && ctx.gd.drawer.mode === "pins") gdDrawerPins(ctx);
     if (conv._pinConv !== convId) { conv._pinConv = convId; conv._pinCur = null; }
     const bar = conv.pinbar;
     if (!pins.length) { bar.dataset.show = "0"; conv._pinCur = null; return; }
@@ -16145,6 +16257,7 @@
     openSheetGeneric(s.backdrop, s.sheet);
   }
   function gxOpenPinList(ctx) {
+    if (ctx.gd && ctx.gd.wide) { gdDrawer(ctx, "pins"); return; } // Ghost desktop: a drawer beside the chat
     const convId = ctx.state.currentConvId;
     const pins = (ctx.conv && ctx.conv._pins) || [];
     const s = ctx.chatSheet;
@@ -16327,6 +16440,7 @@
     let held = false, timer = null;
     e.addEventListener("touchstart", (ev) => { held = false; clearTimeout(timer); timer = setTimeout(() => { held = true; if (it.mine) { haptic("medium"); gxRemoveSticker(ctx, convId, it); } }, 550); ev.stopPropagation(); }, { passive: true });
     for (const t of ["touchmove", "touchend", "touchcancel"]) e.addEventListener(t, () => clearTimeout(timer), { passive: true });
+    if (gdOn()) gdContext(e, () => { if (it.mine) gxRemoveSticker(ctx, convId, it); }); // desktop: right-click = the hold
     e.addEventListener("click", (ev) => { ev.stopPropagation(); if (held) return; ctx.showToast((it.mine ? "You" : gxWho(ctx, convId, it)) + " added this sticker" + (it.mine ? " · hold to remove" : "")); });
     return e;
   }
@@ -16480,6 +16594,1436 @@
   }
 
   // =====================================================================================================
+  // Desktop layout (Ghost desktop for Linux; #198 stage S2, ticket #205)
+  // =====================================================================================================
+  // ON only when the desktop shell (snapchat-ios-app/desktop) set window.__ghostDesktop before this file ran. Without
+  // it nothing in this section runs and the phone is exactly as before: the phone code only calls in through
+  // `if (ctx.gd) ...` / `if (gdOn()) ...` hooks (buildApp, navigateTo, leaveConversation, renderHomeList, onHold, the
+  // TikTok pager, Gallery tiles, stickers on messages). CSS: the "Desktop layout" section at the end of ui.css, every
+  // rule under .gd-desktop (the class on .gh-root).
+  //  - 900 px and wider (.gd-wide): two panes. Left = the chat list as a sidebar (drag its edge to resize; the width is
+  //    kept in storage "ghostDesktopSideW"), the phone's tab bar turned into icons at its top; right = the open chat or
+  //    an empty state. The phone's full-screen screens (Settings, camera, Gallery, TikTok, calls, games, Send To) open
+  //    as panels over the dimmed window; the snap/story viewer is a centered media viewer.
+  //  - Narrower: the phone's one-pane navigation (list OR chat), still with the mouse and keyboard parts below.
+  //  - Mouse: hover states; hover tools on chat rows (snap, pin, menu) and messages (reply, react, menu) for what the
+  //    phone does by swiping or holding; right-click = the menu a long-press opens; double-click a message = the
+  //    double-tap reaction; press and hold (or hold Space) pauses a snap/story; the wheel moves the story rail sideways
+  //    and steps the viewer; Ctrl+wheel zooms the viewer like a pinch; pictures/videos dropped on a chat are sent.
+  //  - Keyboard: GD_KEYS (the ? sheet lists them). Plain keys are never taken from a text field except Esc and Enter;
+  //    the Ctrl/Alt shortcuts work everywhere.
+  function gdOn() { return !!window.__ghostDesktop; }
+  const GD_WIDE_MIN = 900, GD_SIDE_DEF = 340, GD_SIDE_MIN = 260, GD_SIDE_MAX = 560, GD_CONV_MIN = 440;
+  const GD_KEYS = [
+    ["Ctrl+K", "Search chats"],
+    ["Ctrl+F / Ctrl+Shift+F", "Search this chat (the chat list when no chat is open)"],
+    ["↑ ↓", "Move through the chat list"],
+    ["Enter", "Open the selected chat"],
+    ["Alt+↑ / Alt+↓", "Previous / next chat"],
+    ["Esc", "Close the top panel or viewer, then leave the chat"],
+    ["Ctrl+N", "New chat"],
+    ["Ctrl+,", "Settings"],
+    ["Enter / Shift+Enter", "Send / new line"],
+    ["← →", "Previous / next snap, story or photo"],
+    ["Space (hold)", "Pause a snap or story"],
+    ["Ctrl+wheel", "Zoom a photo, snap or story"],
+    ["Right-click", "The menu a long press opens on the phone"],
+    ["Ctrl+click / Shift+click", "Select messages (Esc clears, Ctrl+C copies)"],
+    ["Ctrl+Enter", "Start the chat in New Chat"],
+    ["?", "This list"],
+  ];
+
+  function gdInit(ctx) {
+    const gd = ctx.gd = { wide: false, zone: "side", cursorId: null, kbd: false, sideW: GD_SIDE_DEF, lastId: null };
+    ctx.root.classList.add("gd-desktop");
+    ctx.host.setAttribute("data-desktop", "");
+    gdBuildSideBar(ctx);
+    gdBuildPanes(ctx);
+    gdRowTools(ctx);
+    gdMsgTools(ctx);
+    gdMouse(ctx);
+    gdViewerInput(ctx);
+    gdComposer(ctx);
+    gdKeys(ctx);
+    gdScreensInit(ctx); // (section "Desktop screens", S3)
+    storage.get("ghostDesktopSideW", GD_SIDE_DEF).then((w) => { gd.sideW = Number(w) || GD_SIDE_DEF; gdLayout(ctx); }).catch(() => {});
+    if (typeof ResizeObserver === "function") new ResizeObserver(() => gdLayout(ctx)).observe(ctx.root);
+    window.addEventListener("resize", () => gdLayout(ctx));
+    gdLayout(ctx);
+    gdSync(ctx);
+  }
+  // wide (two panes) or narrow (the phone's one pane), and the sidebar width that fits this window
+  function gdLayout(ctx) {
+    const gd = ctx.gd, w = ctx.root.clientWidth;
+    if (!w) return;
+    const wide = w >= GD_WIDE_MIN;
+    if (wide !== gd.wide) {
+      gd.wide = wide;
+      ctx.root.classList.toggle("gd-wide", wide);
+      gdHideTools(ctx);
+      if (!wide && gd.drawer) gdDrawerClose(ctx); // (one pane: the phone's search bar / pin sheet again)
+    }
+    const side = clamp(gd.sideW, GD_SIDE_MIN, Math.max(GD_SIDE_MIN, Math.min(GD_SIDE_MAX, w - GD_CONV_MIN)));
+    ctx.root.style.setProperty("--gd-side-w", side + "px");
+    // the window's height in the host's own px (100vh would be off whenever the host is zoomed): tall panels' width
+    ctx.root.style.setProperty("--gd-h", ctx.root.clientHeight + "px");
+  }
+  // which chat is open: the right pane's empty state, the highlighted row, the composer gets the keyboard
+  function gdSync(ctx) {
+    const gd = ctx.gd;
+    if (!gd) return;
+    const id = ctx.state.currentConvId;
+    ctx.root.dataset.gdChat = id ? "1" : "0";
+    if (id) gd.cursorId = id;
+    gdSyncRows(ctx);
+    if (id !== gd.lastId) ctx.conv.textarea.style.height = "auto"; // (a tall multi-line draft's height stayed behind)
+    if (id !== gd.lastId && gd.sel) { gdSelClear(ctx); gdDrawerClose(ctx, true); } // (S3: they belong to the chat that was open)
+    // no chat open: the composer lets go of the keyboard (on the phone the chat screen is hidden, which does that; here
+    // it stays on screen under the empty state, and the arrows/Enter/? would keep going into it)
+    if (!id && ctx.shadow.activeElement === ctx.conv.textarea) ctx.conv.textarea.blur();
+    if (id && id !== gd.lastId && gd.wide) {
+      setTimeout(() => {
+        if (ctx.state.currentConvId !== id || gdTopLayer(ctx) || gdTypingEl(ctx)) return;
+        try { ctx.conv.textarea.focus({ preventScroll: true }); } catch (e) {}
+      }, 60);
+    }
+    gd.lastId = id;
+  }
+  function gdSyncRows(ctx) {
+    const gd = ctx.gd, id = ctx.state.currentConvId;
+    for (const [rid, row] of ctx.home.rows) {
+      const sel = rid === id ? "1" : "0", cur = rid === gd.cursorId ? "1" : "0";
+      if (row.el.dataset.gdSel !== sel) row.el.dataset.gdSel = sel;
+      if (row.el.dataset.gdCursor !== cur) row.el.dataset.gdCursor = cur;
+    }
+    const me = ctx.state.me;
+    if (me && gd.meBtn && gd.meSig !== (me.id || "") + (me.bitmojiUrl || "")) {
+      gd.meSig = (me.id || "") + (me.bitmojiUrl || "");
+      gd.meBtn.replaceChildren(makeAvatar(me, 30));
+      gd.meBtn.setAttribute("aria-label", (me.name || "You") + " - profile");
+    }
+  }
+
+  // ---- sidebar: the phone's tab bar + header buttons as one row of icons -------------------------------------------
+  function gdTab(ctx, name) { const b = ctx.home.screen.querySelector('.gh-tab-bar [data-tab="' + name + '"]'); if (b) b.click(); }
+  function gdOpenProfile(ctx) {
+    gdCloseSafe(ctx);
+    if (gn.net) gdOpenSettingsOn(ctx, "me", "gnProfile"); else openSettings(ctx);
+  }
+  function gdBuildSideBar(ctx) {
+    const gd = ctx.gd, home = ctx.home;
+    const bar = el("div", "gd-side-bar");
+    const me = el("button", "gd-me gh-hit");
+    me.appendChild(icon("person", 22));
+    me.setAttribute("aria-label", "Profile");
+    me.title = "Profile";
+    me.addEventListener("click", () => gdOpenProfile(ctx));
+    gd.meBtn = me;
+    // a new search starts the keyboard's place over (Enter = the first result, not a chat that still matches)
+    home.input.addEventListener("input", () => { gd.cursorId = null; gdSyncRows(ctx); });
+    const title = el("div", "gd-side-title"); title.textContent = "Chats";
+    const btns = el("div", "gd-side-btns");
+    const mk = (ic, label, run, extra) => {
+      const b = el("button", "gd-side-btn gh-hit" + (extra ? " " + extra : ""));
+      b.appendChild(icon(ic, 21)); b.setAttribute("aria-label", label); b.title = label;
+      b.addEventListener("click", () => { gdHideTools(ctx); run(); });
+      btns.appendChild(b);
+      return b;
+    };
+    mk("camera", "Camera", () => { gdCloseSafe(ctx); gdTab(ctx, "stories"); }, "gd-act-camera");
+    mk("gallery", "Gallery", () => { gdCloseSafe(ctx); gdTab(ctx, "gallery"); }, "gd-act-gallery");
+    gd.ttBtn = mk("reels", "TikTok", () => { gdCloseSafe(ctx); gdTab(ctx, "tiktok"); }, "gd-act-tiktok");
+    mk("addFriend", "Add friends", () => { gdCloseSafe(ctx); gdOpenSettingsOn(ctx, "Friends", "friends"); }, "gd-act-friends");
+    mk("compose", "New chat (Ctrl+N)", () => { gdCloseSafe(ctx); openNewChatSheet(ctx); }, "gd-act-new");
+    mk("settingsTab", "Settings (Ctrl+,)", () => { gdCloseSafe(ctx); openSettings(ctx); }, "gd-act-settings");
+    bar.append(me, title, btns);
+    const header = home.screen.querySelector(".gh-home-header");
+    header.insertBefore(bar, header.firstChild);
+    // the TikTok icon follows Settings > TikTok > TikTok Tab, like the phone's tab
+    const ttTab = home.screen.querySelector('.gh-tab-bar [data-tab="tiktok"]');
+    const syncTT = () => { gd.ttBtn.style.display = ttTab && ttTab.style.display === "none" ? "none" : ""; };
+    if (ttTab && typeof MutationObserver === "function") new MutationObserver(syncTT).observe(ttTab, { attributes: true, attributeFilter: ["style"] });
+    syncTT();
+  }
+
+  // ---- right pane: empty state, the sidebar's drag edge, the dim behind panels, drop target -----------------------
+  function gdBuildPanes(ctx) {
+    const gd = ctx.gd, root = ctx.root, stack = ctx.stack;
+    const empty = el("div", "gd-empty");
+    const art = el("div", "gd-empty-art"); art.appendChild(icon("ghost", 54));
+    const t1 = el("div", "gd-empty-title"); t1.textContent = "Pick a chat to start messaging";
+    const keys = el("div", "gd-empty-keys");
+    for (const [k, what] of [["Ctrl K", "Search"], ["Ctrl N", "New chat"], ["?", "All shortcuts"]]) {
+      const item = el("button", "gd-empty-key");
+      for (const part of k.split(" ")) { const kb = el("kbd"); kb.textContent = part; item.appendChild(kb); }
+      item.appendChild(Object.assign(el("span"), { textContent: what }));
+      item.addEventListener("click", () => { if (k === "?") gdShortcuts(ctx); else if (k === "Ctrl N") openNewChatSheet(ctx); else gdFocusSearch(ctx); });
+      keys.appendChild(item);
+    }
+    empty.append(art, t1, keys);
+    stack.appendChild(empty);
+    gd.empty = empty;
+
+    const grip = el("div", "gd-resizer");
+    grip.setAttribute("role", "separator");
+    grip.setAttribute("aria-label", "Resize the chat list");
+    grip.title = "Drag to resize (double-click: default width)";
+    stack.appendChild(grip);
+    let drag = null;
+    grip.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      drag = { x0: e.clientX, w0: parseFloat(getComputedStyle(root).getPropertyValue("--gd-side-w")) || gd.sideW };
+      try { grip.setPointerCapture(e.pointerId); } catch (x) {}
+      root.dataset.gdResizing = "1";
+    });
+    grip.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      gd.sideW = Math.round(clamp(drag.w0 + (e.clientX - drag.x0) * pagePxToLocal(), GD_SIDE_MIN, GD_SIDE_MAX));
+      gdLayout(ctx);
+    });
+    const stop = () => { if (!drag) return; drag = null; root.dataset.gdResizing = "0"; storage.set("ghostDesktopSideW", gd.sideW); };
+    grip.addEventListener("pointerup", stop);
+    grip.addEventListener("pointercancel", stop);
+    grip.addEventListener("dblclick", () => { gd.sideW = GD_SIDE_DEF; gdLayout(ctx); storage.set("ghostDesktopSideW", gd.sideW); });
+
+    // the dim behind a panel (its height in the stack follows the top open panel: ui.css); a click on it closes
+    // panels that lose nothing by closing (not the camera, a call or a game)
+    const scrim = el("div", "gd-scrim");
+    scrim.addEventListener("click", () => { const t = gdTopLayer(ctx); if (t && t.safe) (t.closeAll || t.close)(); });
+    root.appendChild(scrim);
+    const close = el("button", "gd-close gh-hit");
+    close.appendChild(icon("close", 22));
+    close.setAttribute("aria-label", "Close (Esc)");
+    close.title = "Close (Esc)";
+    close.addEventListener("click", () => { const t = gdTopLayer(ctx); if (t) (t.closeAll || t.close)(); });
+    root.appendChild(close);
+
+    // drop pictures or videos on the open chat: sent like a Gallery pick (pictures) / the file picker (videos)
+    const conv = ctx.conv, drop = el("div", "gd-drop");
+    drop.appendChild(icon("photo", 40));
+    drop.appendChild(Object.assign(el("div", "gd-drop-text"), { textContent: "Drop to send" }));
+    conv.screen.appendChild(drop);
+    const hasFiles = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files"));
+    let depth = 0;
+    conv.screen.addEventListener("dragenter", (e) => { if (!hasFiles(e) || !ctx.state.currentConvId) return; e.preventDefault(); depth++; drop.dataset.show = "1"; });
+    conv.screen.addEventListener("dragover", (e) => { if (!hasFiles(e) || !ctx.state.currentConvId) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; });
+    conv.screen.addEventListener("dragleave", () => { depth = Math.max(0, depth - 1); if (!depth) drop.dataset.show = "0"; });
+    conv.screen.addEventListener("drop", (e) => {
+      depth = 0; drop.dataset.show = "0";
+      if (!hasFiles(e) || !ctx.state.currentConvId) return;
+      e.preventDefault();
+      gdSendFiles(ctx, Array.from(e.dataTransfer.files || []));
+    });
+    // a file dropped anywhere else must not make WebKit navigate away to it (a desktop window would leave Ghost)
+    const guard = (e) => { if (hasFiles(e) && !e.defaultPrevented) { e.preventDefault(); if (e.type === "dragover") e.dataTransfer.dropEffect = "none"; } };
+    window.addEventListener("dragover", guard);
+    window.addEventListener("drop", guard);
+    // and a picture pasted while no text field has the keyboard (the composer's own paste is the phone's)
+    document.addEventListener("paste", (e) => {
+      if (!ctx.state.currentConvId || gdTypingEl(ctx) || gdTopLayer(ctx)) return;
+      const files = pastedImages(e.clipboardData);
+      if (!files.length) return;
+      e.preventDefault();
+      sendPastedImages(ctx, files);
+    });
+  }
+  function gdSendFiles(ctx, files) {
+    const pics = files.filter((f) => /^image\//.test(f.type)).slice(0, 10);
+    const vids = files.filter((f) => /^video\//.test(f.type)).slice(0, 5);
+    if (!pics.length && !vids.length) { ctx.showToast("Only pictures and videos can be sent"); return; }
+    if (pics.length) sendPastedImages(ctx, pics);
+    for (const f of vids) sendMediaFile(ctx, f);
+  }
+
+  // ---- hover tools: what the phone does by swiping or holding a chat row / a message -----------------------------
+  function gdToolBtn(ic, label, run) {
+    const b = el("button", "gd-tool gh-press");
+    b.appendChild(icon(ic, 17)); b.setAttribute("aria-label", label); b.title = label;
+    b.addEventListener("click", (e) => { e.stopPropagation(); e.preventDefault(); run(); });
+    return b;
+  }
+  function gdHideTools(ctx) {
+    const gd = ctx.gd;
+    if (gd.rowTools) gd.rowTools.remove();
+    if (gd.msgTools) gd.msgTools.remove();
+  }
+  function gdRowTools(ctx) {
+    const gd = ctx.gd, list = ctx.home.list;
+    const tools = el("div", "gd-row-tools");
+    const id = () => tools.dataset.id;
+    const pin = gdToolBtn("pin", "Pin to top", () => { const now = togglePin(ctx, id()); ctx.showToast(now ? "Pinned" : "Unpinned"); tools.remove(); });
+    tools.append(
+      gdToolBtn("camera", "Send a Snap", () => { tools.remove(); openCamera(ctx, { to: id() }); }),
+      pin,
+      gdToolBtn("more", "Preview and more (right-click)", () => { const b = tools.getBoundingClientRect(); tools.remove(); openChatPeek(ctx, id()); gdPop(ctx, ctx.chatSheet.sheet, b.right, b.bottom + 4); }),
+    );
+    tools.addEventListener("mousedown", (e) => e.stopPropagation());
+    gd.rowTools = tools;
+    list.addEventListener("mouseover", (e) => {
+      const row = e.target.closest && e.target.closest(".gh-row[data-id]");
+      if (!row || tools.parentElement === row) return;
+      tools.dataset.id = row.dataset.id;
+      const pinned = (pref("pinnedChats") || []).includes(row.dataset.id);
+      pin.title = pinned ? "Unpin" : "Pin to top"; pin.setAttribute("aria-label", pin.title);
+      row.appendChild(tools);
+    });
+    list.addEventListener("mouseleave", () => tools.remove());
+    list.addEventListener("scroll", () => { if (tools.parentElement && !tools.parentElement.matches(":hover")) tools.remove(); }, { passive: true });
+  }
+  function gdMsg(ctx, wrap) {
+    const id = wrap && wrap.dataset.messageId;
+    return id ? (ctx.conv._all || []).find((m) => m.id === id) || null : null;
+  }
+  function gdMsgTools(ctx) {
+    const gd = ctx.gd, conv = ctx.conv;
+    const tools = el("div", "gd-msg-tools");
+    const at = () => { const wrap = tools.parentElement; return { wrap, m: gdMsg(ctx, wrap) }; };
+    tools.append(
+      gdToolBtn("reply", "Reply", () => { const { m } = at(); if (m) { setReplyTo(ctx, m); conv.textarea.focus(); } }),
+      gdToolBtn("heart", "React (double-click)", () => { const { wrap, m } = at(); if (m) heartReact(ctx, m, wrap); }),
+      gdToolBtn("check", "Select (Ctrl+click)", () => { const { m } = at(); if (m) gdSelToggle(ctx, m.id); }),
+      gdToolBtn("more", "More (right-click)", () => { const { wrap, m } = at(); if (!m) return; const b = tools.getBoundingClientRect(); ctx.state.longPressAt = nowMs(); tools.remove(); openActionSheet(ctx, m, wrap); gdPop(ctx, ctx.actionSheet.sheet, b.left, b.bottom + 4); }),
+    );
+    tools.addEventListener("mousedown", (e) => e.stopPropagation());
+    tools.addEventListener("dblclick", (e) => e.stopPropagation());
+    gd.msgTools = tools;
+    conv.messages.addEventListener("mouseover", (e) => {
+      const wrap = e.target.closest && e.target.closest(".gh-msg-wrap[data-message-id]");
+      if (!wrap || tools.parentElement === wrap) return;
+      const m = gdMsg(ctx, wrap);
+      if (!m || m.pending || m.kind === "system" || (gd.sel && gd.sel.ids.size)) { tools.remove(); return; }
+      wrap.appendChild(tools);
+    });
+    conv.messages.addEventListener("mouseleave", () => tools.remove());
+  }
+
+  // ---- mouse: right-click = long-press, double-click = double-tap, wheel for sideways rails --------------------------
+  function gdContext(elx, fn) {
+    elx.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); fn(e); });
+  }
+  // two panes: a menu opened with the mouse pops up where you clicked (a desktop context menu) instead of rising from
+  // the bottom; it stays inside the window while its content grows (the peek loads after it opens)
+  function gdPop(ctx, sheet, cx, cy) {
+    if (!ctx.gd.wide) return;
+    const place = () => {
+      if (sheet.dataset.gdPop !== "1") return;
+      const r = ctx.root.getBoundingClientRect(), k = pagePxToLocal();
+      const W = ctx.root.clientWidth, H = ctx.root.clientHeight, w = sheet.offsetWidth, h = sheet.offsetHeight;
+      let x = (cx - r.left) * k, y = (cy - r.top) * k;
+      if (x + w > W - 12) x = Math.max(12, x - w); // no room on the right: open to the left of the pointer
+      if (y + h > H - 12) y = Math.max(12, H - 12 - h);
+      sheet.style.setProperty("--gd-pop-x", Math.round(x) + "px");
+      sheet.style.setProperty("--gd-pop-y", Math.round(y) + "px");
+    };
+    sheet.dataset.gdPop = "1";
+    sheet._gdPlace = place;
+    place();
+    requestAnimationFrame(place);
+    if (!sheet._gdPopWatch && typeof ResizeObserver === "function" && typeof MutationObserver === "function") {
+      sheet._gdPopWatch = true;
+      new ResizeObserver(() => { if (sheet._gdPlace) sheet._gdPlace(); }).observe(sheet);
+      // closed: a normal sheet again for whoever opens it next
+      new MutationObserver(() => {
+        if (sheet.dataset.open === "1") return;
+        clearTimeout(sheet._gdPopT);
+        sheet._gdPopT = setTimeout(() => { if (sheet.dataset.open !== "1") { delete sheet.dataset.gdPop; sheet._gdPlace = null; } }, 380);
+      }).observe(sheet, { attributes: true, attributeFilter: ["data-open"] });
+    }
+  }
+  function gdMouse(ctx) {
+    const gd = ctx.gd, root = ctx.root, conv = ctx.conv;
+    // where the last click was: the arrow keys move through the list only while you're in the sidebar
+    root.addEventListener("mousedown", (e) => {
+      gd.zone = ctx.home.screen.contains(e.target) ? "side" : ctx.conv.screen.contains(e.target) ? "conv" : gd.zone;
+      if (gd.kbd) { gd.kbd = false; root.dataset.gdKbd = "0"; }
+      // the phone's "second tap on a chat = snap camera" stays a phone thing: on a desktop a double-click is how you open
+      // a row, and a quick click into the chat beside it isn't a second tap either (the camera is the row's hover tool)
+      ctx.state.rowTap = null;
+    }, true);
+    root.addEventListener("contextmenu", (e) => {
+      const t = e.target;
+      if (!t.closest || t.closest("input, textarea, [contenteditable]")) return; // the text field's own menu (copy/paste)
+      e.preventDefault(); // no browser menu (Back, Reload...) anywhere else in Ghost
+      const row = t.closest(".gh-row[data-id]");
+      if (row && ctx.home.list.contains(row)) { e.preventDefault(); gdHideTools(ctx); openChatPeek(ctx, row.dataset.id); gdPop(ctx, ctx.chatSheet.sheet, e.clientX, e.clientY); return; }
+      const wrap = t.closest(".gh-msg-wrap[data-message-id]");
+      if (wrap && conv.messages.contains(wrap)) {
+        const m = gdMsg(ctx, wrap);
+        if (!m || m.pending) return;
+        e.preventDefault();
+        gdHideTools(ctx);
+        ctx.state.longPressAt = nowMs();
+        openActionSheet(ctx, m, wrap);
+        gdPop(ctx, ctx.actionSheet.sheet, e.clientX, e.clientY);
+      }
+    });
+    // the second click of a double-click doesn't open the row again (the phone's second tap was swallowed by secondTap,
+    // which the mousedown above switches off)
+    ctx.home.list.addEventListener("click", (e) => {
+      if (e.detail > 1 && e.target.closest && e.target.closest(".gh-row[data-id]") && !e.target.closest(".gd-row-tools")) { e.stopPropagation(); e.preventDefault(); }
+    }, true);
+    // double-click a message = the phone's double-tap reaction (not on media, snaps, voice notes, links: a click on
+    // those already does something)
+    conv.messages.addEventListener("dblclick", (e) => {
+      const t = e.target;
+      if (t.closest("button, a, input, textarea, video[controls], .gh-reaction-pill, .gh-media, .gh-snap-row, .gh-snap-media, .gh-audio-body, .gh-link, .gh-reply-quote, .gh-ttlink-card, .gd-msg-tools")) return;
+      const wrap = t.closest(".gh-msg-wrap[data-message-id]"), m = gdMsg(ctx, wrap);
+      if (!m) return;
+      try { const sel = ctx.shadow.getSelection ? ctx.shadow.getSelection() : window.getSelection(); if (sel) sel.removeAllRanges(); } catch (x) {}
+      heartReact(ctx, m, wrap);
+    });
+    // the Gallery's full-screen viewer: the wheel steps through the photos (the phone swipes sideways), Ctrl+wheel
+    // zooms like a pinch, a double-click zooms in/out like a double tap, and a zoomed photo pans by dragging
+    let gvAt = 0, gvPan = null;
+    const gvPhoto = (e) => {
+      const gv = e.target.closest && e.target.closest(".gh-gv");
+      if (!gv || gv.dataset.open !== "1" || !ctx.gallery || !ctx.gallery.viewer) return null;
+      const v = ctx.gallery.viewer, slide = v.slides[1], it = slide && slide._item;
+      if (!v.track.contains(e.target) || e.target.closest("button, video") || !it || it.mediaType === "video") return null;
+      return { v, slide };
+    };
+    root.addEventListener("wheel", (e) => {
+      const gv = e.target.closest && e.target.closest(".gh-gv");
+      if (!gv || gv.dataset.open !== "1") return;
+      e.preventDefault();
+      const ph = gvPhoto(e);
+      if (e.ctrlKey) {
+        if (!ph) return;
+        const { v, slide } = ph, z = v.zoom, sc = clamp(z.s * Math.exp(-e.deltaY * 0.0025), 1, 5);
+        const p = toLocal(slide, e.clientX, e.clientY), px = (p.x - z.x) / z.s, py = (p.y - z.y) / z.s;
+        v.zoom = sc < 1.02 ? { s: 1, x: 0, y: 0 } : { s: sc, x: p.x - px * sc, y: p.y - py * sc };
+        clampGalPan(v, slide); applyGalZoom(v, slide);
+        return;
+      }
+      if (ctx.gallery.viewer.zoom.s > 1) return; // (zoomed in: the wheel doesn't page away)
+      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (Math.abs(d) < 12 || nowMs() - gvAt < 450) return;
+      gvAt = nowMs();
+      galViewerStep(ctx, d > 0 ? 1 : -1);
+    }, { passive: false });
+    root.addEventListener("dblclick", (e) => {
+      const ph = gvPhoto(e);
+      if (!ph) return;
+      const { v, slide } = ph;
+      if (v.zoom.s > 1) { applyGalZoom(v, slide, { s: 1, x: 0, y: 0 }); return; }
+      const p = toLocal(slide, e.clientX, e.clientY), sc = 2.5;
+      v.zoom = { s: sc, x: p.x * (1 - sc), y: p.y * (1 - sc) };
+      clampGalPan(v, slide); applyGalZoom(v, slide);
+    });
+    root.addEventListener("mousedown", (e) => {
+      const ph = e.button === 0 && gvPhoto(e);
+      if (!ph || ph.v.zoom.s <= 1) return;
+      e.preventDefault();
+      gvPan = { x: e.clientX, y: e.clientY, z: Object.assign({}, ph.v.zoom), ...ph };
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!gvPan) return;
+      const k = pagePxToLocal(), { v, slide, z } = gvPan;
+      v.zoom = { s: z.s, x: z.x + (e.clientX - gvPan.x) * k, y: z.y + (e.clientY - gvPan.y) * k };
+      clampGalPan(v, slide); applyGalZoom(v, slide);
+    });
+    window.addEventListener("mouseup", () => { gvPan = null; });
+    // the story rail scrolls sideways with a normal wheel (until its end, then the list scrolls on)
+    const rail = ctx.home.storiesEl;
+    rail.addEventListener("wheel", (e) => {
+      if (e.ctrlKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      const max = rail.scrollWidth - rail.clientWidth;
+      if (max <= 0) return;
+      const next = clamp(rail.scrollLeft + e.deltaY, 0, max);
+      if (next === rail.scrollLeft) return;
+      e.preventDefault();
+      rail.scrollLeft = next;
+    }, { passive: false });
+  }
+
+  // ---- the snap/story viewer: hold to pause, arrows, wheel, Ctrl+wheel zoom, drag a zoomed photo ------------------
+  function gdViewerZoom(ctx, s, cx, cy) {
+    const v = ctx.viewer, m = v.media;
+    if (!m.querySelector("img, video")) return;
+    const z0 = v.zoom || { s: 1, x: 0, y: 0 };
+    s = clamp(s, 1, 5);
+    const p = toLocal(m, cx, cy);
+    const px = (p.x - z0.x) / z0.s, py = (p.y - z0.y) / z0.s;
+    const W = m.clientWidth, H = m.clientHeight;
+    const x = clamp(p.x - px * s, W - W * s, 0), y = clamp(p.y - py * s, H - H * s, 0);
+    v.zoom = { s, x, y };
+    for (const c of m.children) {
+      c.style.transformOrigin = "0 0"; c.style.transition = "";
+      c.style.transform = s === 1 ? "" : `translate(${x}px, ${y}px) scale(${s})`;
+    }
+  }
+  function gdViewerUnzoom(ctx) {
+    const gd = ctx.gd, v = ctx.viewer;
+    if (v.zoom && v.zoom.s !== 1 && v.resetZoom) v.resetZoom(true);
+    if (gd.zoomPaused) { gd.zoomPaused = false; if (v.el.dataset.open === "1" && !v.replyOpen) pauseViewer(ctx, false); }
+  }
+  function gdViewerInput(ctx) {
+    const gd = ctx.gd, v = ctx.viewer, wrap = v.el;
+    let hold = null, pan = null, wheelAcc = 0, wheelAt = 0;
+    const onChrome = (t) => t.closest && t.closest("button, input, .gh-viewer-reply, .gh-viewer-hint, .gh-viewer-top");
+    wrap.addEventListener("mousedown", (e) => {
+      gd.swallowViewerClick = null; // (a hold/drag that ended outside the viewer never got its click)
+      if (e.button !== 0 || v.replyOpen || onChrome(e.target)) return;
+      e.preventDefault();
+      if (v.zoom && v.zoom.s > 1) { pan = { x: e.clientX, y: e.clientY, z: Object.assign({}, v.zoom), moved: false }; return; }
+      clearTimeout(hold && hold.t);
+      hold = { held: false, t: setTimeout(() => { if (hold) { hold.held = true; pauseViewer(ctx, true); } }, 200) };
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!pan) return;
+      const k = pagePxToLocal(), dx = (e.clientX - pan.x) * k, dy = (e.clientY - pan.y) * k;
+      if (Math.hypot(dx, dy) > 4) pan.moved = true;
+      const W = v.media.clientWidth, H = v.media.clientHeight, s = pan.z.s;
+      v.zoom = { s, x: clamp(pan.z.x + dx, W - W * s, 0), y: clamp(pan.z.y + dy, H - H * s, 0) };
+      for (const c of v.media.children) c.style.transform = `translate(${v.zoom.x}px, ${v.zoom.y}px) scale(${s})`;
+    });
+    window.addEventListener("mouseup", () => {
+      if (pan) { gd.swallowViewerClick = pan.moved ? "swallow" : "unzoom"; pan = null; return; }
+      if (!hold) return;
+      clearTimeout(hold.t);
+      if (hold.held) { gd.swallowViewerClick = "swallow"; if (v.paused && !v.replyOpen && !gd.spaceHeld) pauseViewer(ctx, false); }
+      hold = null;
+    });
+    // the click that ends a hold or a drag must not also step to the next snap; a click on a zoomed photo zooms out
+    wrap.addEventListener("click", (e) => {
+      const what = gd.swallowViewerClick;
+      gd.swallowViewerClick = null;
+      if (onChrome(e.target)) return;
+      if (what === "swallow") { e.stopPropagation(); return; }
+      if (what === "unzoom" || (v.zoom && v.zoom.s > 1)) { e.stopPropagation(); gdViewerUnzoom(ctx); }
+    }, true);
+    wrap.addEventListener("wheel", (e) => {
+      if (v.replyOpen) return;
+      e.preventDefault();
+      if (e.ctrlKey) { // = a pinch
+        const s0 = (v.zoom && v.zoom.s) || 1;
+        gdViewerZoom(ctx, s0 * Math.exp(-e.deltaY * 0.0025), e.clientX, e.clientY);
+        if (!v.single && v.zoom.s > 1 && !v.paused) { gd.zoomPaused = true; pauseViewer(ctx, true); }
+        if (v.zoom.s === 1) gdViewerUnzoom(ctx);
+        // a touchpad pinch arrives as Ctrl+wheel with no Ctrl key to let go of: spring back once it stops
+        clearTimeout(gd.pinchT);
+        if (!gd.ctrlDown) gd.pinchT = setTimeout(() => { if (gd.zoomPaused) gdViewerUnzoom(ctx); }, 600);
+        return;
+      }
+      if (v.zoom && v.zoom.s > 1) return;
+      if (nowMs() - (gd.wheelLast || 0) > 400) wheelAcc = 0; // (a pause between flicks starts over)
+      gd.wheelLast = nowMs();
+      if (nowMs() - wheelAt < 450) return;
+      wheelAcc += e.deltaY;
+      if (Math.abs(wheelAcc) < 90) return;
+      const dir = wheelAcc > 0 ? 1 : -1;
+      wheelAcc = 0; wheelAt = nowMs();
+      if (!v.single || v.snapQ) viewerStep(ctx, dir);
+    }, { passive: false });
+    // snaps and stories spring back when Ctrl is let go (like lifting the fingers after a pinch); a chat photo stays
+    window.addEventListener("keydown", (e) => { if (e.key === "Control") gd.ctrlDown = true; }, true);
+    window.addEventListener("keyup", (e) => { if (e.key === "Control") { gd.ctrlDown = false; if (gd.zoomPaused) gdViewerUnzoom(ctx); } });
+    window.addEventListener("blur", () => {
+      gd.ctrlDown = false;
+      if (gd.spaceHeld) { gd.spaceHeld = false; if (v.el.dataset.open === "1" && v.paused && !v.replyOpen) pauseViewer(ctx, false); }
+    });
+    // a fresh item / closing: no zoom carried over
+    if (typeof MutationObserver === "function") new MutationObserver(() => {
+      if (wrap.dataset.open !== "1") { gd.zoomPaused = false; gd.spaceHeld = false; hold = null; pan = null; }
+      // (a story opens "single" with no items while it loads: that's a snap-shaped viewer too)
+      wrap.dataset.gdKind = v.single && !v.story && !v.snapQ && v.items.length ? "photo" : "snap";
+    }).observe(wrap, { attributes: true, attributeFilter: ["data-open"] });
+  }
+
+  // ---- composer: Enter sends, Shift+Enter is a new line, the field grows further ------------------------------------
+  function gdComposer(ctx) {
+    const conv = ctx.conv, ta = conv.textarea;
+    ta.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing || e.keyCode === 229 || e.defaultPrevented) return;
+      if (gdTopLayer(ctx)) { e.preventDefault(); return; } // (a panel is open over the chat: nothing is sent from behind it)
+      // an open @mention list: Enter picks the first name, like a click on it
+      const pick = conv.mentionBox && conv.mentionBox.dataset.open === "1" && conv.mentionBox.querySelector(".gh-mention-row");
+      e.preventDefault();
+      if (pick) { pick.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true })); return; } // (it picks on mousedown)
+      sendCurrentText(ctx);
+    });
+    ta.addEventListener("input", () => { ta.style.height = "auto"; ta.style.height = Math.min(220, ta.scrollHeight) + "px"; });
+    // voice messages with a mouse: click the mic to record, click again to send, Esc to cancel (gdEscape)
+    const hint = conv.screen.querySelector(".gh-rec-hint");
+    if (hint) hint.textContent = "Esc to cancel \u00b7 click the mic to send";
+  }
+
+  // ---- keyboard ---------------------------------------------------------------------------------------------------
+  function gdTypingEl(ctx) {
+    let a = ctx.shadow.activeElement;
+    if (!a) return null;
+    // a field in a sheet that has closed (Esc on New Chat) still has the keyboard: it lets go, the keys are Ghost's
+    if (a.closest && a.closest('.gh-sheet:not([data-open="1"])')) { a.blur(); return null; }
+    if (a.isContentEditable) return a;
+    if (a.tagName === "TEXTAREA") return a;
+    if (a.tagName === "INPUT" && !/^(checkbox|radio|range|button|submit|reset|file|color)$/i.test(a.type || "")) return a;
+    return null;
+  }
+  // the open panel/sheet/viewer nearest the top (ui.css z order), with how Esc closes it; null = nothing over the chats
+  function gdTopLayer(ctx) {
+    const r = ctx.root, q = (s, p) => (p || r).querySelector(s);
+    const click = (x) => () => { if (x) x.click(); };
+    let x;
+    if (ctx.gd && ctx.gd.menu) return { name: "menu", safe: true, close: () => gdMenuClose(ctx) };
+    if ((x = q(":scope > .gh-gx-place"))) return { name: "place", close: click(q(".gh-gx-place-btn:not(.gh-gx-place-done)", x)) };
+    const dialogs = r.querySelectorAll(":scope > .gh-confirm");
+    if (dialogs.length) {
+      const d = dialogs[dialogs.length - 1];
+      return { name: "dialog", el: d, close: click(q('button[data-v="0"], .gh-choice-cancel', d) || q(".gh-confirm-ok", d)), okEl: q(".gh-confirm-ok", d) };
+    }
+    if ((x = q(":scope > .gh-gg-pick"))) return { name: "gamepick", close: click(q(".gh-gg-pick-cancel", x)) };
+    if ((x = q(":scope > .gh-gg-view"))) return { name: "game", close: click(q(".gh-gg-close", x)) };
+    if (ctx.callScreen && ctx.callScreen.el.dataset.open === "1") return { name: "call", close: click(q(".gh-call-min", ctx.callScreen.el)) };
+    const v = ctx.viewer;
+    if (v.el.dataset.open === "1") return { name: "viewer", safe: true, close: () => (v.replyOpen ? closeStoryReply(ctx) : closeViewer(ctx)), closeAll: () => closeViewer(ctx) };
+    if (ctx.settings.el.dataset.open === "1") return { name: "settings", safe: true, close: () => popSettingsPage(ctx), closeAll: () => closeSettings(ctx) };
+    if ((x = q(":scope > .gh-send-page[data-open='1']"))) return { name: "sendpage", safe: true, close: click(q("[data-gact=back]", x)) };
+    const c = ctx.camera;
+    if (c && c.el.dataset.open === "1") return { name: "camera", close: () => gdCameraBack(ctx) };
+    const gl = q(":scope > .gh-gal-layer");
+    if (gl) {
+      if ((x = q(".gh-pin[data-open='1']", gl))) return { name: "pin", close: click(q(".gh-pin-close", x)) };
+      if ((x = q(".gh-backdrop[data-open='1']", gl))) return { name: "sheet", safe: true, close: click(x) };
+      if ((x = q(".gh-gv[data-open='1']", gl))) return { name: "galviewer", safe: true, close: click(q("[data-gact=close]", x)) };
+      if ((x = q(".gh-vault[data-open='1']", gl))) return { name: "vault", safe: true, close: click(q("[data-gact=vault-close]", x)) };
+    }
+    const ol = q(":scope > .gh-overlay-layer");
+    if ((x = q(".gh-photo-preview[data-open='1']", ol))) return { name: "preview", safe: true, close: click(q(".gh-photo-preview-close", x)) };
+    const bds = ol.querySelectorAll(".gh-backdrop[data-open='1']");
+    if (bds.length) return { name: "sheet", safe: true, close: click(bds[bds.length - 1]) };
+    const T = ctx.tiktok;
+    if (T && T.el.dataset.open === "1") {
+      if (T.search && T.search.stack.length && !(T.search.stack.length === 1 && T.search.stack[0].root)) return { name: "ttpage", safe: true, close: () => popTTPage(ctx), closeAll: () => gdTab(ctx, "chats") };
+      return { name: "tiktok", safe: true, close: () => gdTab(ctx, "chats") };
+    }
+    const G = ctx.gallery;
+    if (G && G.el.dataset.open === "1") {
+      if (G.selecting) return { name: "galselect", safe: true, close: () => setGalSelecting(ctx, false), closeAll: () => gdTab(ctx, "chats") };
+      return { name: "gallery", safe: true, close: () => gdTab(ctx, "chats") };
+    }
+    return null;
+  }
+  // Esc in the camera = its own back button for whatever step is showing
+  function gdCameraBack(ctx) {
+    const c = ctx.camera, root = c.el, ed = c.editor;
+    let x;
+    if ((x = root.querySelector(".gh-editor-sticker-backdrop[data-open='1']"))) return x.click();
+    if (c.picker && c.picker.dataset.open === "1") return root.querySelector("[data-act=picker-back]").click();
+    if (ed && ed.bgPanel && ed.bgPanel.dataset.open === "1") return fxToggleBgPanel(ctx, c);
+    if (ed && ed.textWrap && ed.textWrap.dataset.open === "1" && ed.textInput) return ed.textInput.blur();
+    if (c.review && c.review.dataset.open === "1") return root.querySelector("[data-act=retake]").click();
+    root.querySelector('[data-act="close"]').click();
+  }
+  // close the panels that lose nothing by closing (a shortcut that opens something else)
+  function gdCloseSafe(ctx) {
+    for (let i = 0; i < 8; i++) {
+      const t = gdTopLayer(ctx);
+      if (!t || !t.safe) return !t;
+      (t.closeAll || t.close)();
+    }
+    return !gdTopLayer(ctx);
+  }
+  function gdRows(ctx) { return Array.from(ctx.home.list.querySelectorAll(":scope > .gh-row[data-id]")); }
+  function gdListShown(ctx) { return ctx.gd.wide || ctx.state.navProgress < 0.5; }
+  function gdMoveCursor(ctx, dir) {
+    const gd = ctx.gd, rows = gdRows(ctx);
+    if (!rows.length) return;
+    let i = rows.findIndex((r) => r.dataset.id === gd.cursorId);
+    i = i < 0 ? (dir > 0 ? 0 : rows.length - 1) : clamp(i + dir, 0, rows.length - 1);
+    gd.cursorId = rows[i].dataset.id;
+    gd.kbd = true; ctx.root.dataset.gdKbd = "1";
+    gdSyncRows(ctx);
+    rows[i].scrollIntoView({ block: "nearest" });
+  }
+  function gdOpenCursor(ctx) {
+    const gd = ctx.gd, rows = gdRows(ctx);
+    const row = rows.find((r) => r.dataset.id === gd.cursorId) || rows[0];
+    if (!row) return;
+    gd.cursorId = row.dataset.id;
+    openChatFromRow(ctx, row.dataset.id); // = a click on the row (unopened snaps play first, like the phone)
+  }
+  function gdStepChat(ctx, dir) {
+    const gd = ctx.gd, rows = gdRows(ctx);
+    if (!rows.length) return;
+    const cur = ctx.state.currentConvId || gd.cursorId;
+    let i = rows.findIndex((r) => r.dataset.id === cur);
+    i = i < 0 ? (dir > 0 ? 0 : rows.length - 1) : i + dir;
+    if (i < 0 || i >= rows.length) return;
+    gd.cursorId = rows[i].dataset.id;
+    rows[i].scrollIntoView({ block: "nearest" });
+    // no snap playthrough when stepping: a snap only opens when you ask for it
+    if (rows[i].dataset.id !== ctx.state.currentConvId) openConversationScreen(ctx, rows[i].dataset.id);
+  }
+  function gdFocusSearch(ctx) {
+    const gd = ctx.gd;
+    if (!gdCloseSafe(ctx)) return;
+    if (!gd.wide && ctx.state.currentConvId) closeConversationScreen(ctx);
+    gd.zone = "side";
+    const input = ctx.home.input;
+    setTimeout(() => { input.focus({ preventScroll: true }); input.select(); }, gd.wide ? 0 : 380);
+  }
+  function gdShortcuts(ctx) {
+    const s = ctx.chatSheet;
+    s.sheet.innerHTML = "";
+    s.sheet.appendChild(el("div", "gh-sheet-grip"));
+    const head = el("div", "gd-keys-head"); head.textContent = "Keyboard shortcuts";
+    s.sheet.appendChild(head);
+    const list = el("div", "gd-keys gh-scroll");
+    for (const [k, what] of GD_KEYS) {
+      const row = el("div", "gd-keys-row");
+      const keys = el("div", "gd-keys-keys");
+      k.split(" / ").forEach((alt, i) => {
+        if (i) keys.appendChild(Object.assign(el("span", "gd-keys-or"), { textContent: "or" }));
+        for (const part of alt.split("+")) { const kb = el("kbd"); kb.textContent = part; keys.appendChild(kb); }
+      });
+      row.append(keys, Object.assign(el("div", "gd-keys-what"), { textContent: what }));
+      list.appendChild(row);
+    }
+    s.sheet.appendChild(list);
+    openSheetGeneric(s.backdrop, s.sheet);
+  }
+  function gdKeys(ctx) {
+    const gd = ctx.gd;
+    // capture on window: before Snapchat's hidden page could see a key Ghost uses
+    window.addEventListener("keydown", (e) => {
+      if (!ctx.state.loggedIn || e.isComposing || e.keyCode === 229) return; // signed out: Snapchat's own login page has the keys
+      if (gdKeyDown(ctx, e)) { e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+    window.addEventListener("keyup", (e) => {
+      if (e.key === " " && gd.spaceHeld) {
+        gd.spaceHeld = false;
+        const v = ctx.viewer;
+        if (v.el.dataset.open === "1" && v.paused && !v.replyOpen) pauseViewer(ctx, false);
+        e.preventDefault(); e.stopImmediatePropagation();
+      }
+    }, true);
+  }
+  function gdKeyDown(ctx, e) {
+    const gd = ctx.gd, k = e.key, ctrl = e.ctrlKey || e.metaKey, alt = e.altKey, shift = e.shiftKey;
+    const plain = !ctrl && !alt;
+    let typing = gdTypingEl(ctx);
+    const top = gdTopLayer(ctx);
+    // a panel opened over the chat (Ctrl+, from the composer) or the list's search: the field behind it lets go of the
+    // keys (not "anything in the home screen": the Gallery and TikTok panels live in there, with fields of their own)
+    if (top && typing && (typing === ctx.home.input || ctx.conv.screen.contains(typing))) { typing.blur(); typing = null; }
+    if (k === "Escape") return gdEscape(ctx, typing, top);
+    const lower = k.length === 1 ? k.toLowerCase() : k;
+    if (ctrl && !alt && !shift && lower === "k") { gdFocusSearch(ctx); return true; }
+    if (ctrl && !alt && shift && lower === "f") { if (ctx.state.currentConvId && gdCloseSafe(ctx)) openChatSearch(ctx); return true; }
+    if (ctrl && !alt && !shift && lower === "f") {
+      if (ctx.state.currentConvId && gdCloseSafe(ctx)) { openChatSearch(ctx); return true; }
+      gdFocusSearch(ctx); return true;
+    }
+    if (ctrl && !alt && !shift && lower === "n") { if (gdCloseSafe(ctx)) openNewChatSheet(ctx); return true; }
+    if (ctrl && !alt && k === ",") { if (ctx.settings.el.dataset.open !== "1" && gdCloseSafe(ctx)) openSettings(ctx); return true; }
+    if (alt && !ctrl && !shift && (k === "ArrowUp" || k === "ArrowDown")) {
+      if (top) return false;
+      gdStepChat(ctx, k === "ArrowUp" ? -1 : 1); return true;
+    }
+    if (top) return gdLayerKey(ctx, e, top, typing);
+    if (ctrl && !alt && !shift && lower === "c" && gd.sel.ids.size && !typing && !gdTextSelected(ctx)) { gdSelCopy(ctx); return true; }
+    if (typing) {
+      // the chat list's search field: the arrows move through what it found, Enter opens
+      if (typing === ctx.home.input && plain && (k === "ArrowDown" || k === "ArrowUp")) { gdMoveCursor(ctx, k === "ArrowUp" ? -1 : 1); return true; }
+      if (typing === ctx.home.input && plain && k === "Enter") { typing.blur(); gdOpenCursor(ctx); return true; }
+      return false;
+    }
+    if (k === "?" && !ctrl && !alt) { gdShortcuts(ctx); return true; }
+    if (plain && !shift && (k === "ArrowUp" || k === "ArrowDown") && gd.zone === "side" && gdListShown(ctx)) { gdMoveCursor(ctx, k === "ArrowUp" ? -1 : 1); return true; }
+    const focusedBtn = ctx.shadow.activeElement && ctx.shadow.activeElement.tagName === "BUTTON";
+    if (plain && !shift && k === "Enter" && gd.kbd && !focusedBtn && gd.zone === "side" && gdListShown(ctx)) { gdOpenCursor(ctx); return true; }
+    return false;
+  }
+  // keys while a panel, sheet or the viewer is up
+  function gdLayerKey(ctx, e, top, typing) {
+    const gd = ctx.gd, k = e.key, plain = !e.ctrlKey && !e.metaKey && !e.altKey;
+    if (top.name === "menu") return plain && gdMenuKey(ctx, k);
+    if (top.name === "dialog") {
+      const a = ctx.shadow.activeElement;
+      if (a && a.tagName === "BUTTON" && top.el.contains(a)) return false; // the focused button answers Enter itself
+      if (k === "Enter" && plain && !e.repeat && top.okEl && !(typing && typing.tagName === "TEXTAREA")) { top.okEl.click(); return true; } // (not a held Enter: it could confirm a delete)
+      return false;
+    }
+    if (typing || !plain) return false;
+    const v = ctx.viewer;
+    if (top.name === "viewer") {
+      if (k === "ArrowLeft" || k === "ArrowRight") { if (!v.single || v.snapQ) viewerStep(ctx, k === "ArrowLeft" ? -1 : 1); return true; }
+      if (k === "ArrowUp" && v.story && !v.single) { openStoryReply(ctx); return true; }
+      if (k === " ") {
+        if (!e.repeat && !gd.spaceHeld && !v.replyOpen) { gd.spaceHeld = true; if (!v.paused) pauseViewer(ctx, true); }
+        return true;
+      }
+      return false;
+    }
+    if (top.name === "galviewer" && (k === "ArrowLeft" || k === "ArrowRight")) { galViewerStep(ctx, k === "ArrowLeft" ? -1 : 1); return true; }
+    if (top.name === "tiktok" && ttFeedOn() && ctx.tiktok.items && ctx.tiktok.items.length) {
+      const T = ctx.tiktok;
+      if (k === "ArrowDown" || k === "ArrowUp") { if (!T.anim) goTikTok(ctx, clamp(T.index + (k === "ArrowDown" ? 1 : -1), 0, T.items.length - 1), 0, T); return true; }
+      if (k === " ") { toggleTikTokPause(ctx, T); return true; }
+    }
+    return false;
+  }
+  function gdEscape(ctx, typing, top) {
+    const conv = ctx.conv, gd = ctx.gd;
+    if (top) { top.close(); return true; }
+    if (conv.voice && conv.voice.recording()) { conv.voice.cancel(); return true; }
+    if (gd.sel.ids.size) { gdSelClear(ctx); return true; }
+    if (gd.drawer.mode) { gdDrawerClose(ctx); if (ctx.state.currentConvId && gd.wide) gd.zone = "conv"; return true; }
+    if (typing === ctx.home.input) {
+      if (ctx.home.input.value) ctx.home.screen.querySelector(".gh-search-cancel").click(); else ctx.home.input.blur();
+      return true;
+    }
+    if (conv.mentionBox && conv.mentionBox.dataset.open === "1") { hideMentions(ctx); return true; }
+    if (conv.searchBar) { closeChatSearch(ctx); return true; }
+    if (conv.replyTo && ctx.state.currentConvId) { setReplyTo(ctx, null); return true; }
+    // a half-written message isn't thrown away by the first Esc: it only lets go of the field
+    if (typing && (typing !== conv.textarea || conv.textarea.value.trim())) { typing.blur(); return true; }
+    if (ctx.state.currentConvId) { closeConversationScreen(ctx); ctx.gd.zone = "side"; return true; }
+    if (typing) { typing.blur(); return true; }
+    return false;
+  }
+
+  // =====================================================================================================
+  // Desktop screens (Ghost desktop for Linux; #198 stage S3, ticket #243)
+  // =====================================================================================================
+  // More of the phone's screens made desktop-native, gated like "Desktop layout" above: nothing here runs without
+  // window.__ghostDesktop (gdScreensInit is called from gdInit), and the phone code only calls in through `if (ctx.gd)`
+  // hooks (pushSettingsPage/popSettingsPage, the friends page rows, openNewChatSheet/runFriendSearch, messageWrapEl,
+  // openChatSearch, gxOpenPinList/gxPaintPinbar). CSS: "Desktop screens" at the end of ui.css, under .gd-desktop.
+  // In the two-pane layout (.gd-wide):
+  //  - Settings: two columns, the categories (the "main" page) on the left and the page you picked on the right; its
+  //    sub pages open in the right column, Esc/back goes up one level (gdSetPaged). The feedback forms are a dialog.
+  //  - Profiles (a friend's, your Ghost Profile and its preview): the picture/header beside the details when the
+  //    column is wide enough (ui.css container query). Friend rows: hover tools (Chat, Profile) and a right-click menu.
+  //  - New chat / group: a centered dialog; type to filter, Up/Down, Enter picks (the picked show as chips),
+  //    Ctrl+Enter (or Enter with nothing highlighted) starts it, Backspace in the empty field drops the last pick.
+  //  - The phone's bottom sheets are centered dialogs (ui.css); the sticker sheet is a popover over its button.
+  //  - Messages: Ctrl+click / Shift+click (or the hover tool) select; a selection bar over the chat header (Copy,
+  //    Forward, Bookmark, Save, Delete for Everyone); Esc clears, Ctrl+C copies.
+  //  - Search in a chat (Ctrl+F, Ctrl+Shift+F) and the pinned messages: a drawer on the right of the chat; a result
+  //    jumps to its message.
+  // Narrower windows keep the phone's screens (with the mouse/keyboard parts that make sense there).
+  const GD_DRAWER_W = 340;
+  function gdScreensInit(ctx) {
+    gdSettingsInit(ctx);
+    gdFriendsInit(ctx);
+    gdNewChatInit(ctx);
+    gdSheetsInit(ctx);
+    gdSelectInit(ctx);
+    gdDrawerInit(ctx);
+  }
+
+  // ---- a small desktop context menu (right-click on rows that have no phone sheet of their own) -------------------
+  function gdMenu(ctx, items, cx, cy) {
+    gdMenuClose(ctx);
+    const scrim = el("div", "gd-menu-scrim"), menu = el("div", "gd-menu");
+    menu.setAttribute("role", "menu");
+    for (const it of items) {
+      if (!it) continue;
+      const b = el("button", "gd-menu-item" + (it.danger ? " gd-menu-danger" : ""));
+      b.setAttribute("role", "menuitem");
+      b.append(icon(it.icon, 17), Object.assign(el("span"), { textContent: it.label }));
+      b.addEventListener("click", (e) => { e.stopPropagation(); gdMenuClose(ctx); it.run(); });
+      menu.appendChild(b);
+    }
+    const shut = (e) => { e.preventDefault(); e.stopPropagation(); gdMenuClose(ctx); };
+    scrim.addEventListener("mousedown", shut);
+    scrim.addEventListener("contextmenu", shut);
+    ctx.root.append(scrim, menu);
+    ctx.gd.menu = { scrim, menu };
+    const r = ctx.root.getBoundingClientRect(), k = pagePxToLocal();
+    const W = ctx.root.clientWidth, H = ctx.root.clientHeight, w = menu.offsetWidth, h = menu.offsetHeight;
+    let x = (cx - r.left) * k, y = (cy - r.top) * k;
+    if (x + w > W - 8) x = Math.max(8, x - w);
+    if (y + h > H - 8) y = Math.max(8, H - 8 - h);
+    menu.style.left = Math.round(x) + "px"; menu.style.top = Math.round(y) + "px";
+    return menu;
+  }
+  function gdMenuClose(ctx) {
+    const m = ctx.gd.menu;
+    if (!m) return;
+    m.scrim.remove(); m.menu.remove();
+    ctx.gd.menu = null;
+  }
+  function gdMenuKey(ctx, k) {
+    const items = Array.from(ctx.gd.menu.menu.querySelectorAll(".gd-menu-item"));
+    if (!items.length) return false;
+    let i = items.indexOf(ctx.shadow.activeElement);
+    if (k === "ArrowDown" || k === "ArrowUp") { i = i < 0 ? (k === "ArrowDown" ? 0 : items.length - 1) : (i + (k === "ArrowDown" ? 1 : -1) + items.length) % items.length; items[i].focus(); return true; }
+    if (k === "Enter" && i >= 0) { items[i].click(); return true; }
+    return false;
+  }
+
+  // ---- Settings: categories on the left, the picked page on the right ---------------------------------------------
+  function gdSetRowKey(row) {
+    if (row.classList.contains("gh-set-mehead")) return "me";
+    const l = row.querySelector(".gh-set-label");
+    return (l || row).textContent.trim();
+  }
+  function gdSettingsInit(ctx) {
+    const s = ctx.settings;
+    // a category picked on the left: whatever is open on the right (and under it) goes first, so the new page is the
+    // only one there; the same category again changes nothing
+    s.el.addEventListener("click", (e) => {
+      const nav = s.stack[0];
+      if (!ctx.gd.wide || !nav || nav.name !== "main") return;
+      const row = e.target.closest && e.target.closest(".gh-set-row, .gh-set-mehead");
+      if (!row || !nav.page.contains(row) || !(row.classList.contains("gh-set-mehead") || row.querySelector(".gh-set-chev"))) return;
+      const key = gdSetRowKey(row);
+      if (s.stack.length === 2 && ctx.gd.setCur === key) { e.stopPropagation(); return; }
+      // (the row's own handler runs next: a page it pushes replaces the right column in gdSetPaged; a row that opens
+      // no page, like Advanced, leaves it as it was)
+      ctx.gd.navClick = key;
+      setTimeout(() => { ctx.gd.navClick = null; }, 0);
+    }, true);
+  }
+  // after every push/pop: which page is the left column, which level each page is, the highlighted category
+  function gdSetPaged(ctx) {
+    const gd = ctx.gd, s = ctx.settings, box = s.el;
+    const nav = !!(s.stack[0] && s.stack[0].name === "main");
+    // a category picked on the left just pushed its page: it is the only page on the right; the left column's values
+    // (theme name, counts...) are brought up to date, where it was scrolled to
+    if (nav && gd.navClick && s.stack.length >= 2) {
+      gd.setCur = gd.navClick; gd.navClick = null;
+      const top = s.stack.pop();
+      while (s.stack.length > 1) { const e = s.stack.pop(); if (e.dispose) e.dispose(); e.page.remove(); }
+      s.stack.push(top);
+      const back = top.page.querySelector(".gh-set-back span");
+      if (back) back.textContent = SETTINGS_TITLES.main; // (one pane again after a resize: back goes to the categories)
+      const navBody = s.stack[0].page.querySelector(".gh-set-body"), y = navBody ? navBody.scrollTop : 0;
+      if (s.stack[0].refresh) s.stack[0].refresh();
+      if (navBody) navBody.scrollTop = y;
+    }
+    box.dataset.gdNav = nav ? "1" : "0";
+    box.dataset.gdDepth = String(s.stack.length);
+    s.stack.forEach((e, i) => {
+      e.page.dataset.gdPage = e.name;
+      e.page.dataset.gdLevel = String(i);
+      e.page.dataset.gdCol = nav && i === 0 ? "nav" : "page";
+    });
+    if (nav && !box.querySelector(":scope > .gd-set-empty")) box.insertBefore(gdSetEmpty(), box.firstChild);
+    if (!nav) return;
+    const key = s.stack.length > 1 ? gd.setCur : null;
+    for (const r of s.stack[0].page.querySelectorAll(".gh-set-row, .gh-set-mehead")) {
+      const on = key && gdSetRowKey(r) === key ? "1" : "0";
+      if (r.dataset.gdCur !== on) r.dataset.gdCur = on;
+    }
+  }
+  function gdSetEmpty() {
+    const box = el("div", "gd-set-empty");
+    const art = el("div", "gd-empty-art"); art.appendChild(icon("settingsTab", 46));
+    const t = el("div", "gd-empty-title"); t.textContent = "Pick a setting on the left";
+    const sub = el("div", "gd-set-empty-sub");
+    const ver = String((window.__ghostApp && window.__ghostApp.version) || "");
+    sub.textContent = (ver ? "Ghost " + ver + " · " : "") + "Esc closes Settings";
+    box.append(art, t, sub);
+    return box;
+  }
+  // Settings opened straight at one of its categories (the sidebar's profile and Add Friends icons)
+  function gdOpenSettingsOn(ctx, key, name) {
+    openSettings(ctx);
+    ctx.gd.setCur = key;
+    pushSettingsPage(ctx, name);
+  }
+
+  // ---- profiles and friend lists: hover tools, right-click menu ---------------------------------------------------
+  function gdChatWith(ctx, u) {
+    return api.newConversation([u.id]).then(async (res) => {
+      if (!res || !res.conversationId) throw new Error("no chat");
+      closeSettings(ctx);
+      if (!ctx.state.convById.has(res.conversationId)) await api.listConversations().then((cs) => applyConversations(ctx, cs || []));
+      openConversationScreen(ctx, res.conversationId);
+    }).catch(() => ctx.showToast("Couldn't open that chat"));
+  }
+  function gdFriendProfile(ctx, u) { ctx.settings.friendTarget = u; pushSettingsPage(ctx, "friend"); }
+  async function gdFriendNickname(ctx, u) {
+    const v = await promptSheet(ctx, "Nickname for " + (u.username ? "@" + u.username : (u._realName || u.name)), (pref("nicknames") || {})[u.id] || "");
+    if (v == null) return;
+    await setNickname(ctx, u.id, v); nickify(u);
+    ctx.showToast(v ? "Nickname saved" : "Nickname removed");
+    const top = ctx.settings.stack[ctx.settings.stack.length - 1];
+    if (top && top.refresh && ctx.settings.el.dataset.open === "1") top.refresh();
+  }
+  function gdFriendMenu(ctx, u, x, y) {
+    const onProfile = (() => { const st = ctx.settings.stack, top = st[st.length - 1]; return top && top.name === "friend" && ctx.settings.friendTarget === u; })();
+    gdMenu(ctx, [
+      { icon: "newMsg", label: "Chat", run: () => gdChatWith(ctx, u) },
+      onProfile ? null : { icon: "person", label: "View Profile", run: () => gdFriendProfile(ctx, u) },
+      { icon: "edit", label: "Edit Nickname", run: () => gdFriendNickname(ctx, u) },
+    ], x, y);
+  }
+  function gdFriendsInit(ctx) {
+    const box = ctx.settings.el;
+    const tools = el("div", "gd-row-tools gd-friend-tools");
+    const who = () => tools.parentElement && tools.parentElement._gdUser;
+    tools.append(
+      gdToolBtn("newMsg", "Chat", () => { const u = who(); tools.remove(); if (u) gdChatWith(ctx, u); }),
+      gdToolBtn("person", "Profile", () => { const u = who(); tools.remove(); if (u) gdFriendProfile(ctx, u); }),
+      gdToolBtn("more", "More (right-click)", () => { const u = who(), b = tools.getBoundingClientRect(); tools.remove(); if (u) gdFriendMenu(ctx, u, b.right, b.bottom + 4); }),
+    );
+    tools.addEventListener("mousedown", (e) => e.stopPropagation());
+    box.addEventListener("mouseover", (e) => {
+      const row = e.target.closest && e.target.closest(".gh-friend-row");
+      if (!row || !row._gdUser || tools.parentElement === row) return;
+      row.appendChild(tools);
+    });
+    box.addEventListener("mouseout", (e) => {
+      const row = tools.parentElement;
+      if (row && !(e.relatedTarget && row.contains(e.relatedTarget))) tools.remove();
+    });
+    box.addEventListener("contextmenu", (e) => {
+      const row = e.target.closest && e.target.closest(".gh-friend-row");
+      if (!row || !row._gdUser) return;
+      e.preventDefault(); e.stopPropagation();
+      tools.remove();
+      gdFriendMenu(ctx, row._gdUser, e.clientX, e.clientY);
+    });
+  }
+
+  // ---- new chat / group: a dialog you can drive from the keyboard --------------------------------------------------
+  function gdNewChatInit(ctx) {
+    const s = ctx.newChatSheet;
+    s.sheet.classList.add("gd-newchat");
+    const chips = el("div", "gd-chips");
+    s.sheet.querySelector(".gh-newchat-search").after(chips);
+    const hint = el("div", "gd-newchat-hint");
+    for (const [k, what] of [["↑↓", "move"], ["Enter", "pick"], ["Ctrl+Enter", "start"], ["Esc", "close"]]) {
+      const kb = el("kbd"); kb.textContent = k;
+      hint.append(kb, Object.assign(el("span"), { textContent: what }));
+    }
+    s.createBtn.before(hint);
+    s.gd = { chips, cursor: null };
+    s.input.addEventListener("keydown", (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      const rows = Array.from(s.list.querySelectorAll(".gh-friend-row[data-gd-uid]"));
+      const k = e.key;
+      if ((k === "ArrowDown" || k === "ArrowUp") && rows.length) {
+        e.preventDefault();
+        let i = rows.findIndex((r) => r.dataset.gdUid === s.gd.cursor);
+        i = i < 0 ? (k === "ArrowDown" ? 0 : rows.length - 1) : clamp(i + (k === "ArrowDown" ? 1 : -1), 0, rows.length - 1);
+        gdNewChatCursor(s, rows[i].dataset.gdUid);
+        rows[i].scrollIntoView({ block: "nearest" });
+        return;
+      }
+      if (k === "Enter") {
+        e.preventDefault();
+        const row = !(e.ctrlKey || e.metaKey) && rows.find((r) => r.dataset.gdUid === s.gd.cursor);
+        if (row) {
+          row.click();
+          gdNewChatCursor(s, null); // (so the next Enter starts the chat; the arrows pick the next one)
+          if (s.input.value) { s.input.value = ""; runFriendSearch(ctx, s); }
+          return;
+        }
+        if (!s.createBtn.disabled) s.createBtn.click();
+        return;
+      }
+      if (k === "Backspace" && !s.input.value && s.picked.size) { e.preventDefault(); gdNewChatUnpick(ctx, Array.from(s.picked.keys()).pop()); }
+    });
+    s.titleInput.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing) return;
+      e.preventDefault();
+      if (!s.createBtn.disabled) s.createBtn.click();
+    });
+    // a click on a row picked or unpicked someone (the phone's own handler): the chips follow
+    s.list.addEventListener("click", () => setTimeout(() => gdNewChatChips(ctx), 0));
+  }
+  function gdNewChatCursor(s, uid) {
+    s.gd.cursor = uid;
+    for (const r of s.list.querySelectorAll(".gh-friend-row[data-gd-uid]")) {
+      const on = r.dataset.gdUid === uid ? "1" : "0";
+      if (r.dataset.gdCursor !== on) r.dataset.gdCursor = on;
+    }
+  }
+  function gdNewChatOpened(ctx) {
+    const s = ctx.newChatSheet;
+    s.gd.cursor = null;
+    gdNewChatChips(ctx);
+    const focus = () => { if (s.backdrop.dataset.open === "1") try { s.input.focus({ preventScroll: true }); } catch (e) {} };
+    focus(); setTimeout(focus, 60); // (now, and once it is on screen)
+  }
+  // the rows a search painted: who each one is, and the keyboard's place (the first match while typing a name)
+  function gdNewChatPainted(ctx, s, results) {
+    const rows = Array.from(s.list.querySelectorAll(".gh-friend-row"));
+    rows.forEach((r, i) => { if (results[i]) { r.dataset.gdUid = results[i].id; r._gdUser = results[i]; } });
+    const ids = results.map((u) => u.id);
+    gdNewChatCursor(s, ids.includes(s.gd.cursor) ? s.gd.cursor : s.input.value.trim() && ids.length ? ids[0] : null);
+    gdNewChatChips(ctx);
+  }
+  function gdNewChatChips(ctx) {
+    const s = ctx.newChatSheet, box = s.gd.chips;
+    box.replaceChildren();
+    for (const [id, u] of s.picked) {
+      const c = el("span", "gd-chip");
+      c.append(makeAvatar(u, 20), Object.assign(el("span"), { textContent: u.name || u.username || "Friend" }));
+      const x = el("button", "gd-chip-x"); x.setAttribute("aria-label", "Remove " + (u.name || "")); x.appendChild(icon("close", 12));
+      x.addEventListener("click", (e) => { e.stopPropagation(); gdNewChatUnpick(ctx, id); s.input.focus(); });
+      c.appendChild(x);
+      box.appendChild(c);
+    }
+    box.dataset.has = s.picked.size ? "1" : "0";
+  }
+  function gdNewChatUnpick(ctx, id) {
+    const s = ctx.newChatSheet;
+    if (!s.picked.has(id)) return;
+    const row = s.list.querySelector('.gh-friend-row[data-gd-uid="' + CSS.escape(id) + '"]');
+    if (row) { row.click(); gdNewChatChips(ctx); return; } // (the phone's own toggle keeps the button right)
+    s.picked.delete(id);
+    s.createBtn.disabled = s.picked.size === 0;
+    if (!s.addTo) { s.titleInput.style.display = s.picked.size > 1 ? "" : "none"; s.createBtn.textContent = s.picked.size > 1 ? "Create Group" : "Chat"; }
+    gdNewChatChips(ctx);
+  }
+
+  // ---- bottom sheets: centered dialogs (ui.css); the sticker sheet pops up over its composer button ---------------
+  function gdSheetsInit(ctx) {
+    const st = ctx.stickerSheet, btn = ctx.conv.screen.querySelector('[data-act="emoji"]');
+    if (!st || !st.sheet || !btn || typeof MutationObserver !== "function") return;
+    st.sheet.dataset.gdAnchor = "1"; // (ui.css: only in two panes)
+    new MutationObserver(() => {
+      if (st.sheet.dataset.open !== "1" || !ctx.gd.wide) return;
+      const r = ctx.root.getBoundingClientRect(), b = btn.getBoundingClientRect(), k = pagePxToLocal();
+      const W = ctx.root.clientWidth, H = ctx.root.clientHeight;
+      st.sheet.style.setProperty("--gd-anc-x", Math.round(clamp((b.left - r.left) * k - 8, 12, W - 12 - 440)) + "px");
+      st.sheet.style.setProperty("--gd-anc-b", Math.round(clamp(H - (b.top - r.top) * k + 10, 12, H - 200)) + "px");
+      st.sheet.dataset.gdAnchor = "1";
+    }).observe(st.sheet, { attributes: true, attributeFilter: ["data-open"] });
+  }
+
+  // ---- messages: select with Ctrl/Shift+click, act on them from a bar over the chat header -----------------------
+  function gdSelectInit(ctx) {
+    const gd = ctx.gd, conv = ctx.conv;
+    gd.sel = { ids: new Set(), anchor: null };
+    const bar = el("div", "gd-selbar");
+    const x = el("button", "gd-selbar-x gh-hit"); x.appendChild(icon("close", 20)); x.setAttribute("aria-label", "Clear the selection (Esc)"); x.title = "Clear (Esc)";
+    x.addEventListener("click", () => gdSelClear(ctx));
+    const count = el("div", "gd-selbar-count");
+    const btn = (ic, label, cls, run) => {
+      const b = el("button", "gd-selbar-btn " + cls);
+      b.append(icon(ic, 18), Object.assign(el("span"), { textContent: label }));
+      b.title = label;
+      b.addEventListener("click", () => { if (!b.disabled) run(); });
+      return b;
+    };
+    const acts = el("div", "gd-selbar-acts");
+    acts.append(
+      btn("copy", "Copy", "gd-sel-copy", () => gdSelCopy(ctx)),
+      btn("send", "Forward", "gd-sel-forward", () => gdSelForward(ctx)),
+      btn("bookmark", "Bookmark", "gd-sel-bookmark", () => gdSelBookmark(ctx)),
+      btn("star", "Save", "gd-sel-save", () => gdSelSave(ctx)),
+      btn("trash", "Delete", "gd-sel-delete gd-danger", () => gdSelDelete(ctx)),
+    );
+    bar.append(x, count, acts);
+    conv.screen.appendChild(bar);
+    gd.selBar = { el: bar, count, acts };
+    const wrapAt = (e) => {
+      const w = e.target.closest && e.target.closest(".gh-msg-wrap[data-message-id]");
+      return w && conv.messages.contains(w) && !e.target.closest(".gd-msg-tools") ? w : null;
+    };
+    const selecting = (e) => e.ctrlKey || e.metaKey || e.shiftKey || gd.sel.ids.size > 0;
+    // (no text selection or focus change from a Shift/Ctrl click; the phone's own click on the message never comes)
+    conv.messages.addEventListener("mousedown", (e) => { if (e.button === 0 && selecting(e) && wrapAt(e)) e.preventDefault(); }, true);
+    conv.messages.addEventListener("click", (e) => {
+      if (!selecting(e)) return;
+      const wrap = wrapAt(e);
+      if (!wrap) return;
+      e.preventDefault(); e.stopPropagation();
+      const m = gdMsg(ctx, wrap);
+      if (!m || m.pending || m.kind === "system") return;
+      if (e.shiftKey && gd.sel.anchor) gdSelRange(ctx, gd.sel.anchor, m.id, e.ctrlKey || e.metaKey);
+      else gdSelToggle(ctx, m.id);
+    }, true);
+    conv.messages.addEventListener("dblclick", (e) => { if (selecting(e) && wrapAt(e)) e.stopPropagation(); }, true);
+  }
+  function gdTextSelected(ctx) {
+    try { const sel = ctx.shadow.getSelection ? ctx.shadow.getSelection() : window.getSelection(); return !!(sel && !sel.isCollapsed && String(sel).trim()); } catch (e) { return false; }
+  }
+  function gdSelMsgs(ctx) { const ids = ctx.gd.sel.ids; return (ctx.conv._all || []).filter((m) => ids.has(m.id)); }
+  function gdSelToggle(ctx, id) {
+    const sel = ctx.gd.sel;
+    if (sel.ids.has(id)) sel.ids.delete(id); else sel.ids.add(id);
+    sel.anchor = id;
+    gdSelPaint(ctx);
+  }
+  // Shift+click: everything from the last clicked message to this one (Ctrl+Shift adds to what's already picked)
+  function gdSelRange(ctx, fromId, toId, add) {
+    const sel = ctx.gd.sel, all = ctx.conv._all || [];
+    let a = all.findIndex((m) => m.id === fromId), b = all.findIndex((m) => m.id === toId);
+    if (a < 0) a = b;
+    if (b < 0) return;
+    if (!add) sel.ids.clear();
+    for (let i = Math.min(a, b); i <= Math.max(a, b); i++) { const m = all[i]; if (m && !m.pending && m.kind !== "system") sel.ids.add(m.id); }
+    gdSelPaint(ctx);
+  }
+  function gdSelClear(ctx) {
+    const sel = ctx.gd.sel;
+    if (!sel.ids.size && !sel.anchor) return;
+    sel.ids.clear(); sel.anchor = null;
+    gdSelPaint(ctx);
+  }
+  const gdFromMe = (ctx, m) => !!(m.fromMe || (m.from && ctx.state.me && m.from.id === ctx.state.me.id));
+  const gdForwardable = (m) => !m.pending && !m.retained && ((m.kind === "text" && !!m.text) || m.kind === "chat-media");
+  function gdSelPaint(ctx) {
+    const gd = ctx.gd, ids = gd.sel.ids, bar = gd.selBar;
+    if (ids.size) { const have = new Set((ctx.conv._all || []).map((m) => m.id)); for (const id of [...ids]) if (!have.has(id)) ids.delete(id); } // (deleted meanwhile)
+    const n = ids.size;
+    ctx.root.dataset.gdSel = n ? "1" : "0";
+    for (const w of ctx.conv.messages.querySelectorAll(".gh-msg-wrap[data-message-id]")) {
+      if (ids.has(w.dataset.messageId)) w.dataset.gdPicked = "1"; else if (w.dataset.gdPicked) delete w.dataset.gdPicked;
+    }
+    if (!n) return;
+    gdHideTools(ctx);
+    const msgs = gdSelMsgs(ctx), convId = ctx.state.currentConvId;
+    bar.count.textContent = n === 1 ? "1 selected" : n + " selected";
+    const q = (c) => bar.acts.querySelector("." + c);
+    const savable = msgs.filter((m) => !m.retained);
+    q("gd-sel-forward").disabled = !msgs.some(gdForwardable);
+    q("gd-sel-save").disabled = !savable.length;
+    const label = (c, t) => { const b = q(c); b.querySelector("span").textContent = t; b.title = t; };
+    label("gd-sel-save", savable.length && savable.every((m) => m.saved) ? "Unsave" : "Save");
+    label("gd-sel-bookmark", msgs.length && msgs.every((m) => isBookmarked(convId, m.id)) ? "Remove Bookmark" : "Bookmark");
+    q("gd-sel-delete").disabled = !msgs.length || !msgs.every((m) => gdFromMe(ctx, m) && !m.retained);
+    const hh = ctx.conv.screen.querySelector(".gh-conv-header");
+    if (hh) bar.el.style.height = hh.offsetHeight + "px";
+  }
+  function gdSelCopy(ctx) {
+    const msgs = gdSelMsgs(ctx);
+    if (!msgs.length) return;
+    const text = msgs.length === 1 ? messagePreview(msgs[0])
+      : msgs.map((m) => (gdFromMe(ctx, m) ? "You" : (m.from && m.from.name) || "") + ": " + messagePreview(m)).join("\n");
+    copyToClipboard(text);
+    ctx.showToast(msgs.length === 1 ? "Copied" : msgs.length + " messages copied");
+  }
+  function gdSelBookmark(ctx) {
+    const convId = ctx.state.currentConvId, msgs = gdSelMsgs(ctx);
+    if (!msgs.length) return;
+    const all = msgs.every((m) => isBookmarked(convId, m.id));
+    for (const m of msgs) if (all || !isBookmarked(convId, m.id)) toggleBookmark(ctx, convId, m);
+    ctx.showToast(all ? (msgs.length === 1 ? "Bookmark removed" : "Bookmarks removed") : "Bookmarked");
+    gdSelClear(ctx);
+  }
+  function gdSelSave(ctx) {
+    const convId = ctx.state.currentConvId, msgs = gdSelMsgs(ctx).filter((m) => !m.retained);
+    if (!msgs.length) return;
+    const next = !msgs.every((m) => m.saved);
+    for (const m of msgs) { if (!!m.saved === next) continue; m.saved = next; api.saveMessage(convId, m.id, next).catch(() => {}); }
+    ctx.showToast(next ? "Saved in chat" : "Unsaved");
+    gdSelClear(ctx);
+  }
+  async function gdSelDelete(ctx) {
+    const convId = ctx.state.currentConvId, msgs = gdSelMsgs(ctx);
+    if (!msgs.length || !msgs.every((m) => gdFromMe(ctx, m) && !m.retained)) return;
+    if (!(await confirmSheet(ctx, msgs.length === 1 ? "Delete this message for everyone?" : "Delete these " + msgs.length + " messages for everyone?", "Delete"))) return;
+    gdSelClear(ctx);
+    let failed = 0;
+    for (const m of msgs) {
+      const w = ctx.conv.messages.querySelector('.gh-msg-wrap[data-message-id="' + CSS.escape(m.id) + '"]');
+      if (w) w.classList.add("gh-msg-deleting");
+      try { await api.deleteMessage(convId, m.id); }
+      catch (e) { failed++; if (w) w.classList.remove("gh-msg-deleting"); }
+    }
+    if (failed) ctx.showToast(failed === msgs.length ? "Couldn't delete that" : "Couldn't delete " + failed + " of them");
+  }
+  // Forward: texts as texts, chat photos/videos as media (the phone's Send To page picks the chats)
+  function gdSelForward(ctx) {
+    const msgs = gdSelMsgs(ctx).filter(gdForwardable);
+    if (!msgs.length) { ctx.showToast("Only texts, photos and videos can be forwarded"); return; }
+    openSendPage(ctx, { chatOnly: true, title: "Forward To", count: msgs.length, onSend: async (dest) => {
+      let sent = 0, failed = 0;
+      for (const id of dest.convIds) {
+        for (const m of msgs) {
+          try {
+            if (m.kind === "text") await api.sendText(id, String(m.text), {});
+            else {
+              const ref = (await fetchMediaFor(m))[0];
+              if (!ref || (!ref.url && !ref.blob)) throw new Error("no media");
+              const blob = ref.blob || await (await fetch(ref.url)).blob(); // (some refs carry only a Blob)
+              await api.sendMedia(id, blob, { kind: ref.type === "video" || /^video\//.test(blob.type) ? "video" : "image" });
+            }
+            sent++;
+          } catch (e) { failed++; gtrail("forward failed " + ((e && e.message) || e)); }
+        }
+      }
+      if (!sent) { ctx.showToast("Couldn't forward that"); return false; }
+      ctx.showToast(failed ? "Forwarded · " + failed + " couldn't be sent" : "Forwarded");
+      gdSelClear(ctx);
+      return true;
+    } });
+  }
+
+  // ---- the chat's drawer: search in this chat, pinned messages ----------------------------------------------------
+  function gdDrawerInit(ctx) {
+    const gd = ctx.gd;
+    const d = el("div", "gd-drawer");
+    d.innerHTML = '<div class="gd-drawer-head"><div class="gd-drawer-title"></div><button class="gd-drawer-x gh-hit" aria-label="Close (Esc)" title="Close (Esc)"></button></div>'
+      + '<div class="gd-drawer-top"></div><div class="gd-drawer-list gh-scroll"></div><div class="gd-drawer-foot"></div>';
+    d.querySelector(".gd-drawer-x").appendChild(icon("close", 18));
+    d.querySelector(".gd-drawer-x").addEventListener("click", () => gdDrawerClose(ctx));
+    const top = d.querySelector(".gd-drawer-top");
+    const field = el("div", "gd-drawer-field");
+    const input = el("input"); input.type = "search"; input.placeholder = "Search this chat"; input.autocomplete = "off"; input.spellcheck = false;
+    field.append(icon("search", 16), input);
+    const count = el("div", "gd-drawer-count");
+    top.append(field, count);
+    ctx.stack.appendChild(d);
+    const dr = gd.drawer = { el: d, mode: null, title: d.querySelector(".gd-drawer-title"), top, list: d.querySelector(".gd-drawer-list"), foot: d.querySelector(".gd-drawer-foot"), input, count, q: "", matches: [], cur: -1, busy: false, timer: 0 };
+    input.addEventListener("input", () => {
+      clearTimeout(dr.timer);
+      dr.timer = setTimeout(() => gdDrawerQuery(ctx), 200);
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (!dr.matches.length) return;
+        gdDrawerGo(ctx, dr.cur < 0 ? 0 : clamp(dr.cur + (e.key === "ArrowDown" ? 1 : -1), 0, dr.matches.length - 1));
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        clearTimeout(dr.timer);
+        if (input.value.trim().toLowerCase() !== dr.q) { gdDrawerQuery(ctx); return; }
+        if (dr.matches.length) gdDrawerGo(ctx, dr.cur < 0 ? 0 : (dr.cur + 1) % dr.matches.length);
+      }
+    });
+  }
+  function gdDrawer(ctx, mode) {
+    const gd = ctx.gd, dr = gd.drawer;
+    if (!ctx.state.currentConvId || !dr) return;
+    if (dr.mode !== mode) {
+      if (dr.mode === "search") gdDrawerSearchOff(ctx);
+      dr.mode = mode;
+      dr.el.dataset.mode = mode;
+      dr.q = ""; dr.matches = []; dr.cur = -1; dr.input.value = "";
+    }
+    ctx.root.dataset.gdDrawer = "1";
+    gdHideTools(ctx);
+    gdDrawerRender(ctx);
+    if (mode === "search") setTimeout(() => { try { dr.input.focus({ preventScroll: true }); dr.input.select(); } catch (e) {} }, 0);
+  }
+  function gdDrawerSearchOff(ctx, noPaint) {
+    const conv = ctx.conv;
+    if (conv.searchQ) { conv.searchQ = null; if (!noPaint) paintWindow(ctx, conv); }
+  }
+  // noPaint: the chat is changing (its new messages are painted right after)
+  function gdDrawerClose(ctx, noPaint) {
+    const dr = ctx.gd.drawer;
+    if (!dr || !dr.mode) return;
+    if (dr.mode === "search") gdDrawerSearchOff(ctx, noPaint);
+    clearTimeout(dr.timer);
+    dr.mode = null; dr.q = ""; dr.matches = []; dr.cur = -1; dr.pinSig = null;
+    ctx.root.dataset.gdDrawer = "0";
+    dr.list.replaceChildren(); dr.foot.replaceChildren();
+    const a = ctx.shadow.activeElement;
+    if (a && dr.el.contains(a)) a.blur();
+  }
+  function gdDrawerQuery(ctx) {
+    const dr = ctx.gd.drawer, conv = ctx.conv;
+    dr.q = dr.input.value.trim().toLowerCase();
+    conv.searchQ = dr.q || null; // (the chat marks the matches, like the phone's search bar)
+    gdDrawerCompute(ctx);
+    dr.cur = -1;
+    paintWindow(ctx, conv);
+    gdDrawerRender(ctx);
+  }
+  function gdDrawerCompute(ctx) {
+    const dr = ctx.gd.drawer, all = ctx.conv._all || [];
+    dr.matches = [];
+    if (dr.q) for (let i = all.length - 1; i >= 0; i--) if (searchableText(all[i]).toLowerCase().includes(dr.q)) dr.matches.push(all[i]);
+  }
+  function gdDrawerGo(ctx, i) {
+    const dr = ctx.gd.drawer, m = dr.matches[i];
+    if (!m) return;
+    dr.cur = i;
+    for (const r of dr.list.querySelectorAll(".gd-dr-row")) r.dataset.cur = r.dataset.i === String(i) ? "1" : "0";
+    const row = dr.list.querySelector('.gd-dr-row[data-i="' + i + '"]');
+    if (row) row.scrollIntoView({ block: "nearest" });
+    jumpToMessage(ctx, m.id);
+  }
+  // a line of text with the search words marked
+  function gdMarked(text, q) {
+    const box = el("div", "gd-dr-text");
+    const t = String(text || "");
+    let at = q ? t.toLowerCase().indexOf(q) : -1;
+    // a long message: start a little before the match
+    let from = 0;
+    if (at > 60) { from = at - 40; box.appendChild(document.createTextNode("…")); }
+    let i = from;
+    while (q && at >= 0) {
+      box.appendChild(document.createTextNode(t.slice(i, at)));
+      const mk = el("mark"); mk.textContent = t.slice(at, at + q.length); box.appendChild(mk);
+      i = at + q.length;
+      at = t.toLowerCase().indexOf(q, i);
+    }
+    box.appendChild(document.createTextNode(t.slice(i)));
+    return box;
+  }
+  function gdDrawerRow(who, when, textEl, onClick) {
+    const row = el("button", "gd-dr-row");
+    row.appendChild(makeAvatar(who, 30));
+    const col = el("div", "gd-dr-col");
+    const top = el("div", "gd-dr-top");
+    top.append(Object.assign(el("span", "gd-dr-who"), { textContent: who.name || "" }), Object.assign(el("span", "gd-dr-when"), { textContent: when }));
+    col.append(top, textEl);
+    row.appendChild(col);
+    row.addEventListener("click", onClick);
+    return row;
+  }
+  // the pins changed (gxPaintPinbar runs on every repaint of the chat: only then is the list redrawn)
+  function gdDrawerPins(ctx) {
+    const dr = ctx.gd.drawer, sig = ((ctx.conv && ctx.conv._pins) || []).map((p) => p.k + ":" + (p.shared ? 1 : 0)).join("|");
+    if (dr.pinSig === sig) return;
+    gdDrawerRender(ctx);
+  }
+  function gdWhen(ts) { return ts ? fmtDaySeparator(ts).replace(/^\w+, /, "") + " " + fmtClock(ts) : ""; }
+  function gdDrawerRender(ctx) {
+    const gd = ctx.gd, dr = gd.drawer, conv = ctx.conv, convId = ctx.state.currentConvId;
+    if (!dr.mode) return;
+    dr.list.replaceChildren(); dr.foot.replaceChildren();
+    const me = ctx.state.me || { name: "You" };
+    if (dr.mode === "pins") {
+      const pins = (conv._pins || []).slice().reverse();
+      dr.pinSig = (conv._pins || []).map((p) => p.k + ":" + (p.shared ? 1 : 0)).join("|");
+      dr.title.textContent = pins.length ? pins.length + (pins.length === 1 ? " Pinned Message" : " Pinned Messages") : "Pinned Messages";
+      if (!pins.length) { dr.list.appendChild(Object.assign(el("div", "gd-dr-empty"), { textContent: "No pinned messages. Right-click a message and pick Pin." })); return; }
+      for (const p of pins) {
+        const who = p.d.f ? { name: gxText(p.d.f), id: p.d.s || "" } : { name: "You", id: me.id, bitmojiUrl: me.bitmojiUrl };
+        const t = el("div", "gd-dr-text"); t.textContent = gxText(p.d.p || "Message") + (p.shared ? "" : "  · only you");
+        const row = gdDrawerRow(who, gdWhen(Number(p.d.t) || 0), t, () => gxJumpPin(ctx, p));
+        row.classList.add("gd-dr-pin");
+        const x = el("span", "gd-dr-x gh-hit"); x.setAttribute("role", "button"); x.setAttribute("aria-label", "Unpin"); x.title = "Unpin"; x.appendChild(icon("close", 14));
+        x.addEventListener("click", (e) => { e.stopPropagation(); gxUnpin(ctx, convId, p); });
+        row.appendChild(x);
+        dr.list.appendChild(row);
+      }
+      return;
+    }
+    dr.title.textContent = "Search";
+    const n = dr.matches.length;
+    dr.count.textContent = !dr.q ? "" : dr.busy ? "Searching…" : n ? n + (n === 1 ? " result" : " results") + (conv._hasMore ? " so far" : "") : conv._hasMore ? "None in what's loaded yet" : "No results";
+    dr.matches.forEach((m, i) => {
+      const who = gdFromMe(ctx, m) ? { name: "You", id: me.id, bitmojiUrl: me.bitmojiUrl } : (m.from || { name: "" });
+      const row = gdDrawerRow(who, gdWhen(m.ts), gdMarked(searchableText(m), dr.q), () => gdDrawerGo(ctx, i));
+      row.dataset.i = String(i);
+      row.dataset.cur = i === dr.cur ? "1" : "0";
+      dr.list.appendChild(row);
+    });
+    if (dr.q && conv._hasMore) {
+      const more = el("button", "gd-dr-more");
+      more.textContent = dr.busy ? "Searching older messages…" : "Search older messages";
+      more.disabled = dr.busy;
+      more.addEventListener("click", async () => {
+        if (dr.busy) return;
+        dr.busy = true; gdDrawerRender(ctx);
+        const had = dr.matches.length;
+        await fetchOlderPages(ctx, 8, () => { gdDrawerCompute(ctx); return dr.matches.length > had; });
+        dr.busy = false;
+        if (dr.mode !== "search") return;
+        gdDrawerCompute(ctx); gdDrawerRender(ctx);
+        if (dr.matches.length === had) ctx.showToast(conv._hasMore ? "No more matches in that stretch" : "No older matches");
+      });
+      dr.foot.appendChild(more);
+    }
+  }
+
+  // =====================================================================================================
   // Navigation: push/pop + interactive drag between home <-> conversation (like the native apps)
   // =====================================================================================================
   // Screens only become GPU layers while they move. At rest, the inline translate3d (and a gh-anim that a swipe never
@@ -16521,6 +18065,7 @@
     shade.style.opacity = showConv ? "0.15" : "0";
     ctx.state.navProgress = showConv ? 1 : 0;
     if (animate) restScreensLater(ctx, 1, 400); else restScreens(ctx, 1);
+    if (ctx.gd) gdSync(ctx);
   }
 
   function initNavGesture(ctx) {

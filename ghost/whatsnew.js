@@ -9,6 +9,13 @@
 //   - If a build ships several versions at once (e.g. 1.15.0 inside 1.16.0), put the bullets of all of them
 //     in the newest entry.
 window.GHOST_WHATS_NEW = {
+  "1.19.3": {
+    items: [
+      { t: "Use Ghost on your PC too: Ghost desktop becomes this same Ghost, with your Ghost friends and chats.", how: "Settings > Privacy > Link Ghost Desktop" },
+      { t: "Before linking, check that your PC shows the same Ghost ID as your phone, every group." },
+      { t: "A snap that won't load can now be marked opened, so it stops showing as new. Long-press any unopened snap for Mark as Opened or Mark as New." },
+    ],
+  },
   "1.19.2": {
     items: [
       { t: "Snaps that only open in the Snapchat app now say \"Open in Snapchat\" right away, and a tap opens the Snapchat app." },

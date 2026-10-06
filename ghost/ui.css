@@ -1950,6 +1950,7 @@ input, textarea {
 .gh-confirm-box { width: min(300px, 84%); background: var(--gh-bg-panel); border-radius: 16px; padding: 20px 16px 12px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
 .gh-confirm-text { font-size: 16px; font-weight: 600; margin-bottom: 14px; line-height: 1.3; }
 .gh-confirm-input { width: 100%; box-sizing: border-box; height: 40px; border-radius: 10px; border: none; outline: none; padding: 0 12px; margin-bottom: 12px; background: var(--gh-bg-panel-2); color: var(--gh-text); font-size: 16px; }
+.gh-confirm-big { margin: -4px 0 14px; font-family: ui-monospace, Menlo, monospace; font-size: 19px; font-weight: 600; line-height: 1.35; letter-spacing: 0.5px; word-spacing: 4px; overflow-wrap: normal; }
 .gh-confirm-row { display: flex; gap: 8px; }
 .gh-confirm-row button { flex: 1; height: 42px; border-radius: 11px; background: var(--gh-bg-panel-2); color: var(--gh-text); font-weight: 600; font-size: 16px; }
 .gh-confirm-row .gh-confirm-ok { background: var(--gh-accent); color: #fff; }
@@ -2538,6 +2539,15 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-gn-safety { display: flex; flex-direction: column; align-items: center; gap: 10px; margin: 18px 16px 6px; padding: 22px 12px; border-radius: 16px; background: var(--gh-bg-list); }
 .gh-gn-safety-who { font-size: 14px; color: var(--gh-text-secondary); }
 .gh-gn-safety-code { font-family: ui-monospace, Menlo, monospace; font-size: 30px; font-weight: 600; letter-spacing: 1px; word-spacing: 8px; color: var(--gh-text); }
+/* Privacy > Link Ghost Desktop (#250): the code field, monospace so the groups of 4 line up */
+.gh-gn-link-row { padding-top: 6px; padding-bottom: 6px; }
+.gh-gn-link-code { flex: 1; min-width: 0; height: 40px; box-sizing: border-box; border: none; outline: none; border-radius: 10px; padding: 0 10px; background: var(--gh-bg-panel-2); color: var(--gh-text); font-family: ui-monospace, Menlo, monospace; font-size: 16px; text-transform: uppercase; } /* (16 px: iOS zooms into smaller fields) */
+.gh-gn-link-code::placeholder { color: var(--gh-text-tertiary); text-transform: none; }
+.gh-gn-link-code:disabled { opacity: 0.6; }
+.gh-gn-link-note:empty { display: none; }
+/* v2 (#255): the WHOLE Ghost ID the PC must show, after sending (7 groups of 4; wraps at the group spaces) */
+.gh-gn-link-id:empty { display: none; }
+.gh-gn-link-id .gh-gn-safety-code { font-size: 22px; line-height: 1.35; text-align: center; letter-spacing: 0.5px; word-spacing: 6px; }
 .gh-conv-sub[data-gnstatus="1"] { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .gh-set-row.gh-gn-status-row .gh-set-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Birthdays (Snapchat's own): the cake sits right after the name */
@@ -3035,3 +3045,416 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 /* too narrow for both on one line (phone width, big text): the button wraps under the label instead of off-screen */
 .gh-snap-row:has(.gh-snap-markopen) { flex-wrap: wrap; max-width: 100%; box-sizing: border-box; row-gap: 12px; }
 .gh-snap-row:has(.gh-snap-markopen) .gh-snap-markopen { margin-left: auto; }
+
+/* ---------------------------------------------------------------------------------------------------
+   Desktop layout (Ghost desktop for Linux; #198 stage S2, ticket #205). ui.js section "Desktop layout" adds .gd-desktop
+   to .gh-root only when the desktop shell set window.__ghostDesktop, so nothing below ever applies on the phone.
+   .gd-wide (window >= 900 px): sidebar (chat list, width --gd-side-w) + the open chat; the phone's full-screen screens
+   become panels over a dimmed window (.gd-scrim follows the top open panel). Narrower = the phone's one-pane layout
+   with hover states, the hover tools and desktop scrollbars.
+--------------------------------------------------------------------------------------------------- */
+@keyframes gd-fade { from { opacity: 0; } to { opacity: 1; } } /* (gh-fadein also moves: it fought the tools' own centering) */
+.gd-desktop { --gd-side-w: 340px; --gd-pw: min(calc(100% - 56px), calc((var(--gd-h, 100vh) - 56px) * 0.5625)); }
+.gd-desktop .gh-row, .gd-desktop .gh-story, .gd-desktop .gh-set-row, .gd-desktop .gh-mention-row { cursor: pointer; }
+.gd-desktop .gh-press:active { transform: scale(0.985); }
+
+/* hover */
+.gd-desktop .gh-row:hover { background: rgba(255, 255, 255, 0.045); }
+.gd-desktop .gh-icon-btn:hover, .gd-desktop .gh-composer-btn:hover, .gd-desktop .gh-composer-emoji-btn:hover,
+.gd-desktop .gh-composer-mic:hover, .gd-desktop .gh-reply-bar-close:hover { background: rgba(255, 255, 255, 0.08); }
+.gd-desktop .gh-composer-send:hover { filter: brightness(1.12); }
+.gd-desktop .gh-set-row:hover { background: rgba(255, 255, 255, 0.04); }
+.gd-desktop .gh-tab-btn:hover { color: var(--gh-text-secondary); }
+.gd-desktop .gh-tab-btn[data-active="1"]:hover { color: var(--gh-accent); }
+.gd-desktop .gh-story:hover .gh-story-ring { filter: brightness(1.15); }
+.gd-desktop .gh-mention-row:hover { background: rgba(255, 255, 255, 0.06); }
+.gd-desktop .gh-edit-btn:hover, .gd-desktop .gh-set-back:hover, .gd-desktop .gh-search-cancel:hover { opacity: 0.75; }
+.gd-desktop .gh-sheet button:hover:not(:disabled) { filter: brightness(1.15); }
+.gd-desktop .gh-confirm-row button:hover { background: rgba(255, 255, 255, 0.06); }
+
+/* desktop scrollbars (the phone hides them; a mouse needs one to grab) */
+.gd-desktop .gh-scroll { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.18) transparent; }
+.gd-desktop .gh-scroll::-webkit-scrollbar { display: block; width: 10px; height: 10px; background: transparent; }
+.gd-desktop .gh-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 8px; border: 3px solid transparent; background-clip: padding-box; }
+.gd-desktop .gh-scroll::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.28); }
+.gd-desktop .gh-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* the chat you're in, and the keyboard's place in the list */
+.gd-desktop .gh-row[data-gd-sel="1"] { background: color-mix(in srgb, var(--gh-accent) 22%, transparent); }
+.gd-desktop .gh-row[data-gd-sel="1"]:hover { background: color-mix(in srgb, var(--gh-accent) 28%, transparent); }
+.gd-desktop[data-gd-kbd="1"] .gh-row[data-gd-cursor="1"] { box-shadow: inset 3px 0 0 var(--gh-accent), inset 0 0 0 1px color-mix(in srgb, var(--gh-accent) 55%, transparent); }
+
+/* hover tools: chat rows (snap, pin, more) and messages (reply, react, more) */
+.gd-row-tools {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%); z-index: 2;
+  display: flex; gap: 2px; padding: 3px; border-radius: 12px;
+  background: var(--gh-bg-panel); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  animation: gd-fade 0.12s ease;
+}
+.gd-tool {
+  width: 30px; height: 30px; border-radius: 9px; display: flex; align-items: center; justify-content: center;
+  color: var(--gh-text-secondary);
+}
+.gd-tool:hover { background: var(--gh-bg-panel-2); color: var(--gh-text); }
+.gd-msg-tools {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 3;
+  display: flex; gap: 1px; padding: 2px; border-radius: 11px;
+  background: var(--gh-bg-panel); box-shadow: 0 3px 12px rgba(0, 0, 0, 0.35);
+  animation: gd-fade 0.12s ease;
+}
+.gd-msg-tools .gd-tool { width: 28px; height: 28px; }
+.gh-group[data-me="1"] .gd-msg-tools { right: calc(100% + 6px); }
+.gh-group[data-me="0"] .gd-msg-tools { left: calc(100% + 6px); }
+
+/* composer: a field that grows with longer messages (Enter sends, Shift+Enter = new line) */
+.gd-desktop .gh-composer-field { max-height: 240px; }
+.gd-desktop .gh-composer-textarea { max-height: 220px; font-size: 15.5px; overflow-y: auto; }
+
+/* drop pictures/videos on the open chat */
+.gd-drop {
+  position: absolute; inset: 10px; z-index: 30; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  border: 2px dashed color-mix(in srgb, var(--gh-accent) 70%, transparent); border-radius: 18px;
+  background: color-mix(in srgb, var(--gh-bg-app) 82%, transparent); color: var(--gh-accent); pointer-events: none;
+}
+.gd-drop[data-show="1"] { display: flex; }
+.gd-drop-text { font-size: 17px; font-weight: 600; color: var(--gh-text); }
+
+/* shortcuts sheet (the ? key) */
+.gd-keys-head { padding: 6px 18px 10px; font-size: 17px; font-weight: 650; text-align: center; }
+.gd-keys { padding: 0 18px 18px; overflow-y: auto; }
+.gd-keys-row { display: flex; align-items: center; gap: 14px; padding: 7px 0; border-bottom: 0.5px solid var(--gh-divider); }
+.gd-keys-row:last-child { border-bottom: 0; }
+.gd-keys-keys { flex: none; width: 190px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.gd-keys-or { font-size: 12px; color: var(--gh-text-tertiary); margin: 0 2px; }
+.gd-keys-what { flex: 1; min-width: 0; font-size: 14.5px; color: var(--gh-text-secondary); }
+.gd-desktop kbd {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; padding: 0 7px;
+  border-radius: 6px; background: var(--gh-bg-panel-2); border: 1px solid rgba(255, 255, 255, 0.1); border-bottom-width: 2px;
+  font: 600 12px/1 -apple-system, system-ui, sans-serif; color: var(--gh-text);
+}
+
+/* only in the two-pane layout */
+.gd-side-bar, .gd-empty, .gd-resizer, .gd-scrim, .gd-close { display: none; }
+
+/* ---- two panes (>= 900 px) ---------------------------------------------------------------------------------------- */
+/* the phone's slide transforms stay in step underneath (so a narrower window lands on the right pane), but here both
+   screens simply stand side by side */
+.gd-wide .gh-stack > .gh-screen[data-screen="home"] {
+  right: auto; width: var(--gd-side-w);
+  transform: none !important; visibility: visible !important; will-change: auto !important; transition: none !important;
+  border-right: 1px solid rgba(0, 0, 0, 0.35);
+}
+.gd-wide .gh-stack > .gh-screen[data-screen="conv"] {
+  left: var(--gd-side-w); z-index: 0;
+  transform: none !important; visibility: visible !important; will-change: auto !important; transition: none !important;
+}
+.gd-wide .gh-shade, .gd-wide .gh-tab-bar, .gd-wide .gh-home-nav-row, .gd-wide .gh-large-title-row { display: none; }
+.gd-wide .gh-list { padding-bottom: 12px; }
+.gd-wide .gh-search-sticky { padding-top: 6px; }
+
+/* sidebar header: you, "Chats", then the phone's tabs + header buttons as icons */
+.gd-wide .gd-side-bar { display: flex; align-items: center; gap: 6px; height: 54px; padding: 0 8px 0 10px; }
+.gd-me { width: 36px; height: 36px; min-width: 36px; min-height: 36px; border-radius: 50%; color: var(--gh-text-secondary); background: var(--gh-bg-panel-2); flex: none; overflow: hidden; }
+.gd-me:hover { box-shadow: 0 0 0 2px var(--gh-accent); }
+.gd-me .gh-avatar { width: 36px !important; height: 36px !important; }
+.gd-side-title { flex: 1; min-width: 0; font-size: 19px; font-weight: 700; letter-spacing: -0.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gd-side-btns { display: flex; align-items: center; gap: 0; flex: none; }
+.gd-side-btn { min-width: 34px; min-height: 34px; width: 34px; height: 34px; border-radius: 10px; color: var(--gh-accent); }
+.gd-side-btn:hover { background: rgba(255, 255, 255, 0.08); }
+
+/* the sidebar's drag edge */
+.gd-wide .gd-resizer {
+  display: block; position: absolute; top: 0; bottom: 0; left: calc(var(--gd-side-w) - 3px); width: 7px; z-index: 6;
+  cursor: col-resize; touch-action: none;
+}
+.gd-wide .gd-resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: transparent; transition: background 0.15s ease; }
+.gd-wide .gd-resizer:hover::after, .gd-wide[data-gd-resizing="1"] .gd-resizer::after { background: var(--gh-accent); }
+.gd-wide[data-gd-resizing="1"] { cursor: col-resize; -webkit-user-select: none; user-select: none; }
+
+/* no chat open: the right pane says what to do */
+.gd-wide[data-gd-chat="0"] .gd-empty {
+  display: flex; position: absolute; top: 0; bottom: 0; right: 0; left: var(--gd-side-w); z-index: 4;
+  flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 40px;
+  background-color: var(--gh-bg-app);
+  background-image: var(--gh-wall-image, none); background-size: var(--gh-wall-size, auto); background-position: var(--gh-wall-pos, 0 0);
+  color: var(--gh-text-secondary); text-align: center;
+}
+.gd-empty-art { width: 92px; height: 92px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--gh-bg-panel); color: var(--gh-accent); }
+.gd-empty-title { font-size: 17px; font-weight: 600; color: var(--gh-text); }
+.gd-empty-keys { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 4px; }
+.gd-empty-key { display: inline-flex; align-items: center; gap: 4px; padding: 6px 10px; border-radius: 10px; background: color-mix(in srgb, var(--gh-bg-panel) 85%, transparent); color: var(--gh-text-secondary); font-size: 13px; }
+.gd-empty-key span { margin-left: 4px; }
+.gd-empty-key:hover { background: var(--gh-bg-panel-2); color: var(--gh-text); }
+
+/* the open chat at desktop width: a centered column of messages, the composer under it */
+.gd-wide .gh-messages { padding-left: max(16px, calc((100% - 880px) / 2)); padding-right: max(16px, calc((100% - 880px) / 2)); }
+.gd-wide .gh-composer { padding-left: max(10px, calc((100% - 900px) / 2)); padding-right: max(10px, calc((100% - 900px) / 2)); }
+.gd-wide .gh-reply-bar, .gd-wide .gh-typing-row { padding-left: max(12px, calc((100% - 880px) / 2)); padding-right: max(12px, calc((100% - 880px) / 2)); }
+.gd-wide .gh-group { max-width: min(80%, 620px); }
+.gd-wide .gh-messages[data-group="1"] .gh-group[data-me="0"] { max-width: min(calc(80% + 40px), 660px); }
+/* header: picture + name on the left like a desktop messenger; the list is right there, so no back button */
+.gd-wide .gh-conv-header .gh-back-wrap { display: none; }
+.gd-wide .gh-conv-header .gh-header { padding: 8px 14px; min-height: 58px; }
+.gd-wide .gh-conv-header-avatar { order: -1; margin: 0; }
+.gd-wide .gh-conv-header .gh-header-title { align-items: flex-start; text-align: left; }
+.gd-wide .gh-conv-title-row { justify-content: flex-start; }
+
+/* ---- panels: the phone's full-screen screens over a dimmed window --------------------------------------------- */
+.gd-wide .gd-scrim { position: absolute; inset: 0; background: rgba(3, 7, 11, 0.66); animation: gd-fade 0.15s ease; }
+.gd-wide:has(.gh-gal[data-open="1"], .gh-tt[data-open="1"]) > .gd-scrim { display: block; z-index: 8; }
+.gd-wide:has(> .gh-gal-layer [data-open="1"]) > .gd-scrim { display: block; z-index: 17; }
+.gd-wide:has(> .gh-camera[data-open="1"]) > .gd-scrim { display: block; z-index: 19; }
+.gd-wide:has(> .gh-send-page[data-open="1"]) > .gd-scrim { display: block; z-index: 24; }
+.gd-wide:has(> .gh-settings[data-open="1"]) > .gd-scrim { display: block; z-index: 29; }
+.gd-wide:has(> .gh-viewer[data-open="1"]) > .gd-scrim { display: block; z-index: 35; background: rgba(0, 0, 0, 0.86); }
+.gd-wide:has(> .gh-call[data-open="1"]) > .gd-scrim { display: block; z-index: 39; }
+.gd-wide.gd-wide:has(> .gh-gg-view) > .gd-scrim { display: block; z-index: 54; } /* (doubled: beats the (0,4,0) rules above) */
+/* a close button in the window corner for panels whose phone screen has none of its own */
+.gd-wide:has(.gh-gal[data-open="1"], .gh-tt[data-open="1"]) > .gd-close { display: flex; z-index: 9; }
+.gd-wide:has(> .gh-gal-layer [data-open="1"]) > .gd-close { display: flex; z-index: 18; }
+.gd-wide:has(> .gh-send-page[data-open="1"]) > .gd-close { display: flex; z-index: 25; }
+.gd-wide:has(> .gh-settings[data-open="1"]) > .gd-close { display: flex; z-index: 31; }
+.gd-wide.gd-wide:has(> .gh-camera[data-open="1"]) > .gd-close, .gd-wide.gd-wide:has(> .gh-viewer[data-open="1"]) > .gd-close,
+.gd-wide.gd-wide:has(> .gh-call[data-open="1"]) > .gd-close, .gd-wide.gd-wide.gd-wide:has(> .gh-gg-view) > .gd-close { display: none; } /* (these own a close button: they win over the panels under them) */
+.gd-close {
+  position: absolute; top: 14px; right: 14px; width: 38px; height: 38px; min-width: 38px; min-height: 38px; border-radius: 50%;
+  align-items: center; justify-content: center; color: #fff; background: rgba(255, 255, 255, 0.1);
+}
+.gd-close:hover { background: rgba(255, 255, 255, 0.2); }
+
+/* wide panels: Settings and Send To (M), Gallery + its viewer/vault layer and calls (L) */
+.gd-wide > .gh-settings, .gd-wide > .gh-send-page {
+  top: 28px; bottom: 28px; left: max(64px, calc(50% - 390px)); right: max(64px, calc(50% - 390px));
+  border-radius: 14px; overflow: hidden;
+}
+.gd-wide .gh-gal, .gd-wide > .gh-gal-layer, .gd-wide > .gh-call {
+  top: 28px; bottom: 28px; left: max(64px, calc(50% - 520px)); right: max(64px, calc(50% - 520px));
+  border-radius: 14px; overflow: hidden;
+}
+.gd-wide .gh-gal { position: fixed; z-index: 9; }
+.gd-wide .gh-gal-selbar {
+  position: fixed; z-index: 10; left: max(64px, calc(50% - 520px)); right: max(64px, calc(50% - 520px)); bottom: 28px;
+  border-radius: 0 0 14px 14px;
+}
+.gd-wide .gh-gal-selbar:not([data-show="1"]) { visibility: hidden; }
+/* tall panels: the camera, TikTok, games and the snap/story viewer keep the phone's portrait shape */
+.gd-wide > .gh-camera, .gd-wide .gh-tt, .gd-wide > .gh-gg-view, .gd-wide > .gh-viewer {
+  top: 28px; bottom: 28px; right: auto; left: calc(50% - var(--gd-pw) / 2); width: var(--gd-pw);
+  border-radius: 16px; overflow: hidden;
+}
+.gd-wide .gh-tt { position: fixed; z-index: 9; }
+.gd-wide .gh-tt-pager, .gd-wide .gh-tts { bottom: 0; }
+/* a chat photo (not a snap or story) gets the whole window, floating on the dim */
+.gd-wide > .gh-viewer[data-gd-kind="photo"] { left: 64px; right: 64px; width: auto; background: transparent; border-radius: 0; }
+.gd-wide > .gh-viewer[data-gd-kind="photo"] .gh-viewer-media img, .gd-wide > .gh-viewer[data-gd-kind="photo"] .gh-viewer-media video { background: transparent; }
+.gd-wide > .gh-settings[data-open="1"], .gd-wide > .gh-send-page[data-open="1"], .gd-wide .gh-gal[data-open="1"],
+.gd-wide > .gh-call[data-open="1"], .gd-wide > .gh-camera[data-open="1"], .gd-wide .gh-tt[data-open="1"],
+.gd-wide > .gh-gg-view, .gd-wide > .gh-viewer[data-open="1"]:not([data-gd-kind="photo"]) {
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.07);
+}
+.gd-wide > .gh-viewer .gh-viewer-close:hover, .gd-wide > .gh-viewer .gh-viewer-save:hover { background: rgba(255, 255, 255, 0.12); border-radius: 50%; }
+/* bottom sheets: a centered dialog over the dimmed window instead of a full-width phone sheet (S3; a menu opened with
+   the mouse is a popover at the pointer instead, below; the sticker sheet pops up over its button: "Desktop screens") */
+.gd-wide .gh-overlay-layer > .gh-sheet, .gd-wide > .gh-gal-layer > .gh-sheet {
+  left: 50%; right: auto; top: 50%; bottom: auto; width: min(540px, calc(100% - 48px)); max-height: min(760px, calc(100% - 64px));
+  border-radius: 16px; padding-bottom: 0; opacity: 0; transform: translate(-50%, -47%) scale(0.97);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.07);
+}
+.gd-wide .gh-overlay-layer > .gh-sheet.gh-anim, .gd-wide > .gh-gal-layer > .gh-sheet.gh-anim { transition: transform 0.18s ease, opacity 0.18s ease; }
+.gd-wide .gh-overlay-layer > .gh-sheet[data-open="1"], .gd-wide > .gh-gal-layer > .gh-sheet[data-open="1"] { opacity: 1; transform: translate(-50%, -50%); }
+.gd-wide .gh-overlay-layer > .gh-sheet .gh-sheet-grip, .gd-wide > .gh-gal-layer > .gh-sheet .gh-sheet-grip { visibility: hidden; height: 2px; }
+.gd-wide .gh-toast { left: calc(50% - 220px); right: calc(50% - 220px); }
+/* a menu opened with the mouse (right-click, a hover tool's "more"): a context menu at the pointer (ui.js gdPop) */
+.gd-wide .gh-overlay-layer > .gh-sheet[data-gd-pop="1"] {
+  left: var(--gd-pop-x, 50%); top: var(--gd-pop-y, 20%); right: auto; bottom: auto; width: 380px; max-height: calc(100% - 24px);
+  border-radius: 14px; transform: scale(0.97); opacity: 0; transform-origin: top left;
+  transition: transform 0.14s ease, opacity 0.14s ease; box-shadow: 0 16px 50px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.07);
+}
+.gd-wide .gh-overlay-layer > .gh-sheet[data-gd-pop="1"][data-open="1"] { transform: none; opacity: 1; }
+.gd-wide .gh-overlay-layer > .gh-sheet[data-gd-pop="1"] .gh-sheet-grip { display: none; }
+.gd-wide .gh-overlay-layer:has(> .gh-sheet[data-gd-pop="1"][data-open="1"]) > .gh-backdrop[data-open="1"] { background: rgba(3, 8, 13, 0.32); -webkit-backdrop-filter: none; backdrop-filter: none; }
+/* the snap/story viewer: arrows on the halves you can click */
+.gd-wide > .gh-viewer:not([data-gd-kind="photo"]) .gh-viewer-tapzone > [data-z] { cursor: pointer; position: relative; }
+.gd-wide > .gh-viewer:not([data-gd-kind="photo"]) .gh-viewer-tapzone > [data-z]::after {
+  content: ""; position: absolute; top: 50%; width: 34px; height: 34px; margin-top: -17px; border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35) no-repeat center / 18px 18px; opacity: 0; transition: opacity 0.15s ease;
+}
+.gd-wide > .gh-viewer .gh-viewer-tapzone > [data-z="prev"]::after { left: 10px; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M15 18l-6-6 6-6'/></svg>"); }
+.gd-wide > .gh-viewer .gh-viewer-tapzone > [data-z="next"]::after { right: 10px; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M9 6l6 6-6 6'/></svg>"); }
+.gd-wide > .gh-viewer:not([data-gd-kind="photo"]) .gh-viewer-tapzone > [data-z]:hover::after { opacity: 1; }
+/* a message typed with Shift+Enter keeps its line breaks */
+.gd-desktop .gh-bubble { white-space: pre-wrap; }
+.gd-desktop .gh-bubble > :not(.gh-ttlink-text) { white-space: normal; }
+/* desktop menu density: rows sized for a pointer, not a finger */
+.gd-desktop .gh-action-item { cursor: pointer; }
+.gd-desktop .gh-action-item:hover { background: rgba(255, 255, 255, 0.06); }
+.gd-desktop .gh-react-emoji { cursor: pointer; }
+.gd-desktop .gh-react-emoji:hover { background: rgba(255, 255, 255, 0.08); }
+.gd-wide .gh-sheet[data-gd-pop="1"] .gh-action-item { padding: 8px 16px; font-size: 14.5px; gap: 12px; }
+.gd-wide .gh-sheet[data-gd-pop="1"] .gh-action-item svg { width: 18px; height: 18px; }
+.gd-wide .gh-sheet[data-gd-pop="1"] .gh-action-list { padding: 2px 0 6px; }
+.gd-wide .gh-sheet[data-gd-pop="1"] .gh-react-row { padding: 6px 8px 4px; }
+.gd-wide .gh-sheet[data-gd-pop="1"] .gh-react-emoji { width: 36px; height: 36px; font-size: 20px; }
+.gd-wide .gh-sheet[data-gd-pop="1"] .gh-set-row { min-height: 38px; padding: 6px 14px; font-size: 14.5px; }
+
+/* ---------------------------------------------------------------------------------------------------
+   Desktop screens (Ghost desktop for Linux; #198 stage S3, ticket #243). ui.js section "Desktop screens". Like the
+   section above, only ever under .gd-desktop (two-pane parts under .gd-wide).
+--------------------------------------------------------------------------------------------------- */
+.gd-desktop button:focus-visible { outline: 2px solid var(--gh-accent); outline-offset: 1px; }
+.gd-chips, .gd-newchat-hint, .gd-selbar, .gd-drawer, .gd-set-empty { display: none; }
+
+/* a small context menu (right-click on friend rows) */
+.gd-menu-scrim { position: absolute; inset: 0; z-index: 70; }
+.gd-menu {
+  position: absolute; z-index: 71; min-width: 210px; padding: 5px; border-radius: 12px; display: flex; flex-direction: column;
+  background: var(--gh-bg-panel); box-shadow: 0 16px 50px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.07); animation: gd-fade 0.12s ease;
+}
+.gd-menu-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 8px; font-size: 14.5px; color: var(--gh-text); text-align: left; cursor: pointer; }
+.gd-menu-item svg { color: var(--gh-text-secondary); flex: none; }
+.gd-menu-item:hover, .gd-menu-item:focus-visible { background: rgba(255, 255, 255, 0.08); outline: none; }
+.gd-menu-danger, .gd-menu-danger svg { color: var(--gh-danger); }
+
+/* ---- Settings: categories on the left, the picked page on the right ----------------------------------------- */
+.gd-wide > .gh-settings { left: max(56px, calc(50% - 500px)); right: max(56px, calc(50% - 500px)); }
+.gd-wide > .gh-settings[data-gd-nav="1"] > .gh-set-page[data-gd-col="nav"] {
+  right: auto; width: 300px; transform: none !important; filter: none !important; transition: none;
+  box-shadow: none; background: var(--gh-bg-list); border-right: 1px solid rgba(0, 0, 0, 0.35);
+}
+.gd-wide > .gh-settings[data-gd-nav="1"] > .gh-set-page[data-gd-col="page"] { left: 300px; }
+.gd-wide > .gh-settings > .gh-set-page[data-under="1"]:not([data-gd-col="nav"]) { transform: none !important; }
+.gd-wide > .gh-settings[data-gd-nav="1"] > .gh-set-page[data-gd-col="nav"] .gh-set-back,
+.gd-wide > .gh-settings[data-gd-nav="1"] > .gh-set-page[data-gd-level="1"] .gh-set-back { visibility: hidden; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-body { padding: 4px 10px 20px; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-row { min-height: 40px; padding: 6px 12px; font-size: 15px; gap: 10px; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-row:has(.gh-set-icon) + .gh-set-row::before { left: 48px; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-icon { width: 26px; height: 26px; border-radius: 7px; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-value { font-size: 13px; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-group { margin-top: 10px; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-profile { padding: 8px 0 2px; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-profile .gh-avatar { width: 64px !important; height: 64px !important; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-profile-name { font-size: 18px; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-row[data-gd-cur="1"] { background: color-mix(in srgb, var(--gh-accent) 24%, transparent); }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="nav"] .gh-set-mehead[data-gd-cur="1"] { box-shadow: inset 0 0 0 2px var(--gh-accent); border-radius: 14px; }
+.gd-wide > .gh-settings > .gh-set-page[data-gd-col="page"] .gh-set-body { padding-left: 24px; padding-right: 24px; }
+/* the right column before a category is picked */
+.gd-wide > .gh-settings[data-gd-nav="1"][data-gd-depth="1"] > .gd-set-empty {
+  display: flex; position: absolute; top: 0; bottom: 0; right: 0; left: 300px; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 40px; background: var(--gh-bg-app); color: var(--gh-text-secondary); text-align: center;
+}
+.gd-set-empty-sub { font-size: 13.5px; color: var(--gh-text-tertiary); }
+/* the feedback forms: a dialog over Settings */
+.gd-wide > .gh-settings[data-open] > .gh-set-page:is([data-gd-page="feedbackBug"], [data-gd-page="feedbackIdea"])[data-gd-col] { /* (beats the right-column rules above) */
+  inset: auto; top: 26px; bottom: 26px; left: calc(50% - min(290px, 50% - 20px)); width: min(580px, calc(100% - 40px));
+  border-radius: 14px; overflow: hidden; opacity: 0; transform: translateY(14px) scale(0.98); transition: transform 0.18s ease, opacity 0.18s ease;
+  box-shadow: 0 0 0 200vmax rgba(3, 7, 11, 0.55), 0 24px 70px rgba(0, 0, 0, 0.55);
+}
+.gd-wide > .gh-settings[data-open] > .gh-set-page:is([data-gd-page="feedbackBug"], [data-gd-page="feedbackIdea"])[data-gd-col][data-in="1"] { opacity: 1; transform: none; }
+.gd-wide > .gh-settings[data-gd-nav] > .gh-set-page:is([data-gd-page="feedbackBug"], [data-gd-page="feedbackIdea"])[data-gd-level] .gh-set-back { visibility: visible; }
+.gd-wide > .gh-settings > .gh-set-page:is([data-gd-page="feedbackBug"], [data-gd-page="feedbackIdea"])[data-gd-col] .gh-set-body { padding-left: 20px; padding-right: 20px; }
+
+/* ---- profiles: the picture/header beside the details when the column is wide enough --------------------------- */
+.gd-wide > .gh-settings > .gh-set-page { container: gdpage / inline-size; }
+@container gdpage (min-width: 600px) {
+  .gd-wide > .gh-settings > .gh-set-page[data-gd-col]:is([data-gd-page="friend"], [data-gd-page="gnProfile"], [data-gd-page="gnPreview"]) > .gh-set-body { position: relative; padding-left: 300px; }
+  .gd-wide > .gh-settings > .gh-set-page[data-gd-col]:is([data-gd-page="friend"], [data-gd-page="gnProfile"], [data-gd-page="gnPreview"]) > .gh-set-body > :is(.gh-set-profile, .gh-gn-prof):first-child {
+    position: absolute; left: 24px; top: 16px; width: 252px; margin: 0;
+  }
+  .gd-wide > .gh-settings > .gh-set-page[data-gd-col]:is([data-gd-page="friend"], [data-gd-page="gnProfile"], [data-gd-page="gnPreview"]) > .gh-set-body > :nth-child(2) { margin-top: 8px; }
+  .gd-wide > .gh-settings > .gh-set-page[data-gd-col][data-gd-page="friend"] > .gh-set-body > .gh-set-profile:first-child { padding: 20px 12px 18px; border-radius: 16px; background: var(--gh-bg-list); }
+}
+/* friend rows: hover tools (Chat, Profile, more) like the chat list's */
+.gd-desktop .gh-friend-row:hover { background: rgba(255, 255, 255, 0.045); }
+.gd-friend-tools { right: 40px; }
+
+/* ---- new chat / group: a dialog driven from the keyboard ----------------------------------------------------- */
+.gd-wide .gh-overlay-layer > .gh-sheet.gd-newchat { width: min(500px, calc(100% - 48px)); height: min(660px, calc(100% - 64px)); max-height: none !important; }
+.gd-desktop .gd-newchat .gh-friend-row { cursor: pointer; border-radius: 10px; margin: 0 8px; padding: 7px 10px; }
+.gd-desktop .gd-newchat .gh-friend-row[data-gd-cursor="1"] { background: color-mix(in srgb, var(--gh-accent) 20%, transparent); }
+.gd-desktop .gd-chips[data-has="1"] { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 8px; }
+.gd-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 220px; padding: 3px 3px 3px 3px; border-radius: 999px;
+  background: color-mix(in srgb, var(--gh-accent) 24%, transparent); font-size: 13.5px; font-weight: 500;
+}
+.gd-chip > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gd-chip .gh-avatar { width: 20px !important; height: 20px !important; flex: none; }
+.gd-chip-x { width: 20px; height: 20px; min-width: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--gh-text-secondary); }
+.gd-chip-x:hover { background: rgba(255, 255, 255, 0.14); color: var(--gh-text); }
+.gd-wide .gd-newchat-hint { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 5px; padding: 8px 16px 0; font-size: 12px; color: var(--gh-text-tertiary); }
+.gd-newchat-hint kbd { height: 20px; min-width: 20px; font-size: 11px; padding: 0 5px; }
+.gd-newchat-hint span { margin-right: 8px; }
+.gd-wide .gd-newchat .gh-newchat-create { margin-bottom: 14px; }
+
+/* ---- other sheets as dialogs / popovers --------------------------------------------------------------------- */
+.gd-wide .gh-overlay-layer > .gh-sheet.gh-photo-sheet { width: min(820px, calc(100% - 64px)); height: min(680px, calc(100% - 64px)) !important; max-height: none; }
+.gd-wide .gh-overlay-layer > .gh-sheet.gh-gif-sheet { height: min(600px, calc(100% - 64px)); max-height: none; }
+.gd-wide .gh-overlay-layer > .gh-sheet.gh-chat-sheet { width: min(480px, calc(100% - 48px)); }
+/* the sticker sheet: a popover over the composer's sticker button */
+.gd-wide .gh-overlay-layer > .gh-sheet[data-gd-anchor="1"] {
+  left: var(--gd-anc-x, 24px); bottom: var(--gd-anc-b, 90px); top: auto; width: 440px; height: min(480px, calc(100% - 140px)); max-height: none;
+  transform: translateY(10px) scale(0.98); transform-origin: bottom left;
+}
+.gd-wide .gh-overlay-layer > .gh-sheet[data-gd-anchor="1"][data-open="1"] { transform: none; }
+.gd-wide .gh-overlay-layer:has(> .gh-sheet[data-gd-anchor="1"][data-open="1"]) > .gh-backdrop[data-open="1"] { background: rgba(3, 8, 13, 0.32); -webkit-backdrop-filter: none; backdrop-filter: none; }
+/* What's New and the small confirm/prompt dialogs at desktop size */
+.gd-desktop .gh-wn-box { width: min(460px, 90%); padding: 28px 26px 18px; border-radius: 18px; }
+.gd-desktop .gh-wn-title { font-size: 24px; }
+.gd-desktop .gh-wn-text { font-size: 15px; }
+.gd-desktop .gh-wn-list { gap: 12px; margin-bottom: 18px; }
+.gd-wide .gh-confirm-box:not(.gh-wn-box) { width: min(380px, 84%); padding: 22px 20px 14px; }
+.gd-desktop .gh-confirm-box { box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.07); }
+.gd-desktop .gh-confirm-row button { cursor: pointer; }
+.gd-desktop .gh-confirm-row .gh-confirm-ok:hover { filter: brightness(1.1); }
+
+/* ---- messages: selection ------------------------------------------------------------------------------------ */
+.gd-desktop[data-gd-sel="1"] .gd-selbar {
+  display: flex; position: absolute; top: 0; left: 0; right: 0; z-index: 25; min-height: 52px; align-items: center; gap: 10px; padding: 0 14px;
+  background: var(--gh-bg-header); border-bottom: 0.5px solid var(--gh-divider); animation: gd-fade 0.12s ease;
+}
+.gd-selbar-x { width: 34px; height: 34px; min-width: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--gh-text-secondary); }
+.gd-selbar-x:hover { background: rgba(255, 255, 255, 0.08); color: var(--gh-text); }
+.gd-selbar-count { font-size: 16px; font-weight: 650; margin-right: auto; white-space: nowrap; }
+.gd-selbar-acts { display: flex; gap: 2px; min-width: 0; overflow: hidden; }
+.gd-selbar-btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border-radius: 9px; font-size: 14px; font-weight: 500; color: var(--gh-accent); white-space: nowrap; cursor: pointer; }
+.gd-selbar-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+.gd-selbar-btn:disabled { opacity: 0.35; cursor: default; }
+.gd-selbar-btn.gd-danger { color: var(--gh-danger); }
+.gd-desktop .gh-msg-wrap[data-gd-picked="1"] { background: color-mix(in srgb, var(--gh-accent) 22%, transparent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--gh-accent) 22%, transparent); border-radius: 14px; }
+.gd-desktop[data-gd-sel="1"] .gh-msg-wrap[data-message-id] { cursor: pointer; }
+.gd-desktop:not(.gd-wide) .gd-selbar-btn span, .gd-wide[data-gd-drawer="1"] .gd-selbar-btn span { display: none; } /* (a narrow chat: icons only) */
+
+/* ---- the chat's drawer: search in this chat, pinned messages ----------------------------------------------- */
+.gd-wide[data-gd-drawer="1"][data-gd-chat="1"] .gd-drawer {
+  display: flex; flex-direction: column; position: absolute; top: 0; bottom: 0; right: 0; width: 340px; z-index: 1;
+  background: var(--gh-bg-list); border-left: 1px solid rgba(0, 0, 0, 0.35); animation: gd-fade 0.12s ease;
+}
+.gd-wide[data-gd-drawer="1"][data-gd-chat="1"] .gh-stack > .gh-screen[data-screen="conv"] { right: 340px; }
+.gd-drawer-head { flex: none; display: flex; align-items: center; height: 58px; padding: 0 8px 0 16px; border-bottom: 0.5px solid var(--gh-divider); }
+.gd-drawer-title { flex: 1; min-width: 0; font-size: 16.5px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gd-drawer-x { width: 34px; height: 34px; min-width: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--gh-text-secondary); }
+.gd-drawer-x:hover { background: rgba(255, 255, 255, 0.08); color: var(--gh-text); }
+.gd-drawer-top { display: none; flex: none; padding: 10px 12px 2px; }
+.gd-drawer[data-mode="search"] .gd-drawer-top { display: block; }
+.gd-drawer-field { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; border-radius: 10px; background: var(--gh-bg-input); color: var(--gh-text-tertiary); }
+.gd-drawer-field input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: var(--gh-text); font-size: 15px; }
+.gd-drawer-count { min-height: 15px; padding: 6px 4px 2px; font-size: 12.5px; color: var(--gh-text-tertiary); }
+.gd-drawer-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 6px 10px; }
+.gd-dr-row { position: relative; display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 9px 10px; border-radius: 10px; text-align: left; color: var(--gh-text); cursor: pointer; }
+.gd-dr-row:hover { background: rgba(255, 255, 255, 0.05); }
+.gd-dr-row[data-cur="1"] { background: color-mix(in srgb, var(--gh-accent) 20%, transparent); }
+.gd-dr-row .gh-avatar { width: 30px !important; height: 30px !important; flex: none; }
+.gd-dr-col { flex: 1; min-width: 0; }
+.gd-dr-top { display: flex; align-items: baseline; gap: 8px; }
+.gd-dr-who { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gd-dr-when { flex: none; font-size: 12px; color: var(--gh-text-tertiary); }
+.gd-dr-text { margin-top: 2px; font-size: 14px; line-height: 1.35; color: var(--gh-text-secondary); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+.gd-dr-text mark { background: color-mix(in srgb, var(--gh-accent) 45%, transparent); color: var(--gh-text); border-radius: 3px; padding: 0 1px; }
+.gd-dr-pin { padding-right: 36px; }
+.gd-dr-x { position: absolute; right: 8px; top: 9px; width: 24px; height: 24px; border-radius: 50%; display: none; align-items: center; justify-content: center; color: var(--gh-text-tertiary); }
+.gd-dr-row:hover .gd-dr-x { display: flex; }
+.gd-dr-x:hover { background: rgba(255, 255, 255, 0.1); color: var(--gh-text); }
+.gd-dr-empty { padding: 30px 18px; text-align: center; font-size: 14px; line-height: 1.4; color: var(--gh-text-tertiary); }
+.gd-drawer-foot { flex: none; padding: 0 12px 12px; }
+.gd-drawer-foot:empty { display: none; }
+.gd-dr-more { width: 100%; height: 36px; border-radius: 10px; background: var(--gh-bg-panel-2); color: var(--gh-accent); font-size: 14px; font-weight: 600; cursor: pointer; }
+.gd-dr-more:disabled { opacity: 0.5; cursor: default; }

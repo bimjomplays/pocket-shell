@@ -241,6 +241,245 @@ const GhostNetCore = (() => {
     return b64(await subtle.sign("HMAC", k, te.encode(purpose + "|" + id)));
   }
 
+  // ---- Link desktop (#250, format v2 #255): this Ghost's identity to Ghost desktop, once ---------------------
+  // Ghost desktop must be the SAME Ghost as the phone (its own keys would show friends "new keys"), so the phone hands it
+  // the key file and the network state once. The format, with every KDF string, is desktop/LINK_FORMAT.md; in short:
+  //   - the PC shows a link code: 24 characters of CODE_ALPHA (120 random bits), shown as 6 groups of 4; the owner types
+  //     it on the phone. HKDF-SHA256 over the code gives the ntfy topic ("gh-lk-…", derived with v1's strings in every
+  //     version, so a phone and a PC of different versions meet there and can tell the owner to update), the beacon key
+  //     and a 32-byte secret (this version's strings, "ghost-link-v2"), each with its own info string.
+  //   - the PC first posts a BEACON to that topic: AES-GCM with the beacon key of {v, e: its one-time ECDH public key, at}.
+  //     The phone sends nothing unless it finds exactly one beacon, under 5 minutes old by ntfy.sh's clock, and no file
+  //     there yet (a typo finds no beacon; a used code has a file; a beacon of another version = "update Ghost").
+  //   - the FILE: "GLK2" || the phone's one-time ECDH public key (65) || iv (12) || AES-GCM(key, iv, AAD
+  //     "ghost-link-v2 file|" + topic) of the JSON payload; key = HKDF(ECDH(phone one-time, PC one-time) || secret,
+  //     salt = phone public || PC public, "ghost-link-v2 file"). So the file needs the code AND the PC's one-time private
+  //     key, which never leaves the PC and is gone after 5 minutes: a code seen later (a photo of the screen) opens nothing.
+  //   - someone ELSE with the code in time could seal their own identity for the PC. So the phone looks again right before
+  //     it sends and, if anything else answered, sends nothing and posts an ALARM (beacon key, "GLA2.") that makes the PC
+  //     refuse; the PC keeps reading the topic until it is done and refuses two different identities; and the PC imports
+  //     only after the owner OKs the Ghost ID it shows against the one the phone shows: the WHOLE Ghost ID (26
+  //     characters, 130 bits, link.showId) since v2. v1 showed 8 characters (40 bits): an identity whose Ghost ID starts
+  //     the same can be ground out ahead of time (a Ghost ID is no secret), 130 bits can't.
+  // Nothing of it (code, topic, keys, beacon, file) is ever written to the trail, a report or the console.
+  const LINK_TTL = 5 * 60e3;               // a code works for 5 minutes after the PC posted its beacon (ntfy.sh's clock)
+  const LINK_SEND_BY = LINK_TTL - 30e3;    // the phone doesn't start sending this close to the end (the upload takes time)
+  const LINK_LEN = 24;                     // code characters: 24 x 5 bits = 120 bits
+  const LINK_TOPIC_RE = /^gh-lk-[a-z2-9]{26}$/;
+  const LINK_V = 2;                        // the format version (v1, #250, never released, compared 8 Ghost ID characters)
+  const LINK_BEACON = "GLB2.", LINK_ALARM = "GLA2.", LINK_MAGIC = "GLK2", LINK_FILE_NAME = "link.bin";
+  const LINK_BEACON_ANY = /^GLB(\d{1,3})\./, LINK_MAGIC_ANY = /^GLK(\d)$/; // (any version's, to say "update Ghost")
+  const LINK_BEACON_OLD = "GLB1.";         // what a pre-v2 Ghost desktop's session posts (link.start without wholeId)
+  const GHOST_ID_RE = /^[a-km-np-z2-9]{26}$/; // (B32: no l, no o)
+  const LINK_FILE_MAX = NTFY_FILE_MAX;     // one ntfy.sh file
+  const LINK_KEEP_PICS = 1400 * 1024;      // base64 characters of friends' pictures in the file at most (yours always go)
+  const linkErr = (kind, text) => Object.assign(new Error(text), { link: kind });
+  function linkNetErr(e, sending) {
+    const m = String((e && e.message) || "");
+    if (/busy|429/.test(m)) return linkErr("busy", "ntfy.sh (the free server Ghost uses) is busy for your internet connection. Wait a minute and try again: the code lasts 5 minutes.");
+    if (/413/.test(m)) return linkErr("big", "Your Ghost data is too big to send in one go (over 2 MB).");
+    return linkErr("offline", "Couldn't reach ntfy.sh (no connection?)." + (sending ? " If your PC doesn't say Linked, start Link with Phone on the PC again for a new code." : ""));
+  }
+  function newLinkCode() {
+    const r = rand(LINK_LEN); let s = "";
+    for (let i = 0; i < LINK_LEN; i++) { s += CODE_ALPHA[r[i] & 31]; if (i % 4 === 3 && i < LINK_LEN - 1) s += "-"; }
+    return s;
+  }
+  // what the owner typed -> the 24 code characters (upper case, no separators), or null. Case, spaces and dashes don't count.
+  function linkCodeOf(text) {
+    const s = String(text == null ? "" : text).toUpperCase().replace(/[\s\-_.·]/g, "");
+    return s.length === LINK_LEN && /^[2-9A-HJ-NP-Z]+$/.test(s) ? s : null;
+  }
+  // the code -> {topic, beaconKey, secret}. The topic comes from v1's strings in EVERY version (frozen): a phone and a PC
+  // of different versions meet on it and see each other's beacon / file prefix, so each can say "update Ghost" instead
+  // of "no PC is waiting". Everything that seals or opens comes from this version's strings.
+  async function linkSecrets(code) {
+    const kdf = (v) => subtle.importKey("raw", te.encode("ghost-link-" + v + "|" + code), "HKDF", false, ["deriveBits", "deriveKey"]);
+    const p = (v, info) => ({ name: "HKDF", hash: "SHA-256", salt: te.encode("ghost-link-" + v), info: te.encode("ghost-link-" + v + " " + info) });
+    const meet = await kdf("v1"), base = await kdf("v2");
+    const topic = "gh-lk-" + b32(u8(await subtle.deriveBits(p("v1", "topic"), meet, 160))).slice(0, 26);
+    const beaconKey = await subtle.deriveKey(p("v2", "beacon"), base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    const secret = u8(await subtle.deriveBits(p("v2", "secret"), base, 256));
+    return { topic, beaconKey, secret };
+  }
+  // the Ghost ID as BOTH screens show it for the owner's check: all 26 characters, upper case, groups of 4
+  // ("ABCD EFGH JKMN PQRS TUVW XYZ2 34"); "" for anything that isn't a Ghost ID
+  function linkShowId(id) {
+    const s = String(id == null ? "" : id);
+    return GHOST_ID_RE.test(s) ? s.toUpperCase().match(/.{1,4}/g).join(" ") : "";
+  }
+  // a beacon (text) / file (bytes) of ANY version -> its version number, or 0 when it isn't one
+  function linkBeaconVersion(text) { const m = typeof text === "string" ? LINK_BEACON_ANY.exec(text) : null; return m ? Number(m[1]) : 0; }
+  function linkFileVersion(bytes) {
+    try { const b = u8(bytes); const m = b.length >= 4 ? LINK_MAGIC_ANY.exec(td.decode(b.subarray(0, 4))) : null; return m ? Number(m[1]) : 0; } catch (e) { return 0; }
+  }
+  const linkBeaconAad = (topic) => te.encode("ghost-link-v2 beacon|" + topic);
+  async function sealLinkBeacon(sec, e, at) {
+    const iv = rand(12);
+    const c = u8(await subtle.encrypt({ name: "AES-GCM", iv, additionalData: linkBeaconAad(sec.topic) }, sec.beaconKey, te.encode(JSON.stringify({ v: LINK_V, e: b64(e), at }))));
+    return LINK_BEACON + b64(concat(iv, c));
+  }
+  // a beacon from the PC -> {e: its one-time public key (65 bytes), at}, or null (not one, another code's, junk)
+  async function openLinkBeacon(sec, text) {
+    if (typeof text !== "string" || !text.startsWith(LINK_BEACON) || text.length > 400) return null;
+    try {
+      const raw = unb64(text.slice(LINK_BEACON.length));
+      if (raw.length < 12 + 16) return null;
+      const plain = await subtle.decrypt({ name: "AES-GCM", iv: raw.subarray(0, 12), additionalData: linkBeaconAad(sec.topic) }, sec.beaconKey, raw.subarray(12));
+      const b = JSON.parse(td.decode(plain));
+      const e = b && b.v === LINK_V && typeof b.e === "string" ? unb64(b.e) : null;
+      if (!e || e.length !== 65 || e[0] !== 4 || typeof b.at !== "number") return null;
+      await subtle.importKey("raw", e, EC, true, []); // (a point on the curve)
+      return { e, at: b.at };
+    } catch (e) { return null; }
+  }
+  // the phone's alarm (something else answered this code): the PC that reads one refuses, whatever it got
+  const linkAlarmAad = (topic) => te.encode("ghost-link-v2 alarm|" + topic);
+  async function sealLinkAlarm(sec, at, why) {
+    const iv = rand(12);
+    const c = u8(await subtle.encrypt({ name: "AES-GCM", iv, additionalData: linkAlarmAad(sec.topic) }, sec.beaconKey, te.encode(JSON.stringify({ v: LINK_V, at, why: String(why || "") }))));
+    return LINK_ALARM + b64(concat(iv, c));
+  }
+  // an alarm -> {at, why}, or null
+  async function openLinkAlarm(sec, text) {
+    if (typeof text !== "string" || !text.startsWith(LINK_ALARM) || text.length > 400 || !sec.beaconKey) return null;
+    try {
+      const raw = unb64(text.slice(LINK_ALARM.length));
+      if (raw.length < 12 + 16) return null;
+      const a = JSON.parse(td.decode(await subtle.decrypt({ name: "AES-GCM", iv: raw.subarray(0, 12), additionalData: linkAlarmAad(sec.topic) }, sec.beaconKey, raw.subarray(12))));
+      return a && a.v === LINK_V && typeof a.at === "number" ? { at: a.at, why: String(a.why || "") } : null;
+    } catch (e) { return null; }
+  }
+  async function linkFileKey(sec, shared, ePhone, ePc) {
+    const base = await subtle.importKey("raw", concat(shared, sec.secret), "HKDF", false, ["deriveKey"]);
+    return subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: concat(ePhone, ePc), info: te.encode("ghost-link-v2 file") }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  }
+  const linkFileAad = (topic) => te.encode("ghost-link-v2 file|" + topic);
+  // the phone: the payload sealed for the PC whose beacon this is
+  async function sealLinkFile(sec, ePc, payload) {
+    const eph = await subtle.generateKey(EC, false, ["deriveBits"]);
+    const ePhone = await rawOf(eph.publicKey);
+    const shared = u8(await subtle.deriveBits({ name: "ECDH", public: await subtle.importKey("raw", ePc, EC, true, []) }, eph.privateKey, 256));
+    const key = await linkFileKey(sec, shared, ePhone, ePc), iv = rand(12);
+    const c = u8(await subtle.encrypt({ name: "AES-GCM", iv, additionalData: linkFileAad(sec.topic) }, key, te.encode(JSON.stringify(payload))));
+    return concat(LINK_MAGIC, ePhone, iv, c);
+  }
+  // the PC: a file -> the checked payload, or null (wrong code, not for this PC's key, damaged, not a Ghost identity).
+  // Throws nothing, so nothing of it can end up in a log by way of an error message.
+  async function openLinkFile(sec, pcPriv, ePc, bytes) {
+    try {
+      const b = u8(bytes);
+      if (b.length < 4 + 65 + 12 + 16 || b.length > LINK_FILE_MAX || td.decode(b.subarray(0, 4)) !== LINK_MAGIC) return null;
+      const ePhone = b.slice(4, 69), iv = b.slice(69, 81);
+      const shared = u8(await subtle.deriveBits({ name: "ECDH", public: await subtle.importKey("raw", ePhone, EC, true, []) }, pcPriv, 256));
+      const key = await linkFileKey(sec, shared, ePhone, ePc);
+      const p = JSON.parse(td.decode(await subtle.decrypt({ name: "AES-GCM", iv, additionalData: linkFileAad(sec.topic) }, key, b.subarray(81))));
+      if (!p || p.v !== LINK_V || p.kind !== "ghost-link" || typeof p.keys !== "string" || typeof p.id !== "string" || !GHOST_ID_RE.test(p.id) || !p.net || p.net.v !== 1) return null;
+      const ident = await loadIdentity(p.keys); // a real key file, and the Ghost ID it claims
+      if (ident.id !== p.id) return null; // (the WHOLE Ghost ID: it is what the owner compares)
+      if (!(await linkKeysMatch(ident))) return null; // (the owner's PUBLIC keys with someone else's private ones)
+      return p;
+    } catch (e) { return null; }
+  }
+  // A Ghost ID is made of the PUBLIC keys only, which every friend has: a key file with the owner's public keys and
+  // someone else's private ones would show the owner's Ghost ID. So each private key must really be its public key's,
+  // checked by using it (whatever the engine's JWK import checks): an ECDSA signature the public key verifies, and ECDH
+  // with a fresh key that agrees both ways.
+  async function linkKeysMatch(ident) {
+    try {
+      const msg = rand(32);
+      if (!(await subtle.verify(SIG, await importDsaPub(ident.s), await subtle.sign(SIG, ident.sPriv, msg), msg))) return false;
+      const t = await subtle.generateKey(EC, false, ["deriveBits"]);
+      const a = u8(await subtle.deriveBits({ name: "ECDH", public: await importEcdhPub(ident.x) }, t.privateKey, 256));
+      const b = u8(await subtle.deriveBits({ name: "ECDH", public: t.publicKey }, ident.xPriv, 256));
+      return a.length === 32 && b.length === 32 && a.every((v, i) => v === b[i]);
+    } catch (e) { return false; }
+  }
+  // Ghost desktop's half (desktop/LINK_FORMAT.md "Steps"; the phone never runs this). One session per code shown:
+  //   const s = await GhostNetCore.link.start(Date.now(), { wholeId: true });
+  //   (wholeId: the caller promises to show the WHOLE Ghost ID, showId(link.id), and to import only on a whole match.
+  //   Without it, the caller is a Ghost desktop from before v2 that shows 8 characters: its session posts only v1's
+  //   beacon prefix with nothing in it, so a v2 phone says "update Ghost desktop" and sends nothing, and it never links.)
+  //   POST s.beacon to https://ntfy.sh/<s.topic> (header Firebase: no), then s.posted(<ntfy's JSON answer>), then show
+  //   s.code. Every few seconds: GET https://ntfy.sh/<s.topic>/json?poll=1&since=<s.since()> and hand the messages (and
+  //   the answer's Date header, ntfy.sh's clock) to s.take(msgs, date, download) -> {state: "waiting" | "linked" |
+  //   "expired" | "refused", link?, why?}; download(url) -> the file's bytes (only https://ntfy.sh/file/… is asked for).
+  //   "linked": link = the payload; show its WHOLE Ghost ID (GhostNetCore.link.showId(link.id), the same 7 groups the
+  //   phone shows) and ask the owner to compare it with the phone's, KEEP polling while asking (a later file or the
+  //   phone's alarm turns it "refused"), and import only if it is still "linked" with that Ghost ID when the owner says
+  //   OK. s.forget() when imported or cancelled. "refused" says why: "two" (two identities), "phone" (the phone's
+  //   alarm), "old" / "new" (a file of an older / newer format: the phone's Ghost is older / newer than this PC's).
+  async function linkStart(nowMs, opts) {
+    const whole = !!(opts && opts.wholeId === true);
+    const code = newLinkCode();
+    const sec = await linkSecrets(linkCodeOf(code));
+    const at = Number(nowMs) || Date.now();
+    let priv = null, ePc = null, beacon;
+    if (whole) {
+      const eph = await subtle.generateKey(EC, false, ["deriveBits"]); // the private half can't be exported, even by the PC
+      ePc = await rawOf(eph.publicKey); priv = eph.privateKey;
+      beacon = await sealLinkBeacon(sec, ePc, at);
+    } else beacon = LINK_BEACON_OLD + b64(rand(60)); // (an 8-character checker: no key, nothing to seal a file for)
+    let postedAt = 0, postedId = "", done = null, got = null;
+    const seen = new Set(); // ntfy message ids already looked at (a file is downloaded once)
+    const s = {
+      code, topic: sec.topic, beacon, at, ttl: LINK_TTL, v: whole ? LINK_V : 1,
+      // ntfy.sh's answer to the beacon POST ({id, time}): the 5 minutes count from its time
+      posted(res) {
+        const t = Number(res && res.time) || 0;
+        if (!t) throw new Error("ntfy.sh's answer has no time");
+        postedAt = t * 1000; postedId = String((res && res.id) || "");
+      },
+      since() { return postedId || "all"; },
+      // past the 5 minutes (ntfy.sh's clock; the PC's own clock from `at` if the beacon never got posted)
+      expired(serverNow) {
+        if (done || !sec.beaconKey) return true;
+        const t = Number(serverNow) || Date.now();
+        return postedAt > 0 ? t > postedAt + LINK_TTL : t > at + LINK_TTL;
+      },
+      async take(msgs, date, download) {
+        if (done) return done;
+        if (!sec.beaconKey) return (done = { state: "expired" });
+        const serverNow = Date.parse(String(date || "")) || Date.now();
+        for (const m of msgs || []) {
+          if (!m) continue;
+          const mid = String(m.id || "");
+          if (mid && seen.has(mid)) continue;
+          const al = await openLinkAlarm(sec, m.message);
+          if (al) { if (al.at === at) { s.forget(); return (done = { state: "refused", why: "phone" }); } continue; }
+          const a = m.attachment;
+          if (!priv || !a || typeof a.url !== "string" || !a.url.startsWith(NTFY + "/file/")) continue;
+          const t = (Number(m.time) || 0) * 1000;
+          if (!postedAt || t < postedAt || t > postedAt + LINK_TTL) continue; // (a file sent after the 5 minutes is ignored)
+          if (Number(a.size) > LINK_FILE_MAX) continue;
+          let bytes = null; try { bytes = await download(a.url); } catch (e) {}
+          if (!bytes) continue; // (not marked seen: the next poll tries again)
+          if (mid) seen.add(mid);
+          // another format's file: that phone can't be checked the way this PC asks the owner to (v1 sent 8 characters'
+          // worth of check): nothing is imported, and the PC tells the owner which side to update
+          const fv = linkFileVersion(bytes);
+          if (fv && fv !== LINK_V) { const why = got ? "two" : fv < LINK_V ? "old" : "new"; s.forget(); return (done = { state: "refused", why }); }
+          const p = await openLinkFile(sec, priv, ePc, bytes);
+          if (!p || p.at !== at) continue;
+          // the phone sends once: a second identity means someone else had the code too
+          if (got && p.id !== got.id) { s.forget(); return (done = { state: "refused", why: "two" }); }
+          got = got || p;
+        }
+        if (s.expired(serverNow)) {
+          if (!got) { s.forget(); return (done = { state: "expired" }); }
+          priv = null; // (no more files after the 5 minutes; an alarm still counts until forget)
+        }
+        return got ? { state: "linked", link: got } : { state: "waiting" };
+      },
+      forget() {
+        priv = null; got = null; sec.secret.fill(0); sec.beaconKey = null;
+        delete s.code; delete s.topic; delete s.beacon;
+        if (!done) done = { state: "expired" };
+      },
+    };
+    return s;
+  }
+
   // ---- one long-lived ntfy.sh stream (1.19.0) ------------------------------------------------------------
   // While Ghost is in front it holds ONE subscription to all of its topics (the private and public inbox, the relay's
   // control topic, the answer topics of open bug reports) instead of reading each one every round:
@@ -525,6 +764,8 @@ const GhostNetCore = (() => {
     const now = () => (deps.now ? deps.now() : Date.now());
     const log = (t) => { try { deps.log && deps.log(t); } catch (e) {} };
     let st = null, ident = null, identP = null, busy = null, leaving = false, slowUntil = 0, slowWait = 0, pubAt = 0;
+    const linkTickets = new WeakMap(); // linkCheck's tickets -> their secrets (never on the ticket itself)
+    let linkLive = null, linkBusy = false; // the one ticket that can still send; a check or send running
     const blank = () => ({ v: 1, on: true, friends: {}, invites: {}, joined: {}, since: {}, seen: [], share: "all", shareWith: [],
       profile: { v: 0, name: "", bio: "", accent: "", pic: false, banner: false }, uploads: {},
       status: { v: 0, text: "", until: 0 }, gone: {}, pi: "", items: {}, rx: { v: 0, inbox: null } });
@@ -553,6 +794,117 @@ const GhostNetCore = (() => {
         return ident;
       })().finally(() => { identP = null; });
       return identP;
+    }
+
+    // ---- Link desktop (#250): the phone's half (network.js "Link desktop" above; api.linkCheck / linkSend) ----
+    const LINK_USED = "That code was answered already, and not by this phone just now. Ghost told your PC to refuse it: if your PC asks you to check a Ghost ID, cancel there. Start Link with Phone again for a new code.";
+    const LINK_OLD_PC = "Your PC has an older Ghost desktop that can't check your whole Ghost ID, so Ghost sent nothing. Update Ghost desktop on your PC, then start Link with Phone again for a new code.";
+    const LINK_NEW_PC = "Your PC has a newer Ghost desktop than this Ghost, so Ghost sent nothing. Update Ghost on this phone, then start Link with Phone on your PC again for a new code.";
+    // the code's topic as ntfy.sh has it now: {beacons, files, older, newer, serverNow}; older / newer = beacons of
+    // another format version (the topic is the same in every version). No Date header = the age can't be told: refused.
+    async function linkLook(sec, sending) {
+      const meta = {};
+      let msgs;
+      try { msgs = await poll(sec.topic, "all", meta); } catch (e) { throw linkNetErr(e, sending); }
+      const serverNow = Date.parse(String(meta.date || ""));
+      if (!serverNow) throw linkErr("time", "Couldn't check how old the code is with ntfy.sh. Try again in a moment.");
+      const beacons = [];
+      let files = 0, older = 0, newer = 0;
+      for (const m of msgs) {
+        if (m.attachment) { files++; continue; }
+        const v = linkBeaconVersion(m.message);
+        if (v && v !== LINK_V) { if (v < LINK_V) older++; else newer++; continue; }
+        const b = await openLinkBeacon(sec, m.message);
+        if (b) beacons.push(Object.assign(b, { time: (Number(m.time) || 0) * 1000 }));
+      }
+      return { beacons, files, older, newer, serverNow };
+    }
+    const linkLookLog = (l) => log("link check: " + l.beacons.length + " pc, " + l.files + " file" + (l.older + l.newer ? ", " + l.older + " older pc, " + l.newer + " newer pc" : ""));
+    // tell the PC that answered this code to refuse what it got (best effort: the PC's ID check is the last line)
+    async function linkAlarm(sec, at, why) {
+      try { await post(sec.topic, await sealLinkAlarm(sec, at, why)); log("link alarm: " + why); } catch (e) { log("link alarm: not sent"); }
+    }
+    async function linkCheckNow(text) {
+      await state();
+      if (!st.on) throw linkErr("off", "Turn on Ghost Network first (Settings > Privacy).");
+      const code = linkCodeOf(text);
+      if (!code) throw linkErr("code", /[01OI]/i.test(String(text || "")) ? "Link codes have no 0, O, 1 or I. Check the code on your PC." : "A link code is 24 letters and numbers (6 groups of 4). Check the code on your PC.");
+      if (leaving) throw linkErr("off", "Ghost Network is busy. Try again in a moment.");
+      const me = await identity(true);
+      const sec = await linkSecrets(code);
+      try {
+        const look = await linkLook(sec), { beacons, files, older, newer, serverNow } = look;
+        linkLookLog(look);
+        if (!beacons.length) {
+          // (a PC of another version waits on this code: it can't take this phone's identity, say which side to update)
+          if (older) throw linkErr("oldpc", LINK_OLD_PC);
+          if (newer) throw linkErr("newpc", LINK_NEW_PC);
+          throw linkErr("nopc", "No PC is waiting for that code. Check it against the code Ghost desktop shows right now.");
+        }
+        if (files) { for (const b of beacons) await linkAlarm(sec, b.at, "used"); throw linkErr("used", LINK_USED); }
+        if (beacons.length + older + newer > 1) throw linkErr("twice", "Something else answered that code too, so Ghost won't use it. On your PC, start Link with Phone again for a new code.");
+        const age = Math.max(0, serverNow - beacons[0].time);
+        if (age > LINK_SEND_BY) throw linkErr("expired", "That code has expired (codes last 5 minutes). On your PC, start Link with Phone again for a new code.");
+        // the WHOLE Ghost ID, as the PC shows it (v2): what the owner compares, and what linkSend must still be
+        const ghostId = linkShowId(me && me.id);
+        if (!ghostId) throw linkErr("keys", "Couldn't read your Ghost keys. Try again in a moment.");
+        if (linkLive) api.linkDrop(linkLive); // (one live check at a time)
+        const ticket = Object.freeze({ expiresIn: LINK_TTL - age, ghostId });
+        linkTickets.set(ticket, { sec, beacon: beacons[0], age, checkedAt: now(), id: me.id });
+        linkLive = ticket;
+        return ticket;
+      } catch (e) { sec.secret.fill(0); throw e; }
+    }
+    async function linkSendNow(t, extra) {
+      await state();
+      if (!st.on || leaving) throw linkErr("off", "Turn on Ghost Network first (Settings > Privacy).");
+      // look again (the confirm may have sat a while): still exactly this one beacon, nothing answered it, still in time
+      const look = await linkLook(t.sec, true);
+      const answers = look.beacons.length + look.older + look.newer;
+      if (look.files || answers !== 1 || !look.beacons.some((b) => b.at === t.beacon.at)) {
+        linkLookLog(look);
+        for (const b of look.beacons) await linkAlarm(t.sec, b.at, "raced");
+        if (look.files || answers > 1) throw linkErr("raced", "Something else answered that code while you were confirming, so Ghost sent nothing and told your PC to refuse it. On your PC, start Link with Phone again for a new code.");
+        throw linkErr("nopc", "Your PC stopped waiting for that code. On your PC, start Link with Phone again for a new code.");
+      }
+      const age = Math.max(look.serverNow - t.beacon.time, t.age + (now() - t.checkedAt));
+      if (age > LINK_SEND_BY) throw linkErr("expired", "That code has expired (codes last 5 minutes). On your PC, start Link with Phone again for a new code.");
+      const me = await identity(false);
+      let keys = null; try { keys = await deps.keysGet(); } catch (e) {}
+      if (!me || typeof keys !== "string" || !keys) throw linkErr("keys", "Couldn't read your Ghost keys. Try again in a moment.");
+      if ((await loadIdentity(keys)).id !== me.id) throw linkErr("keys", "Couldn't read your Ghost keys. Try again in a moment.");
+      // the identity the owner saw at the confirm, nothing else (Leave + a new Ghost ID in between: start again)
+      if (me.id !== t.id) throw linkErr("keys", "Your Ghost ID changed since you checked the code, so Ghost sent nothing. On your PC, start Link with Phone again for a new code.");
+      const copy = JSON.parse(JSON.stringify(st)); // (one synchronous copy: a consistent state)
+      delete copy.farewell;
+      const x = extra || {};
+      const payload = { v: LINK_V, kind: "ghost-link", at: t.beacon.at, created: now(), id: me.id, keys, net: copy,
+        stream: x.stream && typeof x.stream === "object" ? x.stream : null, snap: String((deps.me() && deps.me().id) || ""),
+        app: x.app && typeof x.app === "object" ? { version: String(x.app.version || ""), platform: String(x.app.platform || "") } : null,
+        pics: {}, missing: [] };
+      // pictures: yours always (the PC sends your profile from now on too: without them friends would lose them),
+      // friends' while they fit; a friend's that doesn't is asked for again by the PC's first sync (haveV 0, no ref)
+      const picB64 = async (k) => { const blob = await Promise.resolve(deps.picGet(k)).catch(() => null); return blob ? { t: /^image\/(jpeg|png|webp)$/.test(blob.type) ? blob.type : "image/jpeg", b: b64(u8(await blob.arrayBuffer())) } : null; };
+      for (const kind of ["pic", "banner"]) { if (!st.profile[kind]) continue; const p = await picB64("me:" + kind); if (p) payload.pics["me:" + kind] = p; }
+      let room = LINK_KEEP_PICS;
+      for (const f of Object.values(copy.friends)) {
+        for (const kind of ["pic", "banner"]) {
+          if (!(f.profile && f.profile[kind])) continue;
+          const p = await picB64(f.id + ":" + kind);
+          if (p && p.b.length <= room) { payload.pics[f.id + ":" + kind] = p; room -= p.b.length; continue; }
+          payload.missing.push(f.id + ":" + kind);
+          f.haveV = 0; if (f.picRefs) delete f.picRefs[kind];
+        }
+      }
+      const file = await sealLinkFile(t.sec, t.beacon.e, payload);
+      if (file.length > LINK_FILE_MAX) throw linkErr("big", "Your Ghost data is too big to send in one go (over 2 MB).");
+      let res = null;
+      try { res = JSON.parse(td.decode(await net({ url: NTFY + "/" + t.sec.topic, method: "PUT", body: b64(file), headers: { Filename: LINK_FILE_NAME, Firebase: "no" } }))); }
+      catch (e) { throw linkNetErr(e, true); }
+      if (!res || !res.attachment) throw linkErr("offline", "ntfy.sh didn't take it. On your PC, start Link with Phone again for a new code and try once more.");
+      st.linkedAt = now(); await save();
+      log("link sent: " + Math.round(file.length / 1024) + " KB, " + Object.keys(payload.pics).length + " pictures, " + payload.missing.length + " left out");
+      return { id: me.id, ghostId: linkShowId(me.id), bytes: file.length, pics: Object.keys(payload.pics).length, missing: payload.missing.length };
     }
 
     // ---- ntfy.sh ----
@@ -1462,6 +1814,32 @@ const GhostNetCore = (() => {
         return { id: String(res.id || ""), bytes: blob.length };
       },
       async sendReport(inbox, r, imgs) { return api.uploadReport(inbox, await api.sealReport(inbox, r, imgs)); },
+      // ---- Link desktop (#250, see "Link desktop" above): Settings > Privacy > Link Ghost Desktop ----
+      // 1. linkCheck(what the owner typed): the PC's beacon must be on the code's topic, alone, under 5 minutes old by
+      //    ntfy.sh's clock, with no file answering it yet. Resolves to a ticket for linkSend ({expiresIn, ghostId: the
+      //    WHOLE Ghost ID in 7 groups, link.showId}: the secrets stay in here; only the newest ticket can send); throws
+      //    an Error whose message can be shown as it is and whose .link says why (code, off, nopc, oldpc, newpc, used,
+      //    twice, expired, time, busy, offline, keys).
+      // 2. (ui.js asks "only link your own PC" and shows ghostId, which the PC shows too: all of it must match)
+      // 3. linkSend(ticket, {stream, app}): looks at the topic again (anything else answered = an alarm for the PC and
+      //    "raced"), then the key file + network state + pictures, sealed for that PC, ONE upload. Resolves to {id,
+      //    ghostId, bytes, pics, missing}; throws like linkCheck (also raced, big, keys, sent: a ticket can't be used
+      //    twice; keys also when the Ghost ID isn't the one the ticket showed).
+      async linkCheck(text) {
+        if (linkBusy) throw linkErr("busy", "Ghost is still working on the last code. Try again in a moment.");
+        linkBusy = true;
+        try { return await linkCheckNow(text); } finally { linkBusy = false; }
+      },
+      async linkSend(ticket, extra) {
+        const t = linkTickets.get(ticket);
+        if (!t) throw linkErr("sent", "That code was used already. On your PC, start Link with Phone again for a new code.");
+        if (linkBusy) throw linkErr("busy", "Ghost is still working on the last code. Try again in a moment."); // (the ticket stays usable)
+        linkTickets.delete(ticket); if (linkLive === ticket) linkLive = null; // (one upload per check, whatever happens next)
+        linkBusy = true;
+        try { return await linkSendNow(t, extra); } finally { linkBusy = false; t.sec.secret.fill(0); }
+      },
+      linkDrop(ticket) { const t = linkTickets.get(ticket); if (t) { linkTickets.delete(ticket); t.sec.secret.fill(0); } if (linkLive === ticket) linkLive = null; }, // (not sent after all)
+      linkedAt() { return (st && st.linkedAt) || 0; },
       // ms until ntfy.sh may be asked again after a 429 (0 = now)
       busyFor() { return Math.max(0, slowUntil - now()); },
       // invites you sent that are still waiting
@@ -1539,6 +1917,8 @@ const GhostNetCore = (() => {
     return api;
   }
 
-  return { create, createStream, parseInvite, inviteText, _test: { seal, unseal, seal2, unseal2, loadIdentity, newKeyFile, makeCard, readCard, proof, newCode, rvTopic, b32, sealReport, rxValid } };
+  const link = { start: linkStart, codeOf: linkCodeOf, newCode: newLinkCode, showId: linkShowId, TTL: LINK_TTL, LEN: LINK_LEN, V: LINK_V };
+  return { create, createStream, parseInvite, inviteText, link, _test: { seal, unseal, seal2, unseal2, loadIdentity, newKeyFile, makeCard, readCard, proof, newCode, rvTopic, b32, sealReport, rxValid,
+    linkSecrets, sealLinkBeacon, openLinkBeacon, sealLinkAlarm, openLinkAlarm, sealLinkFile, openLinkFile, linkBeaconVersion, linkFileVersion, linkKeysMatch, LINK_TOPIC_RE } };
 })();
 if (typeof module !== "undefined" && module.exports) module.exports = GhostNetCore;
