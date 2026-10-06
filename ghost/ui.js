@@ -24,8 +24,29 @@
   window.__ghostUIBooted = true;
 
   const cssText = typeof GHOST_CSS !== "undefined" ? GHOST_CSS : "";
-  // errors inside this world reach the app's log only as "Script error." - record the real message + stack
-  addEventListener("error", (e) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST ui crash " + (e.error && (e.error.message + " | " + String(e.error.stack || "").split("\n").slice(0, 3).join(" < ")) || e.message) }).catch(() => {}); } catch (x) {} });
+  // errors inside this world reach the app's log only as "Script error." - record the real message + stack.
+  // No error object = it came from another world or a cross-origin script (Snapchat's own bundle) and WebKit hides the
+  // details: the line says where it was reported and which page call Ghost made just before (#203: one every 20 s on
+  // the phone; bridge.js logs a timer's real error as "page-crash"). The same crash again within 10 minutes is only
+  // counted, so one repeating error can't fill the 300-line trail.
+  const crashSeen = new Map();
+  let lastPageCall = null; // {m: method, t: performance.now(), res: true once answered} (see createBridge)
+  addEventListener("error", (e) => {
+    try {
+      let key, text;
+      if (e.error) { key = text = e.error.message + " | " + String(e.error.stack || "").split("\n").slice(0, 3).join(" < "); }
+      else {
+        key = (e.message || "?") + " @ " + (String(e.filename || "").split("/").pop() || "?") + ":" + (e.lineno || 0) + ":" + (e.colno || 0);
+        const pc = lastPageCall;
+        text = key + " (no details: page script)" + (pc ? " · last page call " + pc.m + (pc.res ? " answered " : " ") + Math.round(performance.now() - pc.t) + " ms ago" : "");
+      }
+      const now = Date.now(), c = crashSeen.get(key);
+      if (c && now - c.at < 600e3) { c.n++; return; }
+      crashSeen.set(key, { at: now, n: 0 });
+      if (crashSeen.size > 40) crashSeen.delete(crashSeen.keys().next().value);
+      window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST ui crash " + text + (c && c.n ? " (x" + c.n + " more in 10 min)" : "") }).catch(() => {});
+    } catch (x) {}
+  });
   addEventListener("unhandledrejection", (e) => { try { const r = e.reason; window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST ui rejection " + (r && (r.message + " | " + String(r.stack || "").split("\n").slice(0, 3).join(" < ")) || r) }).catch(() => {}); } catch (x) {} });
   const gtrail = (text) => { try { window.webkit.messageHandlers.dg.postMessage({ op: "trail", text: "GHOST gif " + String(text).slice(0, 300) }).catch(() => {}); } catch (e) {} };
 
@@ -193,6 +214,7 @@
         const p = pending.get(msg.id);
         if (!p) return;
         pending.delete(msg.id);
+        lastPageCall = { m: p.method, t: performance.now(), res: true };
         if (msg.ok) p.resolve(nickify(msg.result));
         else p.reject(new Error(typeof msg.error === "string" ? msg.error : (msg.error && msg.error.message) || "ghost bridge error"));
       } else if (msg.ghost === "event") {
@@ -206,7 +228,9 @@
         const timer = setTimeout(() => {
           if (pending.delete(id)) reject(new Error("ghost bridge timeout: " + method));
         }, timeoutMs || 15000);
+        lastPageCall = { m: method, t: performance.now() };
         pending.set(id, {
+          method,
           resolve: (v) => { clearTimeout(timer); resolve(v); },
           reject: (e) => { clearTimeout(timer); reject(e); },
         });
@@ -707,6 +731,7 @@
       ctx.revealHome && ctx.revealHome();
     }
     // chats whose names still haven't arrived go to the end rather than sitting between real ones
+    list = list.map(phoneSnapsCleared); // unread snaps all marked opened in Ghost (#208): no New Snap on the row
     ctx.state.conversations = list.slice().sort((a, b) => (b.lastActivityTs || 0) - (a.lastActivityTs || 0));
     ctx.state.convById = new Map(ctx.state.conversations.map((c) => [c.id, c]));
     renderHomeList(ctx);
@@ -1704,7 +1729,7 @@
         entry = { messages: res.messages || [], hasMore: !!res.hasMore };
         ctx.state.messagesByConv.set(convId, entry);
       } catch (e) { openConversationScreen(ctx, convId); return; }
-      const unopened = entry.messages.filter((m) => m.kind === "snap" && !isFromMe(ctx, m) && !m.opened);
+      const unopened = entry.messages.filter((m) => m.kind === "snap" && !isFromMe(ctx, m) && !m.opened && !m.onlyInApp);
       if (!unopened.length) { openConversationScreen(ctx, convId); return; }
       openSnapPlaythrough(ctx, unopened, "unopened", {
         title: cd.title || "Snaps", convId,
@@ -2164,7 +2189,7 @@
     const reply = m.replyTo ? (m.replyTo.messageId || "") + ":" + (m.replyTo.text || "") + ":" + ((m.replyTo.from && m.replyTo.from.name) || "") : "";
     const convId = ctx.state.currentConvId;
     return [m.kind, m.ts, m.text || "", reacts, media, reply, m.saved ? 1 : 0, m.opened ? 1 : 0, m.replayable ? 1 : 0, m.snapSound ? 1 : 0,
-      m.edited ? 1 : 0, m.pending ? 1 : 0, m.failed ? 1 : 0, m.retained ? 1 : 0, m.retainedMedia ? 1 : 0, m.mediaUnavailable ? 1 : 0,
+      m.onlyInApp ? (phoneSnapShownOpened(ctx, m) ? 2 : 1) : 0, m.edited ? 1 : 0, m.pending ? 1 : 0, m.failed ? 1 : 0, m.retained ? 1 : 0, m.retainedMedia ? 1 : 0, m.mediaUnavailable ? 1 : 0,
       m.status || "", isMe ? 1 : 0, isLast ? 1 : 0, (ctx.conv && ctx.conv.searchQ) || "", convId && isBookmarked(convId, m.id) ? 1 : 0, gnCardSig(ctx, m, isMe), gxStickerSig(ctx, m)].join("\u0001");
   }
   function reusedWrapEl(ctx, oldWraps, m, isMe, isLast, paintKey) {
@@ -2572,6 +2597,7 @@
     let prevTs = first.ts;
     for (let j = startIdx + 1; j < all.length; j++) {
       const m = all[j];
+      if (m.onlyInApp) continue; // Snapchat Web can't play it (#207): skip it, don't break the run of playable ones
       if (!eligible(m)) break;
       // same sender (this alone also implies the same fromMe-ness - no need to compare that separately)
       if ((m.from && m.from.id) !== (first.from && first.from.id)) break;
@@ -2616,21 +2642,69 @@
     openSnapPlaythrough(ctx, msgs, "saved", { title: isMe ? "Your Snap" : (m.from && m.from.name) || "Snap", convId });
   }
 
+  // ---- phone-only snaps marked opened (#208; Ghost-only, stored on this phone) ------------------------------------
+  // A snap Snapchat Web has no content for (onlyInApp) can only be opened in the Snapchat app, so it sat in the chat as
+  // new forever. "Mark opened" clears it here only: nothing goes to Snapchat. Snapchat Web never sends view calls for
+  // these (its viewer marks them ViewableOnMobile and offers no open), and a view call would also use the snap up in
+  // the Snapchat app before anyone saw it. So the sender sees no "Opened" and the snap stays new in the Snapchat app.
+  // prefs.phoneSnapsOpened = ["convId|messageId", ...] (newest last); prefs.phoneSnapsChats = { convId: lastActivityTs }
+  // = that chat's list row stops showing New Snap while its newest event is still the one it had when marked.
+  const PHONE_SNAPS_MAX = 300;
+  let phoneSnapCache = { src: null, set: new Set() };
+  function phoneSnapMarked(convId, id) {
+    const list = pref("phoneSnapsOpened") || [];
+    if (phoneSnapCache.src !== list) phoneSnapCache = { src: list, set: new Set(list) };
+    return phoneSnapCache.set.has(convId + "|" + id);
+  }
+  // shown as opened: a received, still unopened app-only snap the owner marked
+  function phoneSnapShownOpened(ctx, m) {
+    return !!(m && m.kind === "snap" && m.onlyInApp && !m.opened && !isFromMe(ctx, m) && phoneSnapMarked(m.conversationId || ctx.state.currentConvId, m.id));
+  }
+  // the chat-list row of a chat whose unread snaps were all marked: no New Snap / unread dot until something newer comes
+  function phoneSnapsCleared(conv) {
+    const at = (pref("phoneSnapsChats") || {})[conv.id];
+    if (at === undefined || !conv.hasUnreadSnap || conv.unreadCount > 1 || at !== conv.lastActivityTs) return conv;
+    const p = conv.preview || {};
+    if (p.fromMe) return conv;
+    const state = p.state && Object.assign({}, p.state, { status: p.state.status === "new" ? "received" : p.state.status });
+    return Object.assign({}, conv, { hasUnreadSnap: false, unreadCount: 0, preview: Object.assign({}, p, { status: "viewed", text: p.text === "New Snap" ? "Received" : p.text, state }) });
+  }
+  async function setPhoneSnapOpened(ctx, convId, m, on) {
+    const key = convId + "|" + m.id;
+    let list = (pref("phoneSnapsOpened") || []).filter((k) => k !== key);
+    if (on) { list.push(key); if (list.length > PHONE_SNAPS_MAX) list = list.slice(-PHONE_SNAPS_MAX); }
+    const chats = Object.assign({}, pref("phoneSnapsChats") || {});
+    delete chats[convId];
+    if (on) {
+      // every unopened snap you received in the loaded chat is now opened or marked: its list row can stop saying New Snap
+      const entry = ctx.state.messagesByConv.get(convId);
+      const left = ((entry && entry.messages) || []).some((x) => x.kind === "snap" && !x.opened && !isFromMe(ctx, x) && x.id !== m.id && !(x.onlyInApp && list.includes(convId + "|" + x.id)));
+      const cd = ctx.state.convById.get(convId);
+      if (!left && cd && cd.lastActivityTs) chats[convId] = cd.lastActivityTs;
+    }
+    for (const id of Object.keys(chats)) if (!ctx.state.convById.has(id)) delete chats[id]; // chats gone from the list
+    prefs.phoneSnapsChats = chats; // (setPref below saves both)
+    setPref(ctx, "phoneSnapsOpened", list);
+    if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv);
+    try { applyConversations(ctx, await api.listConversations()); } catch (e) {}
+  }
+
   // Snaps look like Snapchat's own chat rows: a small coloured square (red = photo / silent video, purple = video
   // with sound), filled while new, outlined once opened, plus a short status. Tap a new one you received to view it.
   function snapTileEl(ctx, m, isMe) {
     const b = el("div", "gh-snap-row");
-    b.dataset.opened = m.opened ? "1" : "0";
+    const marked = !isMe && phoneSnapShownOpened(ctx, m); // a phone-only snap the owner marked opened (#208)
+    b.dataset.opened = m.opened || marked ? "1" : "0";
     b.dataset.sound = m.snapSound ? "1" : "0";
     b.dataset.me = isMe ? "1" : "0";
     const mark = el("span", "gh-snap-mark");
     if (isMe) mark.innerHTML = '<svg viewBox="0 0 14 16" width="13" height="15"><path d="M1.5 1.5 L12.5 8 L1.5 14.5 Z" stroke-width="2" stroke-linejoin="round"/></svg>'; // sent = arrow, like Snapchat
     const label = el("span", "gh-snap-label");
     const paint = () => {
-      b.dataset.opened = m.opened ? "1" : "0";
+      b.dataset.opened = m.opened || marked ? "1" : "0";
       b.dataset.saved = m.saved ? "1" : "0";
       label.textContent = m.saved && (isMe || m.opened) ? "Saved in Chat"
-        : isMe ? (m.opened ? "Opened" : "Delivered") : (m.opened ? (m.replayable ? "Opened · Tap to replay" : "Opened") : "New Snap");
+        : isMe ? (m.opened ? "Opened" : "Delivered") : marked ? "Marked opened" : m.onlyInApp ? "Open in Snapchat" : (m.opened ? (m.replayable ? "Opened · Tap to replay" : "Opened") : "New Snap");
       if (saveBtn) { saveBtn.dataset.on = m.saved ? "1" : "0"; saveBtn.setAttribute("aria-label", m.saved ? "Unsave in Chat" : "Save in Chat"); }
     };
     // Save in Chat, like Snapchat Web's own button: your own snaps any time, received ones once opened. Saving
@@ -2654,6 +2728,19 @@
     const time = el("span", "gh-snap-time"); time.textContent = fmtClock(m.ts);
     b.append(mark, label, time);
     if (saveBtn) b.appendChild(saveBtn);
+    if (!isMe && !m.opened && m.onlyInApp && !marked) {
+      // stop it sitting in the chat as new forever: marked opened in Ghost only (setPhoneSnapOpened says why)
+      const markBtn = el("button", "gh-snap-markopen");
+      markBtn.textContent = "Mark opened";
+      markBtn.setAttribute("aria-label", "Mark opened");
+      markBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        haptic("light");
+        setPhoneSnapOpened(ctx, m.conversationId || ctx.state.currentConvId, m, true);
+        ctx.showToast("Marked opened in Ghost. It's still new in the Snapchat app");
+      });
+      b.appendChild(markBtn);
+    }
     if (!isMe && m.opened && m.replayable) { // one replay, like Snapchat - chains into any neighbouring video parts
       b.classList.add("gh-press");
       b.addEventListener("click", () => {
@@ -2672,7 +2759,19 @@
         delete b.dataset.loading;
       });
     }
-    if (!isMe && !m.opened) {
+    if (!isMe && !m.opened && m.onlyInApp) {
+      // Snapchat sent web clients no content for this snap (#207): say so up front, tap opens the Snapchat app
+      b.classList.add("gh-press");
+      b.dataset.onlyInApp = marked ? "marked" : "1";
+      b.setAttribute("role", "button");
+      b.setAttribute("aria-label", marked ? "Marked opened. Open in Snapchat" : "Open in Snapchat");
+      b.addEventListener("click", async () => {
+        haptic();
+        let ok = false;
+        try { ok = !!(await window.webkit.messageHandlers.dg.postMessage({ op: "openApp", url: "snapchat://" })); } catch (e) {}
+        if (!ok) ctx.showToast("That Snap can only be opened in the Snapchat app");
+      });
+    } else if (!isMe && !m.opened) {
       b.classList.add("gh-press");
       b.setAttribute("role", "button");
       b.setAttribute("aria-label", "View Snap");
@@ -2685,7 +2784,7 @@
         const entry = ctx.state.messagesByConv.get(convId);
         const all = (entry && entry.messages) || [m];
         const idx = all.findIndex((x) => x.id === m.id);
-        const msgs = idx < 0 ? [m] : snapRunFrom(all, idx, (x) => x.kind === "snap" && !isFromMe(ctx, x) && !x.opened);
+        const msgs = idx < 0 ? [m] : snapRunFrom(all, idx, (x) => x.kind === "snap" && !isFromMe(ctx, x) && !x.opened && !x.onlyInApp);
         openSnapPlaythrough(ctx, msgs, "unopened", {
           title: (m.from && m.from.name) || "Snap", convId,
           onDone: () => { if (ctx.conv && ctx.state.currentConvId === convId) paintWindow(ctx, ctx.conv); },
@@ -3390,6 +3489,7 @@
       <div class="gh-sheet-grip"></div>
       <div class="gh-react-row"></div>
       <div class="gh-action-list">
+        <div class="gh-action-item" data-act="phonesnap"></div>
         <div class="gh-action-item" data-act="reply"></div>
         <div class="gh-action-item" data-act="copy"></div>
         <div class="gh-action-item" data-act="save"></div>
@@ -3413,6 +3513,8 @@
     more.appendChild(icon("plus", 20));
     more.setAttribute("aria-label", "More reactions");
     reactRow.appendChild(more);
+    const phoneSnapItem = sheet.querySelector('[data-act="phonesnap"]');
+    phoneSnapItem.append(icon("check"), textSpan("Mark as Opened"));
     const replyItem = sheet.querySelector('[data-act="reply"]');
     replyItem.append(icon("reply"), textSpan("Reply"));
     const copyItem = sheet.querySelector('[data-act="copy"]');
@@ -3436,7 +3538,7 @@
     overlaysRoot.appendChild(sheet);
     function textSpan(t) { const s = el("span"); s.textContent = t; return s; }
 
-    const s = { backdrop, sheet, reactRow, replyItem, copyItem, saveItem, bookmarkItem, pinItem, stickItem, favItem, delItem, photosItem, message: null, liftedEl: null };
+    const s = { backdrop, sheet, reactRow, phoneSnapItem, replyItem, copyItem, saveItem, bookmarkItem, pinItem, stickItem, favItem, delItem, photosItem, message: null, liftedEl: null };
     function closeAction() {
       if (s.liftedEl) { s.liftedEl.classList.remove("gh-msg-lifted"); s.liftedEl = null; }
       closeSheetGeneric(backdrop, sheet);
@@ -3486,6 +3588,17 @@
     s.reactRow.querySelector(".gh-react-more").onclick = () => { haptic("light"); s.close(); openEmojiReactPicker(ctx, convId, message); };
     s.replyItem.onclick = () => { setReplyTo(ctx, message); ctx.conv.textarea.focus(); s.close(); };
     s.copyItem.onclick = () => { copyToClipboard(message.text || ""); s.close(); };
+    // a phone-only snap (#208): mark it opened in Ghost, or back to new (setPhoneSnapOpened)
+    const phoneSnap = message.kind === "snap" && message.onlyInApp && !message.opened && !isFromMe(ctx, message);
+    const phoneMarked = phoneSnap && phoneSnapShownOpened(ctx, message);
+    s.phoneSnapItem.style.display = phoneSnap ? "" : "none";
+    const phoneLabel = el("span"); phoneLabel.textContent = phoneMarked ? "Mark as New" : "Mark as Opened";
+    s.phoneSnapItem.replaceChildren(icon(phoneMarked ? "undo" : "check"), phoneLabel);
+    s.phoneSnapItem.onclick = () => {
+      s.close(); haptic("light");
+      setPhoneSnapOpened(ctx, convId, message, !phoneMarked);
+      ctx.showToast(phoneMarked ? "Marked new again" : "Marked opened in Ghost. It's still new in the Snapchat app");
+    };
     const saveLabel = s.saveItem.querySelector("span");
     saveLabel.textContent = message.saved ? "Unsave" : "Save";
     s.saveItem.onclick = () => {
@@ -15378,12 +15491,21 @@
     const me = it.data.p.indexOf(ggMe());
     let data;
     try { data = GhostGames.play(it.data, move, me, it.v); }
-    catch (e) { ctx.showToast(/turn/.test(e.message) ? "Not your turn" : /over/.test(e.message) ? "The game is over" : "That move isn't allowed"); if (gg.view && gg.view.key === key) gg.view.game.update(it.data.s); return; }
+    catch (e) { ctx.showToast(/turn/.test(e.message) ? "Not your turn" : /over/.test(e.message) ? "The game is over" : /too big/.test(e.message) ? "This match got too big to send · Resign removes it" : "That move isn't allowed"); if (gg.view && gg.view.key === key) gg.view.game.update(it.data.s); return; }
     haptic("light");
     if (gg.view && gg.view.key === key) { try { gg.view.game.update(data.s); } catch (e) {} } // show it now, not after the save
     try { await gn.net.putItem({ key, kind: "game", with: it.with, v: it.v + 1, data }); }
     catch (e) {
-      gnTrail("game move: " + (e && e.message)); ctx.showToast("Couldn't send that move");
+      const big = /too big/.test((e && e.message) || "");
+      gnTrail("game move: " + (e && e.message));
+      // a match that can't go to the friend any more (an 8 Ball match started on 1.19.1 or before, #203) can't even be
+      // resigned: Resign removes it here instead, so it doesn't sit forever waiting for a move that can't be sent
+      if (big && move && move.resign === true) {
+        await gn.net.dropItem(key); ggClose(ctx);
+        ctx.showToast("This match was too big to send · removed");
+        return;
+      }
+      ctx.showToast(big ? "This match got too big to send · Resign removes it" : "Couldn't send that move");
       const now = gn.net.item(key); if (now && gg.view && gg.view.key === key) ggPaintView(ctx, now);
     }
     gn.round && gn.round(); // pick up anything waiting

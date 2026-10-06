@@ -9,6 +9,13 @@
 //   - If a build ships several versions at once (e.g. 1.15.0 inside 1.16.0), put the bullets of all of them
 //     in the newest entry.
 window.GHOST_WHATS_NEW = {
+  "1.19.2": {
+    items: [
+      { t: "Snaps that only open in the Snapchat app now say \"Open in Snapchat\" right away, and a tap opens the Snapchat app." },
+      { t: "Mark one of those snaps as opened to clear it from your chat list. It stays new in Snapchat.", how: "Chat > Mark opened, or long-press the snap" },
+      { t: "8 Ball matches no longer get stuck after a few shots. Your friend needs this update too." },
+    ],
+  },
   "1.19.1": {
     items: [
       { t: "A friend's story video with a caption plays as one snap again, with the caption on the video." },

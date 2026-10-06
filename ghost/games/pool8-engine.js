@@ -222,18 +222,21 @@
   }
 
   // ---- rules ---------------------------------------------------------------------------------------------
+  // state format v2 (Ghost 1.19.2): `last` no longer carries the whole table before the shot (`before`, ~740 chars)
+  // nor a second copy of the text - the view rebuilds the table from the state it already shows (tableBefore). A v1
+  // match (started on an older Ghost) keeps v1, so both Ghosts still replay it to the same JSON.
   function newGame(opts) {
     const players = opts.players.slice(0, 2);
     const seed = (opts.seed >>> 0) || 1;
     return {
-      v: 1, game: "pool8", players, seed,
+      v: opts.v === 1 ? 1 : 2, game: "pool8", players, seed,
       turn: 0,                         // index into players
       groups: [null, null],            // "solids" / "stripes" per player once decided
       balls: rack(seed),
       ballInHand: true, kitchen: true, // the breaker places the cue ball behind the head string
       isBreak: true, shots: 0,
       winner: null, text: "",
-      last: null,                      // {seq, by, move, before, pocketed, foul, text} (the view replays it)
+      last: null,                      // {seq, by, move, pocketed, first, foul} (+ before, text in v1) (the view replays it)
     };
   }
 
@@ -268,6 +271,16 @@
     return !!g && groupLeft(state.balls, g) === 0;
   }
 
+  // the table the shot `move` (a clean() move) starts from: the state's balls, the cue ball where ball in hand put it
+  function tableBefore(state, move) {
+    const before = state.balls.map((b) => ({ n: b.n, x: b.x, y: b.y, on: b.on }));
+    if (state.ballInHand) {
+      const pos = (move && move.cuePos) || (before[0].on ? [before[0].x, before[0].y] : null);
+      if (pos) before[0] = { n: 0, x: pos[0], y: pos[1], on: true };
+    }
+    return before;
+  }
+
   // apply one shot; returns the new state (never mutates the old one)
   function apply(state0, move0, by) {
     if (state0.winner != null) throw new Error("the game is over");
@@ -275,7 +288,6 @@
     if (by !== state0.players[me]) throw new Error("not your turn");
     const move = clean(move0);
     const st = JSON.parse(JSON.stringify(state0));
-    const before = st.balls.map((b) => ({ n: b.n, x: b.x, y: b.y, on: b.on }));
     // ball in hand: place the cue ball
     if (st.ballInHand) {
       const pos = move.cuePos || (st.balls[0].on ? [st.balls[0].x, st.balls[0].y] : null);
@@ -283,7 +295,6 @@
       if (st.kitchen && pos[1] < KITCHEN_Y - 1e-9) throw new Error("on the break the cue ball goes behind the line");
       if (!freeSpot(st.balls, pos[0], pos[1], 0)) throw new Error("the cue ball can't go there");
       st.balls[0].x = pos[0]; st.balls[0].y = pos[1]; st.balls[0].on = true;
-      before[0] = { n: 0, x: pos[0], y: pos[1], on: true };
     } else if (move.cuePos) throw new Error("no ball in hand");
     const needCall = onEight(st, me);
     if (needCall && move.call == null) throw new Error("call a pocket for the 8");
@@ -344,7 +355,8 @@
     st.isBreak = false;
     st.shots += 1;
     st.text = text;
-    st.last = { seq: st.shots, by, move, before, pocketed: ev.pocketed, first: ev.first, foul, text };
+    st.last = state0.v === 1 ? { seq: st.shots, by, move, before: tableBefore(state0, move), pocketed: ev.pocketed, first: ev.first, foul, text }
+      : { seq: st.shots, by, move, pocketed: ev.pocketed, first: ev.first, foul };
     return st;
   }
 
@@ -364,7 +376,7 @@
   // for the aim guide in the view (not part of the deterministic path)
   const api = {
     W, H, R, POCKETS, RAILS, MAIN_RAILS, HEAD_Y, FOOT_Y, KITCHEN_Y, VMAX,
-    rack, simulate, newGame, apply, status, clean, freeSpot, onEight, groupOf, isSolid, isStripe,
+    rack, simulate, newGame, apply, status, clean, freeSpot, onEight, groupOf, isSolid, isStripe, tableBefore,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.GhostPool8Engine = api;

@@ -61,7 +61,8 @@ const GhostNetCore = (() => {
   const ITEM_KEY_RE = /^[a-z]{2,12}:[A-Za-z0-9_-]{6,40}$/;
   const ITEM_KIND_RE = /^[a-z]{2,12}$/;
   const ITEM_PER_FRIEND = 40;         // items kept per friend (oldest go first), so a friend's Ghost can't fill storage
-  const ITEM_MAX = 3200;              // JSON chars of an item's data (a sealed message must stay under 6000)
+  const ITEM_MAX = 3200;              // JSON chars of an item's data a friend's Ghost takes. What can be SENT is less: the
+                                      // sealed message must fit MAX_ENVELOPE (~2500 chars of data), putItem checks that
   const ITEM_RESEND = 10 * 60e3;      // an unconfirmed item goes again after this long (a minute when forced)
   const ITEM_BATCH = 2400;            // plain JSON chars of one "items" message (sealed it must stay under MAX_ENVELOPE)
   const ITEM_BATCH_COUNT = 12;        // items in one "items" message (the receiver reads up to 20)
@@ -622,10 +623,16 @@ const GhostNetCore = (() => {
       await sendAs(me, friend, obj);
     }
     async function sendAs(me, friend, obj) {
-      const body = Object.assign({ ts: now(), n: nonce() }, obj);
-      if (friend.cap >= 2 && PI_RE.test(friend.pi || "")) await post(friend.pi, await seal2(me, friend, body));
-      else await post(friend.inbox, await seal(me, friend, body));
+      const env = await envelope(me, friend, obj);
+      await post(env.topic, env.text);
     }
+    // the sealed message and where it goes (throws "message too big" when it can't go as one ntfy message)
+    async function envelope(me, friend, obj) {
+      const body = Object.assign({ ts: now(), n: nonce() }, obj);
+      if (friend.cap >= 2 && PI_RE.test(friend.pi || "")) return { topic: friend.pi, text: await seal2(me, friend, body) };
+      return { topic: friend.inbox, text: await seal(me, friend, body) };
+    }
+    const tooBig = (e) => /message too big/.test((e && e.message) || "");
     // make room for one more item shared with this friend (drops their oldest)
     function itemRoom(fid) {
       const theirs = Object.values(st.items || {}).filter((i) => i.with === fid).sort((a, b) => (a.at || 0) - (b.at || 0));
@@ -634,6 +641,9 @@ const GhostNetCore = (() => {
     const itemMsg = (it) => ({ type: "item", key: it.key, kind: it.kind, v: it.v, data: it.data, bi: 1 });
     // unconfirmed items go to a friend in as few messages as fit (one request each against ntfy.sh's limit), to friends
     // whose Ghost said it reads "items" (bi); an older Ghost gets them one by one. Returns false when a send failed.
+    // An item that can't go even on its own (too big for one ntfy message: stored by an older Ghost, 1.19.1 and before
+    // let 8 Ball matches grow past it) is marked tooBig for that version and skipped, so it isn't re-sent every round
+    // ("item resend: message too big" every 20 s, #203) and doesn't hold back the items after it.
     async function sendItems(f, list) {
       const groups = [];
       if (f.bi === 1) {
@@ -645,11 +655,18 @@ const GhostNetCore = (() => {
         }
         if (cur.length) groups.push(cur);
       } else for (const it of list) groups.push([it]);
-      for (const g of groups) {
+      while (groups.length) {
+        const g = groups.shift();
         try {
           if (g.length === 1) await send(f, itemMsg(g[0]));
           else await send(f, { type: "items", list: g.map((it) => ({ key: it.key, kind: it.kind, v: it.v, data: it.data })), bi: 1 });
-        } catch (e) { log("item resend: " + e.message); return false; }
+        } catch (e) {
+          if (!tooBig(e)) { log("item resend: " + e.message); return false; }
+          if (g.length > 1) { groups.unshift(...g.map((it) => [it])); continue; } // (a batch with wide characters: one by one)
+          g[0].tooBig = g[0].v; g[0].sentAt = now();
+          log("item too big to send: " + g[0].key.slice(0, 12) + " v" + g[0].v);
+          continue;
+        }
         for (const it of g) it.sentAt = now();
       }
       return true;
@@ -1014,7 +1031,7 @@ const GhostNetCore = (() => {
       }
       const mine = st.items[obj.key];
       if (mine.v > obj.v || (mine.v === obj.v && !take && JSON.stringify(mine.data) !== js)) {
-        try { await send(f, itemMsg(mine)); mine.sentAt = now(); await save(); } catch (e) { log("item reply: " + e.message); }
+        try { await send(f, itemMsg(mine)); mine.sentAt = now(); await save(); } catch (e) { if (tooBig(e)) mine.tooBig = mine.v; else log("item reply: " + e.message); }
         return null;
       }
       return { key: obj.key, v: mine.v };
@@ -1118,7 +1135,8 @@ const GhostNetCore = (() => {
       item(key) { const it = st && st.items && st.items[key]; return it ? JSON.parse(JSON.stringify(it)) : null; },
       newItemKey(kind) { return kind + ":" + b32(rand(10)).slice(0, 16).toLowerCase(); },
       // store a new version and send it; v must be higher than the stored one. Resolves once stored (sending may fail:
-      // sync() re-sends until the friend confirms).
+      // sync() re-sends until the friend confirms). Throws "item too big" when it couldn't go as one message (checked
+      // by sealing it before anything is stored).
       async putItem({ key, kind, with: withId, v, data }) {
         await state();
         const f = st.friends[withId];
@@ -1131,11 +1149,13 @@ const GhostNetCore = (() => {
         if (cur && cur.with !== withId) throw new Error("item belongs to another friend");
         if (!Number.isInteger(v) || v < 1 || (cur && v <= cur.v)) throw new Error("stale version");
         const me = await identity(false);
-        if (!cur) itemRoom(withId);
         const it = { key, kind, with: withId, v, data: JSON.parse(js), at: now(), by: me ? me.id : "", acked: 0, sentAt: 0 };
+        let env = null;
+        if (me) { try { env = await envelope(me, f, itemMsg(it)); } catch (e) { if (tooBig(e)) throw new Error("item too big"); log("item seal: " + e.message); } }
+        if (!cur) itemRoom(withId);
         st.items[key] = it;
         await save(); changed("item", { key, kind, with: withId, snap: f.snap, local: true, prev: cur ? { v: cur.v, data: cur.data } : null });
-        try { await send(f, itemMsg(it)); it.sentAt = now(); await save(); } catch (e) { log("item send: " + e.message); }
+        try { if (env) await post(env.topic, env.text); else await send(f, itemMsg(it)); it.sentAt = now(); await save(); } catch (e) { log("item send: " + e.message); }
         return JSON.parse(JSON.stringify(it));
       },
       async dropItem(key) { await state(); if (st.items && st.items[key]) { delete st.items[key]; await save(); } },
@@ -1346,7 +1366,7 @@ const GhostNetCore = (() => {
             // (all in one message per friend; a friend not heard from for an hour only gets them with the hourly sync)
             const quiet = now() - (f.heard || f.since || 0) > SYNC_FORCED;
             const gap = quiet ? SYNC_FORCED : force ? 60e3 : ITEM_RESEND;
-            const owed = Object.values(st.items || {}).filter((it) => it.with === f.id && it.acked !== it.v && now() - (it.sentAt || 0) >= gap);
+            const owed = Object.values(st.items || {}).filter((it) => it.with === f.id && it.acked !== it.v && it.tooBig !== it.v && now() - (it.sentAt || 0) >= gap);
             if (owed.length) await sendItems(f, owed);
             if (now() - (f.lastSync || 0) < (force ? SYNC_FORCED : SYNC_EVERY)) continue;
             await send(f, Object.assign({ type: "sync", have: f.haveV || 0, mine: st.profile.v, shave: f.statusV || 0, sv: st.status.v }, piInfo(), xsyncInfo(f), rxInfo(f)));

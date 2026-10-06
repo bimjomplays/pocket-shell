@@ -95,6 +95,7 @@
     const theme = opts.theme || {};
     let state = opts.state;
     let shownSeq = state.last ? state.last.seq : 0;
+    let replays = 0; // (friend's shots played back - for tests)
 
     const rootEl = el("div", "gp8");
     const embedded = !!opts.embedded; // Ghost's game view shows the title, whose turn it is and Close itself
@@ -382,7 +383,7 @@
       if (needCall()) { if (call == null) { msg = "Tap a pocket to call it for the 8"; paintHud(); draw(); return; } move.call = call; }
       let next;
       try { next = E.apply(state, move, me); } catch (err) { msg = String(err.message || err); paintHud(); draw(); return; }
-      const before = next.last.before;
+      const before = next.last.before || E.tableBefore(state, next.last.move);
       shownSeq = next.last.seq;
       const clean = next.last.move;
       play(before, clean, () => { state = next; cuePlace = null; call = null; spin = [0, 0]; paintHud(); draw(); });
@@ -411,28 +412,34 @@
     requestAnimationFrame(() => { layout(); paintHud(); });
     layout(); paintHud();
 
-    return {
+    const api = {
       // a new state from the framework: replay the friend's shot if it's one we haven't shown
       update(next) {
         if (dead || !next) return;
         const L = next.last;
-        if (L && L.seq > shownSeq && L.by !== me) {
-          shownSeq = L.seq;
-          play(L.before, L.move, () => { state = next; paintHud(); draw(); });
+        // the table the shot started from: carried by a v1 match, else rebuilt from the state shown now (when that's the
+        // one right before it - a shot we missed in between just shows the new table)
+        const before = L && (L.before || (!anim && state && state.shots === L.seq - 1 ? E.tableBefore(state, L.move) : null));
+        if (L && L.seq > shownSeq && L.by !== me && before) {
+          shownSeq = L.seq; replays++;
+          play(before, L.move, () => { state = next; paintHud(); draw(); });
           return;
         }
         if (!anim) { state = next; if (next.last) shownSeq = Math.max(shownSeq, next.last.seq); paintHud(); draw(); }
-        else { const d = anim.done; anim.done = () => { d && d(); state = next; paintHud(); draw(); }; }
+        // a shot still playing: show this one after it (a v2 match rebuilds its table from the state that shot ends on)
+        else { const d = anim.done; anim.done = () => { d && d(); api.update(next); }; }
       },
       destroy() { dead = true; cancelAnimationFrame(raf); if (ro) ro.disconnect(); rootEl.remove(); },
       // tests
-      _debug: { get state() { return state; }, aim, setSpin: (s) => { spin = s; }, shoot, get animating() { return !!anim; }, get power() { return powerNow; }, setCall: (i) => { call = i; }, setCuePlace: (p) => { cuePlace = p; } },
+      _debug: { get state() { return state; }, aim, setSpin: (s) => { spin = s; }, shoot, get animating() { return !!anim; }, get replays() { return replays; }, get msg() { return msg; }, get power() { return powerNow; }, setCall: (i) => { call = i; }, setCuePlace: (p) => { cuePlace = p; } },
     };
+    return api;
   }
 
   const game = {
     id: "pool8", name: "8 Ball", icon: ICON, minPlayers: 2, maxPlayers: 2,
     playerIds: true, // players, turn, winner and `me` are Ghost ids here (GhostGames maps them to 0|1)
+    sizeLimit: 2450, // a whole match (v2: 2312 at most in 400 random matches); one ntfy message fits ~2540 (network.test #203)
     preview: (s) => (s.shots ? "Shot " + s.shots : ""),
     newGame: (o) => E.newGame(o),
     view,

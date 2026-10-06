@@ -10,7 +10,9 @@
 //   newGame({ players: [a, b], seed }) -> state
 //                players are Ghost ids; index 0 = whoever started the match. seed: a random 32-bit number for games that
 //                need randomness - every random choice must come from the state/seed, never Math.random, so both
-//                Ghosts compute the same thing.
+//                Ghosts compute the same thing. v: when check() rebuilds a match a friend started, the `v` its state
+//                carries (s.v) - a game that changed its state format makes that older format, so a match started
+//                on an older Ghost still replays the same; undefined = the newest format.
 //   apply(state, move, by) -> newState          by = the mover's player index (0|1)
 //                must be deterministic and pure (don't mutate state), and throw an Error for an illegal move or a move
 //                out of turn. Moves are small JSON objects.
@@ -26,7 +28,9 @@
 //   preview(state, me) -> string   (optional) one line for the chat card ("12. Nf3", "You sank the 8")
 //   playerIds    (optional) true = the game names players by Ghost id instead of index: apply() gets by = the id,
 //                status() may return ids for turn/winner (the framework maps them back to 0|1), view() gets me = the id.
-//   sizeLimit    (optional) keep the JSON of a state under ~2500 characters (items are capped at 3200 with moves).
+//   sizeLimit    (optional) the most JSON characters a whole match may have: play() refuses a move whose match would
+//                be bigger ("this match got too big to send"). A match goes to the friend as ONE ntfy message, which
+//                fits ~2500 characters of match (network.js putItem checks the sealed size and throws "item too big").
 //
 // ---- A match (the item's data) ----
 //   { g: gameId, p: [idA, idB], s: state, n: moveCount, m: [last few moves {m, by, v}], r: result|null,
@@ -53,7 +57,7 @@ const GhostGames = (() => {
     const def = get(gameId);
     if (!def) throw new Error("unknown game " + gameId);
     const seed = (opts && Number.isInteger(opts.seed)) ? opts.seed : randomSeed();
-    return { g: gameId, p: players.slice(0, 2), s: def.newGame({ players: players.slice(0, 2), seed }), n: 0, m: [], r: null, re: null, rf: (opts && opts.rematchOf) || null, seed };
+    return { g: gameId, p: players.slice(0, 2), s: def.newGame({ players: players.slice(0, 2), seed, v: opts && opts.v }), n: 0, m: [], r: null, re: null, rf: (opts && opts.rematchOf) || null, seed };
   }
   // what the match looks like now (the game's status, overridden by a resign)
   function status(data) {
@@ -66,8 +70,10 @@ const GhostGames = (() => {
     return st;
   }
   const over = (data) => { const s = status(data); return s.turn == null; };
-  // play a move on version v (the item's current version) -> the next match data. Throws on anything illegal.
-  function play(data, move, by, v) {
+  // play a move on version v (the item's current version) -> the next match data. Throws on anything illegal, and on a
+  // move that makes the match bigger than the game's sizeLimit (not when replaying a friend's move: replay = true, and
+  // not for a resign, so a match at the limit can still end - network.js still checks the real size).
+  function play(data, move, by, v, replay) {
     if (!data || !get(data.g)) throw new Error("unknown game");
     if (by !== 0 && by !== 1) throw new Error("not a player");
     if (over(data)) throw new Error("the game is over");
@@ -81,6 +87,8 @@ const GhostGames = (() => {
       next.n = (data.n || 0) + 1;
     }
     next.m = (data.m || []).concat([{ m: clone(move), by, v }]).slice(-KEEP_MOVES);
+    const lim = get(data.g).sizeLimit;
+    if (!replay && lim && !(move && move.resign === true) && JSON.stringify(next).length > lim) throw new Error("this match got too big to send");
     return next;
   }
   // an incoming version of a match we also hold: check that replaying its newest move on our copy gives the same state
@@ -93,7 +101,7 @@ const GhostGames = (() => {
     const last = (incoming.m || [])[incoming.m.length - 1];
     if (!last || last.v !== localV) return { ok: false, replayed: false, stale: true };
     try {
-      const mine = play(local, last.m, last.by, localV);
+      const mine = play(local, last.m, last.by, localV, true);
       return { ok: JSON.stringify(mine.s) === JSON.stringify(incoming.s) && JSON.stringify(mine.r) === JSON.stringify(incoming.r), replayed: true };
     } catch (e) { return { ok: false, replayed: true, error: e.message }; }
   }
@@ -114,14 +122,14 @@ const GhostGames = (() => {
       cur = local; fromV = localV;
     } else {
       if (!Number.isInteger(inc.seed)) return bad("seed");
-      try { cur = newMatch(inc.g, inc.p, { seed: inc.seed, rematchOf: inc.rf || null }); } catch (e) { return bad("new: " + e.message); }
+      try { cur = newMatch(inc.g, inc.p, { seed: inc.seed, rematchOf: inc.rf || null, v: inc.s && inc.s.v }); } catch (e) { return bad("new: " + e.message); }
       fromV = 1;
     }
     let lastV = fromV - 1;
     for (const e of inc.m) {
       if (!e || !Number.isInteger(e.v) || e.v < fromV) continue; // (moves we already have)
       if (e.v <= lastV || e.v >= incV) return bad("move versions");
-      try { cur = play(cur, e.m, e.by, e.v); } catch (err) { return bad("illegal: " + err.message); }
+      try { cur = play(cur, e.m, e.by, e.v, true); } catch (err) { return bad("illegal: " + err.message); }
       lastV = e.v;
     }
     if (JSON.stringify(cur.s) !== JSON.stringify(inc.s) || JSON.stringify(cur.r || null) !== JSON.stringify(inc.r || null) || (cur.n || 0) !== (inc.n || 0)) return bad("state doesn't follow from the moves");

@@ -49,6 +49,38 @@
     try { return fn(); } catch (e) { trail(where, e, "error"); return fallback; }
   }
 
+  // An error Snapchat's own code throws from a timer reaches every error handler only as "Script error." with no file
+  // or line (its bundle is cross-origin) - the phone's log had one every 20 s and nothing said what failed (#203).
+  // Timers started in this world now run through a try/catch first, where the error object is still readable: its
+  // message and the top of its stack go to the log as "page-crash" (the same one once per 10 minutes, then counted),
+  // and it's thrown on (the same error object). The page's own error handlers still get it, now from this script, so
+  // they see the real message instead of "Script error." - and so does ui.js's "ui crash" line.
+  (() => {
+    const seen = new Map();
+    const report = (kind, e) => {
+      try {
+        const msg = String((e && e.message) || e).slice(0, 200);
+        const stack = String((e && e.stack) || "").split("\n").slice(0, 3).map((l) => l.replace(/https?:\/\/[^\s)]*\//g, "")).join(" < ").slice(0, 300);
+        const key = kind + "|" + msg + "|" + stack, now = Date.now(), c = seen.get(key);
+        if (c && now - c.at < 600e3) { c.n++; return; }
+        seen.set(key, { at: now, n: 0 });
+        if (seen.size > 40) seen.delete(seen.keys().next().value);
+        trail("page-crash", kind + ": " + msg + (stack ? " | " + stack : "") + (c && c.n ? " (x" + c.n + " more in 10 min)" : ""), "error");
+      } catch (x) { /* never let the reporter throw */ }
+    };
+    for (const name of ["setTimeout", "setInterval"]) {
+      const orig = window[name];
+      if (typeof orig !== "function") continue;
+      window[name] = new Proxy(orig, {
+        apply(target, self, args) {
+          const fn = args[0];
+          if (typeof fn === "function") args[0] = function () { try { return fn.apply(this, arguments); } catch (e) { report(name, e); throw e; } };
+          return Reflect.apply(target, self, args);
+        },
+      });
+    }
+  })();
+
   function throttle(fn, ms) {
     let timer = null, pending = false, lastArgs = null;
     // `emitMessagesFor` is one shared throttle instance called with a different conversationId per open
@@ -982,6 +1014,14 @@
       return { emoji, intent, from: personFor(idOf(r.userId)) || { id: "?", name: "?" } };
     }), []);
     const others = (list) => (list || []).map(idOf).filter((x) => x && x !== senderId);
+    const openedByMe = (md.openedBy || []).some((u) => idOf(u) === me);
+    // Snapchat Web's own "ViewableOnMobile" rule (main.js module, no snapdoc || no remoteMediaReferences): the server sent
+    // no content for this snap (empty content or no media refs), so nothing can open it here (#201: 3 video snaps in a
+    // group chat, content 0 bytes, no media refs, while older snaps in the same chat came with both). Same test openSnap
+    // uses; said up front instead of "Loading…" then a failure.
+    const noMedia = !(mc.remoteMediaReferences && mc.remoteMediaReferences.length);
+    const noSnapdoc = !(kase === "snapdoc" ? c.snapdoc : c && kase && c[kase] && c[kase].snapdoc);
+    const onlyInApp = kind === "snap" && !(me && senderId === me) && !openedByMe && (noMedia || noSnapdoc) || undefined;
     return {
       id: String(id !== undefined ? id : raw.descriptor && raw.descriptor.messageId),
       conversationId,
@@ -1012,6 +1052,7 @@
       seenBy: Array.from(new Set([...others(md.seenBy), ...others(md.openedBy)])),
       replayable: md.playableSnapState === 4 || undefined, // PlayableSnapState VIEWEDREPLAYABLE
       saveable: md.isSaveable === false ? false : undefined,
+      onlyInApp,
       snapSound: kind === "snap" ? !!(mc.snapDisplayInfo && mc.snapDisplayInfo.hasAudio) : undefined,
       pending: raw.state === 0 || raw.state === 1 ? undefined : undefined,
       failed: false,
