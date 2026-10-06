@@ -28,22 +28,3 @@
   };
   Object.defineProperty(Object.prototype, "isWeb", desc);
 })();
-
-// Calls: Snapchat Web's calling engine registers itself as deviceType Web (its dependency graph does
-// providesValue("deviceType", Web = 2) - main.js search 'providesValue("deviceType"'), which is what makes friends
-// see a laptop on the call. The graph turns its values into factories with Object.fromEntries (getFactories), so
-// the one "deviceType" factory gets wrapped to answer iOS (1) instead of Web. Nothing else is touched.
-(() => {
-  const fromEntries = Object.fromEntries;
-  Object.fromEntries = function (entries) {
-    const o = fromEntries.call(Object, entries);
-    const f = o && o.deviceType;
-    if (typeof f === "function" && !f.__ghostPhone) {
-      const wrapped = function (...args) { const v = f.apply(this, args); return v === 2 ? 1 : v; };
-      for (const k of Object.keys(f)) wrapped[k] = f[k];
-      wrapped.__ghostPhone = true;
-      o.deviceType = wrapped;
-    }
-    return o;
-  };
-})();

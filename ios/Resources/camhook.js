@@ -60,8 +60,7 @@
     const b = e.target && e.target.closest && e.target.closest("button, [role='button']");
     touched = { at: performance.now(), label: b ? [b.title, b.getAttribute("aria-label"), b.getAttribute("data-tooltip"), b.textContent].join(" ") : "" };
   }, { capture: true, passive: true });
-  // Ghost (its own UI, so no Snapchat button labels to read) says so directly while a call is starting / live
-  const wantsRealMic = () => window.__ghostWantsMic === true || (performance.now() - touched.at < 2500 && /voice|call|micro|note/i.test(touched.label));
+  const wantsRealMic = () => performance.now() - touched.at < 2500 && /voice|call|micro|note/i.test(touched.label);
   // The real mic took ~0.9s to open once recording had started (REC aMic), which showed as a late start of the
   // video. Open it as soon as the shutter is touched instead: Snapchat's hold-to-record only begins a moment
   // later, and recorder.js picks this stream up (cam.preMic). Let go of it again if no recording follows.
@@ -175,7 +174,6 @@
     return out;
   };
 
-  cam.flip = () => flip(); // Ghost's call screen flips the camera with this
   async function flip() {
     if (!out || busy) return;
     busy = true;
