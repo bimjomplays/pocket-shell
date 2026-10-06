@@ -1,13 +1,36 @@
 import UIKit
 import WebKit
 import QuartzCore
+import AVFoundation
+import Vision
+import CoreImage
+import Photos
+import UserNotifications
+import Network
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // the notification delegate has to be in place before launching ends, or a tap on a banner that
+        // cold-launches Ghost (an Apple push from the relay, or one of Ghost's own) never reaches it
+        if WebViewController.ghostMode { _ = GhostNotifications.shared }
+        return true
+    }
+
+    func application(_ application: UIApplication,
                      configurationForConnecting session: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         UISceneConfiguration(name: "Default", sessionRole: session.role)
+    }
+
+    // Apple push device token (GhostPush.swift): only asked for when Ghost's profile has Push
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        GhostPush.didRegister(deviceToken: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        GhostPush.didFail(error: error)
     }
 }
 
@@ -28,9 +51,17 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let scene = scene as? UIWindowScene else { return }
         let window = TouchWindow(windowScene: scene)
         window.overrideUserInterfaceStyle = .dark
-        window.rootViewController = WebViewController()
+        let vc = WebViewController()
+        window.rootViewController = vc
         window.makeKeyAndVisible()
         self.window = window
+        // opened by a dltnpghost:// link (the notification relay's pairing QR, or an ntfy notification's click)
+        if let url = options.urlContexts.first?.url { vc.handleOpenURL(url) }
+    }
+
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        guard let url = URLContexts.first?.url else { return }
+        (window?.rootViewController as? WebViewController)?.handleOpenURL(url)
     }
 }
 
@@ -42,6 +73,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 ///   backs the GM.* calls with the "dg" message handler below (settings in UserDefaults, Giphy downloads).
 final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply, UIScrollViewDelegate {
     private static let home = URL(string: "https://www.snapchat.com/web")!
+    /// Ghost (branch try/ghost): a completely different app UI (ghost-ui.js) over a hidden Snapchat Web page, fed by
+    /// ghost-bridge.js. Set by the GhostMode Info.plist key; without it this is the Snapchat-look app.
+    static let ghostMode = Bundle.main.object(forInfoDictionaryKey: "GhostMode") as? Bool ?? false
     // Logged out, Snapchat shows "Download Snapchat" instead of the login form when the page is narrower
     // than ~700px, and WKWebView has no "Request Desktop Website" (Safari's private wide-layout setting;
     // a width=980 viewport tag was ignored too). So outside Snapchat Web itself the web view is
@@ -54,10 +88,20 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private static let tabBarColor = UIColor(red: 0x1e / 255, green: 0x1e / 255, blue: 0x1e / 255, alpha: 1)
     private static let tabBarHeight: CGFloat = 82
     private static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
-    private static let giphyHosts: Set<String> = ["media.giphy.com", "api.giphy.com"]
+    private static let giphyHosts: Set<String> = ["media.giphy.com", "api.giphy.com", "api.bitmoji.com", "cf-st.sc-cdn.net", "images.bitmoji.com"] // + the Bitmoji sticker catalog and sticker images (Ghost editor: a Bitmoji sticker's pixels for the saved/sent picture)
     private static let background = UIColor(red: 0x12 / 255, green: 0x12 / 255, blue: 0x12 / 255, alpha: 1)
 
     private let world = WKContentWorld.world(name: "darkmobile")
+    /// A dltnpghost:// link (notification pairing, "open this chat") waiting for ui.js: it asks with "takeOpenURL"
+    /// when it starts, and is told directly when it's already running. Only the Ghost scheme, only two short shapes.
+    private var pendingOpenURL: String?
+    func handleOpenURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "dltnpghost", url.absoluteString.count <= 8192 else { return }
+        let text = url.absoluteString
+        pendingOpenURL = text
+        guard let data = try? JSONSerialization.data(withJSONObject: [text]), let json = String(data: data, encoding: .utf8) else { return }
+        webView?.ghostEval("window.__ghostOpenURL && window.__ghostOpenURL(\(json)[0])")
+    }
     private var webView: WKWebView!
     // starts true because the app opens /web: laying the page out at the login width first and then
     // switching once the URL arrived sometimes left Snapchat's grid at a stale height, which also kept
@@ -76,6 +120,106 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var loaded = false
     private var lastShowBar: Bool?
     private var keyboardOverlap: CGFloat = 0
+    private var lastGhostSafe = ""
+    private var speakerOn = false
+    private var keepAwake: GhostKeepAwake?
+    /// Ghost: wifi <-> mobile data, or back online. ui.js (window.__ghostNetChanged) then tries what waits on ntfy.sh
+    /// at once (queued bug reports): ntfy.sh's limits are per IP address, so another network can get through.
+    private var pathMonitor: NWPathMonitor?
+    private var pathKey: String?
+    private func startPathMonitor() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let up = path.status == .satisfied
+            let key = "\(up)|\(path.usesInterfaceType(.wifi))|\(path.usesInterfaceType(.cellular))|\(path.usesInterfaceType(.wiredEthernet))"
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let first = self.pathKey == nil
+                let changed = self.pathKey != key
+                self.pathKey = key
+                if !first && changed && up {
+                    self.webView?.ghostEval("window.__ghostNetChanged && window.__ghostNetChanged()")
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.dltnp.ghost.path"))
+        pathMonitor = monitor
+    }
+    // Ghost's built-in photo/gallery picker (composer's gallery button): PhotoKit behind a WKURLSchemeHandler,
+    // registered on the config below before the web view exists. nil outside Ghost mode.
+    private var photoPicker: GhostPhotoPicker?
+    private var gallery: GhostGallery?
+    private var vault: GhostVault?
+    private var notifications: GhostNotifications?
+    private var tiktok: GhostTikTok? // the TikTok tab's hidden TikTok page (TikTokFeed.swift), created on first use
+    private lazy var context = GhostContext()
+    // The app switcher cover shows Ghost's own logo - the same picture as the Home Screen icon the user picked
+    // (Settings > Appearance > App Icon), as a rounded app-icon tile - instead of the ghost emoji.
+    private let shieldLogo = UIImageView()
+    private lazy var shield: UIView = {
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        self.shieldLogo.contentMode = .scaleAspectFill
+        self.shieldLogo.clipsToBounds = true
+        self.shieldLogo.layer.cornerRadius = 22
+        self.shieldLogo.layer.cornerCurve = .continuous
+        self.shieldLogo.translatesAutoresizingMaskIntoConstraints = false
+        blur.contentView.addSubview(self.shieldLogo)
+        NSLayoutConstraint.activate([self.shieldLogo.centerXAnchor.constraint(equalTo: blur.contentView.centerXAnchor),
+                                     self.shieldLogo.centerYAnchor.constraint(equalTo: blur.contentView.centerYAnchor),
+                                     self.shieldLogo.widthAnchor.constraint(equalToConstant: 96),
+                                     self.shieldLogo.heightAnchor.constraint(equalToConstant: 96)])
+        return blur
+    }()
+    /// "GhostLogo" + the variant of the current app icon ("AppIconBerry" -> "GhostLogoBerry"); the default icon -> "GhostLogo".
+    private func currentShieldLogo() -> UIImage? {
+        let alt = UIApplication.shared.alternateIconName ?? ""
+        let variant = alt.hasPrefix("AppIcon") ? String(alt.dropFirst("AppIcon".count)) : ""
+        return UIImage(named: "GhostLogo" + variant) ?? UIImage(named: "GhostLogo")
+    }
+    /// Ghost's privacy shield (Settings > Chats): covers the app while it's in the app switcher or the screen is
+    /// being recorded / mirrored. (iOS gives apps no way to block a plain screenshot.)
+    // willResignActive fires while applicationState is still .active (so reading the state there never showed
+    // the shield - the 2026-09-27 bug); the notification itself says where we're going.
+    private var shieldGoingInactive = false
+    @objc private func shieldResign() { shieldGoingInactive = true; updateShield() }
+    @objc private func shieldActive() { shieldGoingInactive = false; updateShield() }
+    @objc private func updateShield() {
+        let on = SettingsStore.shared.bool("privacyShield")
+        let inactive = shieldGoingInactive || UIApplication.shared.applicationState != .active
+        let captured = view.window?.windowScene?.screen.isCaptured ?? UIScreen.main.isCaptured
+        let show = on && (inactive || captured)
+        if show {
+            // on the window (above the tab bar, launch picture and any sheet), not just this view
+            let host: UIView = view.window ?? view
+            shieldLogo.image = currentShieldLogo()
+            if shield.superview !== host { shield.removeFromSuperview(); shield.frame = host.bounds; shield.autoresizingMask = [.flexibleWidth, .flexibleHeight]; host.addSubview(shield) }
+            host.bringSubviewToFront(shield)
+        } else {
+            shield.removeFromSuperview()
+        }
+    }
+    /// Save a photo/video to the camera roll (Ghost's "Save to Photos").
+    private func saveToPhotos(_ data: Data, video: Bool, done: @escaping (String?) -> Void) {
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized || status == .limited else { return DispatchQueue.main.async { done("Photos access is off for Ghost") } }
+            let ext = video ? "mp4" : "jpg"
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("ghost-\(UUID().uuidString).\(ext)")
+            do { try data.write(to: url) } catch { return DispatchQueue.main.async { done(error.localizedDescription) } }
+            PHPhotoLibrary.shared().performChanges({
+                if video { PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url) }
+                else { PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: url) }
+            }) { ok, error in
+                try? FileManager.default.removeItem(at: url)
+                DispatchQueue.main.async { done(ok ? nil : (error?.localizedDescription ?? "couldn't save")) }
+            }
+        }
+    }
+    /// Ghost calls: loudspeaker vs earpiece. A voice-chat session with defaultToSpeaker plus the port override.
+    private func applySpeaker() throws {
+        // Only the output route: changing the category/mode under WebKit's call audio cut the other side off entirely
+        // (device 2026-09-27). With the real microphone open, WebKit's session is already play-and-record.
+        try AVAudioSession.sharedInstance().overrideOutputAudioPort(speakerOn ? .speaker : .none)
+    }
     // edge swipe = back; off in an open chat, where gestures.js drags the chat itself (interactive, like the app)
     private weak var edgeBack: UIScreenEdgePanGestureRecognizer?
     // smoothness: 120Hz while touching, and a picture of the last chat list shown at launch
@@ -123,24 +267,63 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                                            forMainFrameOnly: true, in: .page))
         scripts.addUserScript(WKUserScript(source: Self.resource("hooks"), injectionTime: .atDocumentStart,
                                            forMainFrameOnly: true, in: .page))
+        if Self.ghostMode { // reaches Snapchat's own app state before Snapchat's scripts run
+            scripts.addUserScript(WKUserScript(source: Self.resource("ghost-bridge"), injectionTime: .atDocumentStart,
+                                               forMainFrameOnly: true, in: .page))
+        }
         // Settings, darkmobile world: window.__dgSettingsInit first, then settings.js right after gm-shim so
         // every later script in this list can call dgSetting()/dgOnSettings()/dgSetSetting()/dgOpenSettings()
         // from the moment it runs. appmenu.js (after header.js) wires header.js's decorative "..." button to
         // dgOpenSettings().
         // one script, in this order: settings first, then the page scripts, then the stylesheets (an array + joined, not a
         // long `+` chain: Swift's type checker can give up on those)
-        let worldScripts: [String] = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON);"]
-            + ["gm-shim", "settings", "ui", "bridge", "theme", "textscale", "header", "appmenu", "stories", "camera", "fit", "touch", "chat", "gestures", "qol", "perf", "streaks"].map { Self.resource($0) }
-            + ["newchat", "camera", "stories", "header", "snap", "chat", "gestures", "gifs", "theme", "qol"].map { Self.cssScript($0) }
+        var worldScripts: [String]
+        if Self.ghostMode {
+            // Ghost: only the plumbing + the new UI (no Snapchat restyling at all). __ghostScale lets the UI undo the
+            // page scale, so 1 CSS px of Ghost = 1 point on the phone.
+            worldScripts = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON); window.__ghostScale = \(Double(Self.appScale)); window.__ghostApp = \(Self.appInfoJSON);"]
+            worldScripts += ["gm-shim", "settings", "bridge", "perf", "ghost-ui"].map { Self.resource($0) }
+        } else {
+            worldScripts = ["window.__dgSettingsInit = \(SettingsStore.shared.mergedJSON);"]
+            worldScripts += ["gm-shim", "settings", "ui", "bridge", "theme", "textscale", "header", "appmenu", "stories", "camera", "fit", "touch", "chat", "gestures", "qol", "perf", "streaks"].map { Self.resource($0) }
+            worldScripts += ["newchat", "camera", "stories", "header", "snap", "chat", "gestures", "gifs", "theme", "qol"].map { Self.cssScript($0) }
+        }
         scripts.addUserScript(WKUserScript(source: worldScripts.joined(separator: "\n"),
                                            injectionTime: .atDocumentStart, forMainFrameOnly: true, in: world))
         scripts.addScriptMessageHandler(self, contentWorld: world, name: "dg")
 
+        // Must be registered on the configuration before the WKWebView below is created (WKURLSchemeHandler
+        // docs: setURLSchemeHandler(_:forURLScheme:) has no effect on a web view that already exists).
+        if Self.ghostMode {
+            let picker = GhostPhotoPicker(presenter: self)
+            config.setURLSchemeHandler(picker, forURLScheme: GhostPhotoPicker.scheme)
+            photoPicker = picker
+            let lib = GhostGallery(presenter: self, picker: picker)
+            picker.gallery = lib
+            gallery = lib
+            let eyes = GhostVault(presenter: self)
+            config.setURLSchemeHandler(eyes, forURLScheme: GhostVault.scheme)
+            vault = eyes
+            notifications = GhostNotifications.shared
+        }
+
         Self.preferHighRefresh(config.preferences)
         webView = WKWebView(frame: .zero, configuration: config)
         webView.customUserAgent = Self.userAgent
+        photoPicker?.attach(to: webView)
+        gallery?.attach(to: webView)
+        vault?.attach(to: webView)
+        notifications?.attach(to: webView)
+        if Self.ghostMode { tiktok = GhostTikTok(host: self, ghost: webView) }
         // lets Safari's Web Inspector protocol (ios-webkit-debug-proxy on the PC, phone on USB) attach to the page
         if #available(iOS 16.4, *) { webView.isInspectable = true }
+        // Draw the page at 2x instead of the screen's 3x. iOS closes Ghost's web process at ~1.5 GB, Snapchat's own web app
+        // already takes ~0.95 GB, and opening a chat briefly added 300-450 MB - all of it graphics memory (layer and
+        // canvas backing stores), which scales with pixels: 2x needs 4/9 of it (measured on the phone 2026-09-29).
+        // WKWebView SPI (WKWebViewPrivate.h, ios 16.4+): KVC reaches -_setOverrideDeviceScaleFactor:.
+        if webView.responds(to: NSSelectorFromString("_setOverrideDeviceScaleFactor:")) {
+            webView.setValue(NSNumber(value: 2.0), forKey: "overrideDeviceScaleFactor")
+        }
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = false
@@ -162,6 +345,10 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         view.addSubview(topTapView)
         // Launch picture: the chat list as it looked when the app was last left, shown until Snapchat has drawn
         // the real one (a cold start otherwise shows an empty dark screen for a few seconds).
+        // a picture saved by an older build shows the old design (device report: Ghost's launch showed the previous
+        // look): only use it if this same build saved it
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        if UserDefaults.standard.string(forKey: "launchPictureBuild") != build { Self.clearLaunchPicture() }
         if SettingsStore.shared.bool("launchPicture"), let url = Self.launchPictureURL, let picture = UIImage(contentsOfFile: url.path) {
             launchCover.image = picture
             launchCover.contentMode = .scaleToFill
@@ -170,6 +357,18 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         }
         NotificationCenter.default.addObserver(self, selector: #selector(saveLaunchPicture),
                                                name: UIApplication.willResignActiveNotification, object: nil)
+        if Self.ghostMode { // privacy shield: nothing readable in the app switcher or in a screen recording
+            NotificationCenter.default.addObserver(self, selector: #selector(shieldResign),
+                                                   name: UIApplication.willResignActiveNotification, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(shieldResign),
+                                                   name: UIApplication.didEnterBackgroundNotification, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(shieldActive),
+                                                   name: UIApplication.didBecomeActiveNotification, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(updateShield),
+                                                   name: UIScreen.capturedDidChangeNotification, object: nil)
+        }
+        if Self.ghostMode { keepAwake = GhostKeepAwake() }
+        if Self.ghostMode { startPathMonitor() }
         TouchWindow.onTouch = { [weak self] in self?.renderFast(for: 2.5) }
         buildTabBar()
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
@@ -184,6 +383,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
 
         let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(edgeSwipe(_:)))
         edgeBack = back
+        back.isEnabled = !Self.ghostMode // Ghost has its own swipe-back
         back.edges = .left
         view.addGestureRecognizer(back)
 
@@ -301,22 +501,35 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         webView.backgroundColor = colors.background
         webView.scrollView.backgroundColor = colors.background
         tabBar.backgroundColor = colors.bar
-        let showBar = inApp && !chatOpen && !storiesOpen && keyboardOverlap == 0
+        let showBar = inApp && !Self.ghostMode && !chatOpen && !storiesOpen && keyboardOverlap == 0
         if showBar != lastShowBar {
             lastShowBar = showBar
             trail("NATIVE bar \(showBar) inApp \(inApp) chat \(chatOpen) stories \(storiesOpen) camera \(cameraOpen) kb \(keyboardOverlap)")
         }
         topTapView.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: insets.top)
-        closeStoriesButton.isHidden = !cameraOpen || previewOpen // stories: Snapchat's own X (top right) and the edge swipe close them
+        closeStoriesButton.isHidden = Self.ghostMode || !cameraOpen || previewOpen // stories: Snapchat's own X (top right) and the edge swipe close them
         // camera: top left (Snapchat's own menu sits top right); stories: top right
         closeStoriesButton.frame = CGRect(x: cameraOpen ? 12 : view.bounds.width - 56, y: insets.top + 8, width: 44, height: 44)
         let barTotal = Self.tabBarHeight + insets.bottom
         tabBar.frame = CGRect(x: 0, y: view.bounds.height - (showBar ? barTotal : 0),
                               width: view.bounds.width, height: barTotal)
         tabBar.alpha = showBar ? 1 : 0
-        let area = CGRect(x: 0, y: insets.top, width: view.bounds.width,
-                          height: (showBar ? tabBar.frame.minY
-                                           : view.bounds.height - max(insets.bottom, keyboardOverlap)) - insets.top)
+        // Ghost draws edge to edge (under the clock and the home indicator, like a real app) and pads its own
+        // header/composer by the safe-area sizes it's given below; the Snapchat-look app keeps the inset area.
+        let fullBleed = Self.ghostMode && inApp
+        let area = fullBleed
+            ? CGRect(x: 0, y: 0, width: view.bounds.width, height: view.bounds.height - keyboardOverlap)
+            : CGRect(x: 0, y: insets.top, width: view.bounds.width,
+                     height: (showBar ? tabBar.frame.minY
+                                      : view.bounds.height - max(insets.bottom, keyboardOverlap)) - insets.top)
+        if fullBleed {
+            let safe = "\(Int(insets.top)),\(keyboardOverlap > 0 ? 0 : Int(insets.bottom))"
+            if safe != lastGhostSafe {
+                lastGhostSafe = safe
+                let parts = safe.split(separator: ",")
+                webView.evaluateJavaScript("document.documentElement.style.setProperty('--ghost-safe-t','\(parts[0])px');document.documentElement.style.setProperty('--ghost-safe-b','\(parts[1])px')", completionHandler: nil)
+            }
+        }
         let scale = inApp ? Self.appScale : min(1, area.width / Self.loginWidth)
         webView.transform = .identity
         webView.bounds = CGRect(x: 0, y: 0, width: area.width / scale, height: area.height / scale)
@@ -496,6 +709,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// Backup for the same problem: a few seconds after Snapchat Web loads, glass.js should have switched
     /// to the one-pane phone layout (html.dg-list / dg-chat). If it hasn't, reload once.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        lastGhostSafe = "" // a new page lost the safe-area sizes: send them again on the next layout
+        view.setNeedsLayout()
         guard inApp else { return }
         for delay in [0.2, 0.9] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -512,7 +727,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-            guard let self, self.inApp, !self.healed else { return }
+            guard let self, self.inApp, !self.healed, !Self.ghostMode else { return } // (Ghost doesn't use Snapchat's layout)
             let check = "document.documentElement.classList.contains('dg-list') || document.documentElement.classList.contains('dg-chat')"
             self.webView.evaluateJavaScript(check) { result, _ in
                 guard (result as? Bool) == false else { return }
@@ -533,6 +748,22 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
               let literal = String(data: json, encoding: .utf8) else { return "" }
         return "(() => { if (window.top !== window) return; const add = () => { if (!document.documentElement) return void setTimeout(add, 10);"
             + " const s = document.createElement('style'); s.textContent = \(literal)[0]; document.documentElement.appendChild(s); }; add(); })();"
+    }
+
+    /// Ghost's version and this phone ({version, build, model "iPhone15,2", os "17.5"}), sent with a bug report
+    /// (ui.js section "Feedback")
+    private static var appInfoJSON: String {
+        var u = utsname()
+        uname(&u)
+        let model = withUnsafeBytes(of: u.machine) { raw in String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self) }
+        let info: [String: String] = [
+            "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
+            "model": model,
+            "os": UIDevice.current.systemVersion,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: info), let text = String(data: data, encoding: .utf8) else { return "{}" }
+        return text
     }
 
     private static func resource(_ name: String) -> String {
@@ -569,7 +800,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             replyHandler(true, nil)
         case "fetch":
             guard let text = body["url"] as? String, let url = URL(string: text), url.scheme == "https",
-                  let host = url.host, Self.giphyHosts.contains(host) else {
+                  let host = url.host, Self.giphyHosts.contains(host) || host == "tenor.com" || host.hasSuffix(".tenor.com") else {
                 return replyHandler(nil, "Unsupported GIF host")
             }
             var request = URLRequest(url: url, timeoutInterval: 20)
@@ -588,6 +819,162 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "trail":
             trail(body["text"] as? String ?? "")
             replyHandler(true, nil)
+        case "tt": // the TikTok tab: hidden TikTok page, its feed and video bytes (TikTokFeed.swift)
+            guard let tiktok else { return replyHandler(nil, "unavailable") }
+            tiktok.handle(body, reply: replyHandler)
+        case "gnet", "gnKeys", "gnStream": // Ghost network: ntfy.sh requests, the long-lived stream, this Ghost's keys (GhostNet.swift)
+            GhostNet.handle(op, body, emit: { [weak self] js in self?.webView?.ghostEval(js) }) { value, error in replyHandler(value, error) }
+        case "takeOpenURL": // Ghost: the dltnpghost:// link Ghost was opened with (once), for ui.js to act on
+            let url = pendingOpenURL
+            pendingOpenURL = nil
+            replyHandler(url, nil)
+        case "openURL": // Ghost: tapping a link in a message opens Safari (or the app that owns the link)
+            guard let str = body["url"] as? String, let url = URL(string: str), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return replyHandler(nil, "bad url") }
+            UIApplication.shared.open(url)
+            replyHandler(true, nil)
+        case "openApp": // Ghost: "Open in Snapchat" on a snap Snapchat Web can't play (#207); only the snapchat:// scheme
+            guard let str = body["url"] as? String, let url = URL(string: str), url.scheme?.lowercased() == "snapchat" else { return replyHandler(nil, "bad url") }
+            UIApplication.shared.open(url, options: [:]) { ok in replyHandler(ok, nil) }
+        case "appIcon": // Ghost's Settings > Appearance > App Icon: nil name = the default icon
+            let name = body["name"] as? String
+            let alt = (name == nil || name == "default") ? nil : name
+            if body["get"] as? Bool == true { return replyHandler(UIApplication.shared.alternateIconName ?? "default", nil) }
+            guard UIApplication.shared.supportsAlternateIcons else { return replyHandler(nil, "not supported") }
+            UIApplication.shared.setAlternateIconName(alt) { error in
+                DispatchQueue.main.async { if let error { replyHandler(nil, error.localizedDescription) } else { replyHandler(true, nil) } }
+            }
+        case "streakReminders": // Ghost's Streak Keeper: reminders at each streak time
+            // plain values only: these go into UserNotifications' (Sendable) completion handlers
+            let items: [(id: String, hour: Int, minute: Int, name: String, skipToday: Bool)] = (body["items"] as? [[String: Any]] ?? []).compactMap { (item: [String: Any]) -> (id: String, hour: Int, minute: Int, name: String, skipToday: Bool)? in
+                guard let id = item["id"] as? String else { return nil }
+                return (id, (item["hour"] as? NSNumber)?.intValue ?? 12, (item["minute"] as? NSNumber)?.intValue ?? 0,
+                        item["name"] as? String ?? "your friend", (item["skipToday"] as? Bool) ?? false)
+            }
+            let center = UNUserNotificationCenter.current()
+            center.getPendingNotificationRequests { reqs in
+                center.removePendingNotificationRequests(withIdentifiers: reqs.map(\.identifier).filter { $0.hasPrefix("ghost-streak-") })
+                guard !items.isEmpty else { return }
+                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    guard granted else { return }
+                    // one-off reminders for the next 7 days (not a repeating one, so a day whose streak already
+                    // went out gets no nag); Ghost re-plans these every time it runs
+                    let cal = Calendar.current, now = Date()
+                    for item in items {
+                        let id = item.id, hour = item.hour, minute = item.minute, skipToday = item.skipToday
+                        for offset in 0..<7 {
+                            if offset == 0 && skipToday { continue }
+                            guard let day = cal.date(byAdding: .day, value: offset, to: now),
+                                  let fire = cal.date(bySettingHour: hour, minute: minute, second: 0, of: day), fire > now else { continue }
+                            let content = UNMutableNotificationContent()
+                            content.title = "Streak time 🔥"
+                            content.body = "Open Ghost to send your streak to \(item.name)"
+                            content.sound = .default
+                            let when = cal.dateComponents([.year, .month, .day, .hour, .minute], from: fire)
+                            center.add(UNNotificationRequest(identifier: "ghost-streak-\(id)-\(offset)", content: content,
+                                                             trigger: UNCalendarNotificationTrigger(dateMatching: when, repeats: false)))
+                        }
+                    }
+                }
+            }
+            replyHandler(true, nil)
+        case "saveToPhotos":
+            guard let b64 = body["data"] as? String, let data = Data(base64Encoded: b64) else { return replyHandler(nil, "no data") }
+            saveToPhotos(data, video: (body["video"] as? Bool) ?? false) { error in
+                if let error { replyHandler(nil, error) } else { replyHandler(true, nil) }
+            }
+
+        // MARK: Ghost's built-in photo picker (composer's gallery button; GhostPhotoPicker.swift does the work)
+        case "photoAuth":
+            guard let photoPicker else { return replyHandler(["status": "denied"], nil) }
+            photoPicker.handleAuth(reply: replyHandler)
+        case "photoManage":
+            guard let photoPicker else { return replyHandler(nil, "unavailable") }
+            photoPicker.handleManage()
+            replyHandler(true, nil)
+        case "photoOpenSettings":
+            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+            replyHandler(true, nil)
+        case "photoList":
+            guard let photoPicker else { return replyHandler(["items": [], "hasMore": false], nil) }
+            let offset = (body["offset"] as? NSNumber)?.intValue ?? 0
+            let limit = (body["limit"] as? NSNumber)?.intValue ?? 60
+            photoPicker.handleList(offset: offset, limit: limit, reply: replyHandler)
+        case "photoFull":
+            guard let photoPicker, let id = body["id"] as? String else { return replyHandler(nil, "bad id") }
+            photoPicker.handleFull(id: id, reply: replyHandler)
+        case "asset": // ghostphoto:// / ghostvault:// bytes for ui.js (the page itself can't load them: NativeAsset.swift)
+            guard let text = body["url"] as? String, let url = URL(string: text) else { return replyHandler(nil, "bad url") }
+            let handler: WKURLSchemeHandler?
+            switch url.scheme {
+            case GhostPhotoPicker.scheme: handler = photoPicker
+            case GhostVault.scheme: handler = vault
+            default: handler = nil
+            }
+            guard let handler else { return replyHandler(nil, "unsupported scheme") }
+            CapturedSchemeTask.load(url: url, range: body["range"] as? String, handler: handler, webView: webView, reply: replyHandler)
+        case let galleryOp where galleryOp.hasPrefix("gallery"): // Ghost's Gallery tab (GalleryLibrary.swift)
+            guard let gallery else { return replyHandler(nil, "unavailable") }
+            gallery.handle(op: galleryOp, body: body, reply: replyHandler)
+        case "contextInfo": // snap editor weather/location stickers (GhostContext.swift)
+            context.info(maxAge: body["fresh"] as? Bool == true ? 5 : 600, reply: replyHandler)
+        case "snapBackground": // snap editor background blur / swap on a photo (SnapFX.swift, Vision person segmentation)
+            SnapFX.background(body: body, reply: replyHandler)
+        case "notifyMessage": // new-message notification while in the background (GhostNotifications.swift)
+            guard let notifications, let id = body["id"] as? String else { return replyHandler(nil, "unavailable") }
+            notifications.post(id: id, title: body["title"] as? String ?? "Ghost", body: body["body"] as? String ?? "New Chat", reply: replyHandler)
+        case "clearMessageNotifications":
+            notifications?.clear(id: body["id"] as? String)
+            replyHandler(true, nil)
+        case "pushInfo": // Apple push: can this install get one (its profile has Push), and the token (GhostPush.swift)
+            replyHandler(GhostPush.info(), nil)
+        case "pushRegister": // Apple push: permission + device token, for ui.js to hand to the PC relay
+            GhostPush.register(reply: replyHandler)
+        case "pendingChat": // a notification tapped before ui.js was ready
+            if let id = notifications?.takePendingChat() { replyHandler(id, nil) } else { replyHandler(nil, nil) }
+        case let vaultOp where vaultOp.hasPrefix("vault"): // My Eyes Only (Vault.swift)
+            guard let vault else { return replyHandler(nil, "unavailable") }
+            vault.handle(op: vaultOp, body: body, reply: replyHandler)
+        case "cutout": // Ghost's sticker maker: lift the subject out of a photo (iOS 17 Vision), transparent PNG back
+            guard let b64 = body["image"] as? String, let data = Data(base64Encoded: b64),
+                  let image = UIImage(data: data), let cg = image.cgImage else { return replyHandler(nil, "bad image") }
+            if #available(iOS 17.0, *) {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let request = VNGenerateForegroundInstanceMaskRequest()
+                    let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+                    var png: String?
+                    var failure = "no subject found"
+                    do {
+                        try handler.perform([request])
+                        if let result = request.results?.first {
+                            let buffer = try result.generateMaskedImage(ofInstances: result.allInstances, from: handler, croppedToInstancesExtent: true)
+                            let ci = CIImage(cvPixelBuffer: buffer)
+                            if let out = CIContext().createCGImage(ci, from: ci.extent) { png = UIImage(cgImage: out).pngData()?.base64EncodedString() }
+                        }
+                    } catch { failure = error.localizedDescription }
+                    DispatchQueue.main.async { if let png { replyHandler(png, nil) } else { replyHandler(nil, failure) } }
+                }
+            } else {
+                replyHandler(nil, "needs iOS 17")
+            }
+        case "speaker": // Ghost's call screen: loudspeaker on/off (WebKit leaves calls on the earpiece)
+            let on = body["on"] as? Bool ?? false
+            speakerOn = on
+            do {
+                try applySpeaker()
+                // WebKit re-configures the session as the call's audio starts; apply again once it has settled
+                for delay in [0.4, 1.2] { DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in try? self?.applySpeaker() } }
+                replyHandler(true, nil)
+            } catch {
+                replyHandler(nil, error.localizedDescription)
+            }
+        case "keepAwake":
+            guard Self.ghostMode, let keepAwake else { return replyHandler(nil, "Keep Awake is only available in Ghost mode") }
+            if let enabled = body["enabled"] as? Bool {
+                let state = keepAwake.setEnabled(enabled)
+                replyHandler(state, keepAwake.error)
+            } else {
+                replyHandler(keepAwake.state, nil)
+            }
         case "haptic":
             let style: UIImpactFeedbackGenerator.FeedbackStyle
             switch body["style"] as? String {
@@ -609,7 +996,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             storiesOpen = body["stories"] as? Bool ?? false
             cameraOpen = body["camera"] as? Bool ?? false
             previewOpen = body["preview"] as? Bool ?? false
-            edgeBack?.isEnabled = !((body["chat"] as? Bool ?? false) && !storiesOpen && !cameraOpen)
+            edgeBack?.isEnabled = !Self.ghostMode && !((body["chat"] as? Bool ?? false) && !storiesOpen && !cameraOpen)
             setChatOpen(body["chat"] as? Bool ?? false, force: true)
             replyHandler(true, nil)
 
@@ -743,11 +1130,31 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         return nil
     }
 
+    /// WKNavigationDelegatePrivate: same event with WebKit's reason (0 memory limit, 1 CPU limit, 2 requested, 3 crash).
+    /// When this exists WebKit calls ONLY this one, so it forwards to the public handler below.
+    @objc(_webView:webContentProcessDidTerminateWithReason:)
+    func webViewContentProcessDidTerminate(_ webView: WKWebView, reason: Int) {
+        let names = ["memory limit", "CPU limit", "requested by app", "crash", "shared process crash limit"]
+        let name = reason >= 0 && reason < names.count ? names[reason] : "reason \(reason)"
+        urlLog.append("REASON: \(name)")
+        trail("NATIVE web process ended: \(name)")
+        webViewWebContentProcessDidTerminate(webView)
+    }
+
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         urlLog.append("WEB PROCESS CRASHED")
         if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
             let text = "crash at \(Date()) urls \(urlLog)\n"
             try? text.write(to: dir.appendingPathComponent("crash-\(Int(Date().timeIntervalSince1970)).txt"), atomically: true, encoding: .utf8)
+        }
+        // Ghost reopens the chat you were in after this reload (ui.js reads gm.ghostResume)
+        // ...unless it's crashing again right after that (reopening the same heavy chat just crashed it a second time,
+        // 19 s later - device 2026-09-28): then it starts on the chat list
+        if Self.ghostMode {
+            let now = Date().timeIntervalSince1970
+            let last = UserDefaults.standard.double(forKey: "ghostLastCrash")
+            UserDefaults.standard.set(now, forKey: "ghostLastCrash")
+            UserDefaults.standard.set(now - last > 90 ? "1" : "", forKey: "gm.ghostResume")
         }
         webView.load(URLRequest(url: Self.home))
     }
@@ -806,11 +1213,15 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
               let url = Self.launchPictureURL else { return }
         let config = WKSnapshotConfiguration()
         config.afterScreenUpdates = false
-        webView.evaluateJavaScript("document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2") { [weak self] ready, _ in
+        // Ghost: never while something private is on screen (Gallery, My Eyes Only, a viewer, the PIN pad, the camera/
+        // editor) - this picture is shown at the next launch before any lock, and it sits unencrypted in Caches
+        let ghostSafe = "document.documentElement.hasAttribute('data-ghost-ready') && !(() => { const r = document.querySelector('ghost-app'); const s = r && r.shadowRoot; return !s || !!s.querySelector('.gh-gal[data-open=\"1\"], .gh-vault[data-open=\"1\"], .gh-gv[data-open=\"1\"], .gh-pin[data-open=\"1\"], .gh-camera[data-open=\"1\"], .gh-viewer[data-open=\"1\"], .gh-send-page[data-open=\"1\"]'); })()"
+        webView.evaluateJavaScript(Self.ghostMode ? ghostSafe : "document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2") { [weak self] ready, _ in
             guard (ready as? Bool) == true, let self else { return }
             self.webView.takeSnapshot(with: config) { image, _ in
                 guard let data = image?.pngData() else { return }
                 DispatchQueue.global(qos: .utility).async { try? data.write(to: url, options: .atomic) }
+                UserDefaults.standard.set(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "", forKey: "launchPictureBuild")
             }
         }
     }
@@ -820,7 +1231,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private func checkLaunchCover() {
         guard launchCover.superview != nil else { return }
         launchCoverChecks += 1
-        let js = "document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2 && getComputedStyle(document.body).opacity === '1'"
+        let js = Self.ghostMode ? "document.documentElement.hasAttribute('data-ghost-ready')"
+            : "document.documentElement.classList.contains('dg-list') && document.querySelectorAll('[role=\"listitem\"]').length > 2 && getComputedStyle(document.body).opacity === '1'"
         webView.evaluateJavaScript(js) { [weak self] ready, _ in
             guard let self else { return }
             if !self.inApp || (ready as? Bool) == true || self.launchCoverChecks > 60 {

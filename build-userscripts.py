@@ -72,6 +72,42 @@ app = root / 'ios' / 'Resources'
 (app / 'hooks.js').write_text(hooks)
 (app / 'ui.js').write_text(content)
 
+# Ghost line (branch try/ghost): the new UI and its data bridge, bundled for App.swift's GhostMode
+ghost = root / 'ghost'
+if (ghost / 'bridge.js').exists():
+    (app / 'ghost-bridge.js').write_text((ghost / 'retention.js').read_text() + '\n' + (ghost / 'bridge.js').read_text())
+if (ghost / 'ui.js').exists():
+    css = (ghost / 'ui.css').read_text() if (ghost / 'ui.css').exists() else ''
+    # the GIF player from the Snapchat-look app, without its page scanner: animates GIFs sent as photos
+    gifanim = 'window.__ghostNoGifScan = true;\n' + read('gif-anim.js') + '\n'
+    # network.js (Ghost accounts core) defines GhostNetCore at the top of the same script, before ui.js reads it
+    net = (ghost / 'network.js').read_text() + '\n' if (ghost / 'network.js').exists() else ''
+    # Ghost games (ghost/GAMES.md): the framework, then each game's libraries/engines, then the game modules
+    games = ''
+    if (ghost / 'games.js').exists():
+        mods = sorted((ghost / 'games').glob('*.js')) if (ghost / 'games').exists() else []
+        first = [m for m in mods if m.stem.endswith('-lib') or m.stem.endswith('-engine')]
+        games = ''.join(f.read_text() + '\n' for f in [ghost / 'games.js'] + first + [m for m in mods if m not in first])
+    # snap filters (colour looks, WebGL renderer, native parameters): SnapFX, read by ui.js's snap editor
+    snapfx = (ghost / 'snapfx.js').read_text() + '\n' if (ghost / 'snapfx.js').exists() else ''
+    # the What's New text (window.GHOST_WHATS_NEW, written at publish time): read by ui.js on the first open after an update
+    whatsnew = (ghost / 'whatsnew.js').read_text() + '\n' if (ghost / 'whatsnew.js').exists() else ''
+    (app / 'ghost-ui.js').write_text(gifanim + 'const GHOST_CSS = ' + json.dumps(css) + ';\n' + net + games + snapfx + whatsnew + (ghost / 'ui.js').read_text())
+# the TikTok tab's hidden TikTok page script (runs in TikTokFeed.swift's own web view, never in Snapchat's page)
+if (ghost / 'tiktok-page.js').exists():
+    (app / 'ghost-tiktok.js').write_text((ghost / 'tiktok-page.js').read_text())
+if (ghost / 'tiktok-dm-page.js').exists():
+    (app / 'ghost-tiktok-dm.js').write_text((ghost / 'tiktok-dm-page.js').read_text())
+if (ghost / 'tiktok-video-page.js').exists():
+    # the hidden desktop page turns TikTok's list answers into the same compact items as the TikTok tab:
+    # copy pick/urlOf + compact() out of tiktok-page.js at the /* @ghost-compact */ marker (str/num exist there already)
+    tp = (ghost / 'tiktok-page.js').read_text()
+    a = tp.index('  const pick = '); b = tp.index('\n', tp.index('  const urlOf = ')) + 1
+    c = tp.index('  function compact(it) {'); d = tp.index('  // a search/user result')
+    vp = (ghost / 'tiktok-video-page.js').read_text()
+    assert '/* @ghost-compact */' in vp
+    (app / 'ghost-tiktok-video.js').write_text(vp.replace('/* @ghost-compact */', tp[a:b] + tp[c:d]))
+
 with zipfile.ZipFile(root / 'Dark-Mobile-Safari.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
     for path in sorted(out.glob('*.user.js')):
         archive.write(path, path.name)
