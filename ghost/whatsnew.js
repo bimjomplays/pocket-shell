@@ -9,6 +9,31 @@
 //   - If a build ships several versions at once (e.g. 1.15.0 inside 1.16.0), put the bullets of all of them
 //     in the newest entry.
 window.GHOST_WHATS_NEW = {
+  "1.19.1": {
+    items: [
+      { t: "A friend's story video with a caption plays as one snap again, with the caption on the video." },
+      { t: "Snaps that didn't open the first time try again, and if one still won't load, a tap on it tries once more." },
+      { t: "Game moves, friends' Ghost changes and answers to your bug reports now show up the moment they're sent while Ghost is open." },
+      { t: "The snap camera no longer stays black, typing a caption no longer squeezes your photo, and you can paste a picture into a chat to send it.", how: "Chat > message box > Paste" },
+      { t: "A copied picture or screenshot (even after Copy and Delete) can be sent with the new Paste button in the photo picker.", how: "Chat > Gallery > Paste" },
+    ],
+  },
+  "1.19.0": {
+    items: [
+      { t: "Game moves, friends' Ghost changes and answers to your bug reports now show up the moment they're sent while Ghost is open." },
+      { t: "Ghost keeps one quiet connection open instead of checking every few seconds, so it stays reliable on a busy home network." },
+      { t: "The snap camera no longer stays black: Ghost restarts it, and if that fails it says so and a tap tries again." },
+      { t: "Typing a caption no longer squeezes your photo: it stays full-screen and the caption moves up above the keyboard while you type." },
+      { t: "Copy a picture anywhere and paste it into a chat's message box to send it.", how: "Chat > message box > Paste" },
+    ],
+  },
+  "1.18.3": {
+    items: [
+      { t: "The snap camera no longer stays black: Ghost restarts it, and if that fails it says so and a tap tries again." },
+      { t: "Typing a caption no longer squeezes your photo: it stays full-screen and the caption moves up above the keyboard while you type." },
+      { t: "Copy a picture anywhere and paste it into a chat's message box to send it.", how: "Chat > message box > Paste" },
+    ],
+  },
   "1.18.2": {
     items: [
       { t: "With an Apple developer account, notifications while Ghost is closed can come straight to Ghost instead of the ntfy app.", how: "Settings > Notifications > Apple Push" },

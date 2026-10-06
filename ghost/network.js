@@ -240,8 +240,281 @@ const GhostNetCore = (() => {
     return b64(await subtle.sign("HMAC", k, te.encode(purpose + "|" + id)));
   }
 
+  // ---- one long-lived ntfy.sh stream (1.19.0) ------------------------------------------------------------
+  // While Ghost is in front it holds ONE subscription to all of its topics (the private and public inbox, the relay's
+  // control topic, the answer topics of open bug reports) instead of reading each one every round:
+  // GET /<t1>,<t2>,.../json?since=<…> is one request for as long as it stays open (ntfy.sh sends a keepalive every 45 s).
+  // Native (GhostNet.swift "gnStream") only carries the lines; this decides when it's open and what was seen already.
+  //   - a cursor per topic = the ntfy.sh time (s) up to which that topic has been read completely: a keepalive moves
+  //     every topic of the stream, a message its own topic, a poll its topic (by the answer's Date header). since =
+  //     the oldest cursor minus a margin (a message id can't be used across topics read at different times; a time
+  //     can), and messages that come again inside the margin are dropped by id.
+  //   - a topic with no cursor yet (never read on this phone, e.g. right after the update) is read by its own poll
+  //     first and joins the stream after that; a consumer may give a start time instead (`at`, a report just sent).
+  //   - covers(topic): the stream is open (or opening) with that topic, so its poll is skipped. While it's down
+  //     (backoff, 429) the polls run like before 1.19.0, so a network that can't hold a stream open still works.
+  //   - reopened when a wanted topic isn't in it (a first invite, the relay paired, a report sent); topics no longer
+  //     wanted stay until the next open (every open is a request against ntfy.sh's per-IP limit).
+  // deps: open(url, sid) -> "ok" | "unsupported" | "error", close(sid), want() -> [{topic, at?}], take(msg),
+  //       gate() -> ms until requests may go out (the shared 429 wait), limited(code) (a 429: close that gate),
+  //       counted(status) (one line in the request trail), hidden() -> bool, onState(phase), load(), save(s), log(t),
+  //       now() -> ms, tune {…} (the rigs' shorter waits)
+  // feed(ev) takes native's events: {sid, ev:"status", status} | {sid, ev:"lines", lines:[String]} | {sid, ev:"end", status, error, body}
+  const STREAM_TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
+  function createStream(deps) {
+    const C = Object.assign({ margin: 60, seen: 400, healthy: 60e3, backoffMin: 5e3, backoffMax: 5 * 60e3, again: 1000, openFor: 15e3,
+      firstLine: 10e3, idle: 70e3, settle: 500, settleMax: 8e3, refresh: 1500, topics: 12, hintFor: 15 * 60e3, keep: 30, refusedFor: 60e3 }, deps.tune || {});
+    const now = () => (deps.now ? deps.now() : Date.now());
+    const log = (t) => { try { deps.log && deps.log(t); } catch (e) {} };
+    const call = (fn, ...a) => { try { return fn ? fn(...a) : undefined; } catch (e) { log("dep " + (e && e.message)); return undefined; } };
+    let cur = null;                  // saved: {v:1, t:{topic: ntfy time s}, seen:[ids], off: phone clock - ntfy clock (s)}
+    let loading = null;
+    let running = false, phase = "idle"; // idle | opening | open | wait | off (no native op: polls only)
+    // sid: which stream native's events are about (random start: a reloaded page never takes an old stream's events)
+    let sid = Math.floor(Math.random() * 1e9), topics = [], since = 0, openedAt = 0, liveAt = 0, backoff = 0, connecting = false;
+    let timer = 0, openTimer = 0, idleTimer = 0, refreshTimer = 0, saveTimer = 0;
+    let queue = Promise.resolve(), queued = 0;
+    let seenSet = new Set();
+    const refusedAt = new Map(); // topic -> when a message on it was taken by nobody (no reopen for it for a while)
+    async function load() {
+      if (cur) return cur;
+      if (!loading) loading = (async () => {
+        let s = null; try { s = await deps.load(); } catch (e) {}
+        const c = { v: 1, t: {}, seen: [], off: 0 };
+        if (s && s.v === 1) {
+          if (s.t && typeof s.t === "object") {
+            const keep = Object.entries(s.t).filter(([k, v]) => STREAM_TOPIC_RE.test(k) && Number.isFinite(v) && v > 0).sort((a, b) => b[1] - a[1]).slice(0, C.keep);
+            for (const [k, v] of keep) c.t[k] = v;
+          }
+          if (Array.isArray(s.seen)) c.seen = s.seen.filter((x) => typeof x === "string" && x.length <= 40).slice(-C.seen);
+          if (Number.isFinite(s.off) && Math.abs(s.off) < 7 * 86400) c.off = s.off;
+        }
+        if (!cur) { cur = c; for (const id of cur.seen) seenSet.add(id); }
+        return cur;
+      })();
+      return loading;
+    }
+    const nowSec = () => now() / 1000;
+    function setPhase(p) {
+      if (p === phase) return;
+      phase = p;
+      call(deps.onState, p);
+    }
+    function saveNow() { clearTimeout(saveTimer); saveTimer = 0; if (cur) Promise.resolve(call(deps.save, JSON.parse(JSON.stringify(cur)))).catch(() => {}); }
+    function saveSoon() { if (!saveTimer) saveTimer = setTimeout(saveNow, 1000); }
+    function moveCursor(topic, time) {
+      if (!cur || !STREAM_TOPIC_RE.test(topic || "") || !(time > 0)) return;
+      if (!(cur.t[topic] >= time)) { cur.t[topic] = time; saveSoon(); }
+    }
+    function remember(id) { // handled (by the stream or a poll): a later copy is dropped
+      if (typeof id !== "string" || id.length > 40 || !cur) return;
+      seenSet.add(id);
+      if (cur.seen.includes(id)) return;
+      cur.seen.push(id);
+      if (cur.seen.length > C.seen) cur.seen.splice(0, cur.seen.length - C.seen);
+      if (seenSet.size > 10 * C.seen) seenSet = new Set(cur.seen);
+      saveSoon();
+    }
+    // the topics to subscribe to, each with the time to read it from (topics with neither cursor nor start time left out)
+    async function wantList() {
+      await load();
+      let list = [];
+      try { list = (await deps.want()) || []; } catch (e) { log("want " + (e && e.message)); }
+      const out = [], have = new Set();
+      for (const w of list) {
+        if (!w || !STREAM_TOPIC_RE.test(w.topic || "") || have.has(w.topic)) continue;
+        let t = cur.t[w.topic];
+        if (!(t > 0) && Number.isFinite(w.at) && w.at > 0 && now() - w.at < C.hintFor) t = Math.floor(w.at / 1000 - cur.off) - C.margin;
+        if (!(t > 0)) continue;
+        have.add(w.topic); out.push({ topic: w.topic, t });
+        if (out.length >= C.topics) break;
+      }
+      return out;
+    }
+    function waitThen(ms) {
+      clearTimeout(timer); timer = 0;
+      if (!running) { setPhase("idle"); return; }
+      setPhase("wait");
+      timer = setTimeout(() => { timer = 0; connect(); }, Math.max(50, ms));
+    }
+    async function connect() {
+      clearTimeout(timer); timer = 0;
+      if (!running || phase === "off" || connecting) return;
+      if (call(deps.hidden)) { setPhase("idle"); return; }
+      connecting = true;
+      let again = false;
+      try {
+        const list = await wantList();
+        if (!running || phase === "off") return;
+        if (!list.length) { setPhase("idle"); return; }
+        const g = Number(call(deps.gate)) || 0;
+        if (g > 0) { waitThen(g + 500); return; }
+        const my = ++sid;
+        topics = list.map((w) => w.topic);
+        since = Math.max(1, Math.floor(Math.min(...list.map((w) => w.t)) - C.margin));
+        openedAt = now(); liveAt = 0;
+        setPhase("opening");
+        let r = "error";
+        try { r = await deps.open(NTFY + "/" + topics.join(",") + "/json?since=" + since, my); } catch (e) { r = "error"; }
+        if (my !== sid) { again = true; return; } // stopped or replaced meanwhile (back in front already: open again below)
+        if (r === "unsupported") { setPhase("off"); log("no native stream in this build: polls"); return; }
+        if (r !== "ok") { ended("not opened"); return; }
+        clearTimeout(openTimer);
+        openTimer = setTimeout(() => { if (my === sid && phase === "opening") { call(deps.counted, "err"); call(deps.close, my); ended("no answer"); } }, C.openFor);
+      } finally {
+        connecting = false;
+        if (again && running && phase === "idle") connect();
+      }
+    }
+    // a stream that says 200 but brings nothing (a proxy holding the answer back, a dead connection) is closed: the
+    // first line (ntfy's "open") must come soon, then something (at least a keepalive every 45 s) all the time
+    function watch(ms) {
+      clearTimeout(idleTimer);
+      const my = sid;
+      idleTimer = setTimeout(() => { if (my === sid && phase === "open") { call(deps.close, my); ended("silent"); } }, ms);
+    }
+    // the current stream is over (dropped, refused, closed by ntfy.sh, silent): try again soon after a stream that kept
+    // bringing lines for a while, else after a growing wait; never inside the shared 429 wait
+    function ended(why) {
+      clearTimeout(openTimer); clearTimeout(idleTimer); openTimer = idleTimer = 0;
+      const healthy = phase === "open" && liveAt > 0 && now() - openedAt >= C.healthy && now() - liveAt < C.idle;
+      sid++; // (late events from it are ignored)
+      let wait;
+      if (healthy) { backoff = 0; wait = C.again; }
+      else { backoff = Math.min(Math.max(backoff * 2, C.backoffMin), C.backoffMax); wait = backoff * (0.8 + 0.4 * Math.random()); }
+      wait = Math.max(wait, (Number(call(deps.gate)) || 0) + 500);
+      log("ended (" + why + "), again in " + Math.round(wait / 1000) + " s");
+      waitThen(wait);
+    }
+    // a topic this stream carries but nobody wants now: not covered (its poll, if any, reads it) and not read past
+    function drop(list) {
+      const before = topics.length;
+      topics = topics.filter((t) => !list.includes(t));
+      if (topics.length !== before) call(deps.onState, phase);
+    }
+    // one line from ntfy: true when it was one of ntfy's events (anything else, e.g. a portal's page, isn't "alive")
+    function line(text) {
+      let m = null; try { m = JSON.parse(text); } catch (e) { return false; }
+      if (!m || typeof m !== "object" || typeof m.event !== "string") return false;
+      const time = Number(m.time) || 0;
+      if (m.event === "open") { if (time > 0) cur.off = Math.round(nowSec() - time); return true; }
+      if (m.event === "keepalive") {
+        // every topic of the stream is read up to here, once what came before is handled
+        const my = sid;
+        if (time > 0) queue = queue.then(() => { if (my === sid) for (const t of topics) moveCursor(t, time); });
+        return true;
+      }
+      if (m.event !== "message" || typeof m.id !== "string" || m.id.length > 40 || !topics.includes(m.topic)) return true;
+      if (seenSet.has(m.id)) return true;
+      seenSet.add(m.id);
+      queued++;
+      const my = sid;
+      queue = queue.then(async () => {
+        let took = true;
+        try { took = (await deps.take(m)) !== false; } catch (e) { log("take " + (e && e.message)); }
+        // nobody took it (its topic isn't wanted now): neither remembered nor read past (the topic leaves this stream
+        // at once, so no keepalive moves its cursor either); it comes again once the topic is wanted
+        if (!took) { seenSet.delete(m.id); refusedAt.set(m.topic, now()); if (my === sid) { drop([m.topic]); self.refresh(); } return; }
+        // (remembered for good only once handled: a message cut off by the app closing comes again)
+        remember(m.id);
+        moveCursor(m.topic, time);
+      }).finally(() => { queued--; });
+      return true;
+    }
+    const self = {
+      // Ghost came to the front / went to the background
+      start() { running = true; if (phase === "idle") connect(); },
+      stop() {
+        running = false;
+        clearTimeout(timer); clearTimeout(openTimer); clearTimeout(idleTimer); clearTimeout(refreshTimer); timer = openTimer = idleTimer = refreshTimer = 0;
+        if (phase === "opening" || phase === "open") { call(deps.close, sid); sid++; }
+        if (phase !== "off") setPhase("idle");
+        saveNow();
+      },
+      feed(ev) {
+        if (!ev || ev.sid !== sid || (phase !== "opening" && phase !== "open")) return;
+        if (ev.ev === "status") {
+          if (ev.status === 200 && phase === "opening") {
+            clearTimeout(openTimer); openTimer = 0;
+            setPhase("open"); call(deps.counted, 200); watch(C.firstLine);
+            log("open: " + topics.length + " topics since " + since);
+          }
+          return;
+        }
+        if (ev.ev === "lines") {
+          if (phase !== "open") return;
+          let alive = false;
+          for (const l of Array.isArray(ev.lines) ? ev.lines : []) if (typeof l === "string" && l.length < 65536 && line(l)) alive = true;
+          if (alive) { liveAt = now(); watch(C.idle); }
+          return;
+        }
+        if (ev.ev === "end") {
+          const status = Number(ev.status) || 0;
+          if (phase === "opening") call(deps.counted, status || "err"); // (an open stream was counted when it opened)
+          if (status === 429) { let code = 0; try { code = Number(JSON.parse(String(ev.body || "{}")).code) || 0; } catch (e) {} call(deps.limited, code); }
+          ended(status === 429 ? "429" : status && status !== 200 ? "HTTP " + status : String(ev.error || "closed").slice(0, 80));
+        }
+      },
+      // the topics wanted may have changed: open the stream if one is missing (a little later, so changes come together);
+      // one no longer wanted stops being covered at once (its messages are left alone, it's read again from its cursor
+      // if it's wanted again)
+      refresh() {
+        if (!running || phase === "off" || refreshTimer) return;
+        refreshTimer = setTimeout(async () => {
+          refreshTimer = 0;
+          if (!running || phase === "off") return;
+          if (connecting) { self.refresh(); return; } // (an open still on its way: look again after it)
+          if (phase === "idle") return connect();
+          if (phase !== "opening" && phase !== "open") return; // (the next try reads the list again)
+          const list = await wantList();
+          if (!running || connecting || (phase !== "opening" && phase !== "open")) return;
+          drop(topics.filter((t) => !list.some((w) => w.topic === t)));
+          // (a topic whose message nobody took a moment ago doesn't make it reopen: no request loop if that keeps happening)
+          const missing = list.filter((w) => !topics.includes(w.topic) && !(now() - (refusedAt.get(w.topic) || 0) < C.refusedFor));
+          if (!missing.length) return;
+          log("reopen for " + missing.length + " more topic" + (missing.length > 1 ? "s" : ""));
+          call(deps.close, sid); sid++;
+          setPhase("idle");
+          connect();
+        }, C.refresh);
+      },
+      covers(topic) { return (phase === "opening" || phase === "open") && topics.includes(topic); },
+      // open (not only on its way) with that topic: what the open game's own look for moves waits for
+      live(topic) { return phase === "open" && topics.includes(topic); },
+      // resolves true once the stream is open and what it brought first is handled (a moment without new lines), false
+      // when it isn't open (then read with a poll)
+      settled() {
+        return new Promise((resolve) => {
+          const t0 = now();
+          const check = () => {
+            if (phase !== "opening" && phase !== "open") return resolve(false);
+            if (phase === "open" && liveAt > 0 && queued === 0 && now() - liveAt >= C.settle) return resolve(true);
+            if (now() - t0 >= C.settleMax) return resolve(phase === "open" && liveAt > 0);
+            setTimeout(check, Math.min(100, C.settle));
+          };
+          check();
+        });
+      },
+      // a poll read `topic` completely (and handled what it brought); date = that answer's Date header (ntfy.sh's clock)
+      readAt(topic, date) {
+        const ms = Date.parse(String(date || ""));
+        if (!Number.isFinite(ms)) return;
+        load().then(() => { moveCursor(topic, Math.floor(ms / 1000)); self.refresh(); });
+      },
+      // a poll handled this message: the stream drops it if it comes again inside the margin
+      seen(id) { load().then(() => remember(id)); },
+      // any answer's Date header: how far the phone's clock is from ntfy.sh's (turns a report's send time into ntfy time)
+      clock(date) {
+        const ms = Date.parse(String(date || ""));
+        if (Number.isFinite(ms) && cur) cur.off = Math.round(nowSec() - ms / 1000);
+      },
+      info() { return { phase, topics: topics.slice(), since, sid, backoff, queued, cursors: cur ? Object.assign({}, cur.t) : {}, off: cur ? cur.off : 0 }; },
+    };
+    return self;
+  }
+
   // ---- the network --------------------------------------------------------------------------------------
-  // deps: gnet(args) -> {status, body(base64)} | null   (native "gnet": ntfy.sh only)
+  // deps: gnet(args) -> {status, body(base64), date?} | null   (native "gnet": ntfy.sh only; date = the answer's Date header)
   //       keysGet() -> string|null, keysSet(string), keysDelete()
   //       farewellKeys: {get, set, del} - a second Keychain slot for the old keys, only while "bye"s owed after Leave
   //       load() -> state|null, save(state)
@@ -284,10 +557,11 @@ const GhostNetCore = (() => {
     // ---- ntfy.sh ----
     // ntfy.sh limits requests per IP (a bucket of 60, one more every 5 s), shared with the PC relay on the same wifi. A
     // 429 means it's empty: nothing goes out for a while (SLOW_MIN, doubling while it lasts; any answer resets it)
-    async function net(args) {
+    async function net(args, meta) {
       if (now() < slowUntil) throw new Error("ntfy busy");
       const r = await deps.gnet(args);
       if (!r || typeof r.status !== "number") throw new Error("Ghost network isn't reachable");
+      if (meta) meta.date = r.date;
       if (r.status === 429) { slowWait = Math.min(Math.max(slowWait * 2, SLOW_MIN), SLOW_MAX); slowUntil = now() + slowWait; throw new Error("ntfy 429"); }
       slowWait = 0;
       if (r.status === 413) throw new Error("ntfy 413 too big");
@@ -295,12 +569,15 @@ const GhostNetCore = (() => {
       return unb64(r.body || "");
     }
     const post = (topic, text) => net({ url: NTFY + "/" + topic, method: "POST", body: b64(te.encode(text)), headers: { Firebase: "no" } });
-    async function poll(topic, since) {
-      const body = td.decode(await net({ url: NTFY + "/" + topic + "/json?poll=1&since=" + encodeURIComponent(since || "all") }));
+    async function poll(topic, since, meta) {
+      const body = td.decode(await net({ url: NTFY + "/" + topic + "/json?poll=1&since=" + encodeURIComponent(since || "all") }, meta));
       const out = [];
       for (const line of body.split("\n")) { if (!line.trim()) continue; try { const m = JSON.parse(line); if (m && m.event === "message") out.push(m); } catch (e) {} }
       return out;
     }
+    // messages are handled one at a time, whether a poll read them or the stream (1.19.0) brought them
+    let lock = Promise.resolve(), takes = 0, takeDirty = false;
+    function serial(fn) { const p = lock.then(fn); lock = p.catch(() => {}); return p; }
     async function upload(bytes) {
       const topic = "gh-f-" + b32(rand(16)).slice(0, 26);
       const res = JSON.parse(td.decode(await net({ url: NTFY + "/" + topic, method: "PUT", body: b64(bytes), headers: { Filename: "g.bin", Firebase: "no" } })));
@@ -987,22 +1264,29 @@ const GhostNetCore = (() => {
         await state();
         if (!st.on || leaving) return 0;
         if (busy) { if (full && full !== "pi") pubAt = 0; return busy; } // (a full round asked for meanwhile: the next one reads both)
-        busy = (async () => {
+        busy = serial(async () => {
           await farewells();
           const me = await identity(false);
           if (!me) return 0;
           let n = 0;
-          // the private inbox (connected friends on build 81+) and the public one (invites, older builds)
-          const topics = full === "pi" ? [st.pi] : full || needPublic() ? [st.pi, me.inbox] : [st.pi];
+          // the private inbox (connected friends on build 81+) and the public one (invites, older builds); not the ones
+          // the stream (1.19.0) is reading right now
+          const covered = (t) => !!(deps.streamCovers && deps.streamCovers(t));
+          if (covered(me.inbox)) pubAt = now();
+          const topics = (full === "pi" ? [st.pi] : full || needPublic() ? [st.pi, me.inbox] : [st.pi]).filter((t) => !covered(t));
           for (const topic of topics) {
             let msgs = [];
-            try { msgs = await poll(topic, st.since[topic]); } catch (e) { if (topic === me.inbox) throw e; log("poll pi: " + e.message); continue; }
+            const meta = {};
+            try { msgs = await poll(topic, st.since[topic], meta); } catch (e) { if (topic === me.inbox) throw e; log("poll pi: " + e.message); continue; }
             if (topic === me.inbox) pubAt = now();
             for (const m of msgs.slice(0, 300)) {
               if (leaving) return n;
               st.since[topic] = m.id; n++;
               try { await handle(m, topic === st.pi); } catch (e) { log("handle: " + e.message); }
+              if (deps.streamSeen) { try { deps.streamSeen(m.id); } catch (e) {} } // (the stream drops it if it comes again)
             }
+            // read completely and handled: the stream may take this topic over from here
+            if (msgs.length <= 300 && deps.readAt) { try { deps.readAt(topic, meta.date); } catch (e) {} }
           }
           for (const inv of Object.values(st.invites)) {
             if (inv.used || inv.cancelled || now() - inv.created > INVITE_TTL) { if (now() - inv.created > 3 * INVITE_TTL) delete st.invites[inv.code]; continue; }
@@ -1018,8 +1302,26 @@ const GhostNetCore = (() => {
           }
           await save();
           return n;
-        })().finally(() => { busy = null; });
+        }).finally(() => { busy = null; });
         return busy;
+      },
+      // the topics this wants on the stream: my two inboxes, while there's anything to read them for
+      streamTopics() { return st && st.on && !leaving && ident && api.hasWork() ? [st.pi, ident.inbox] : []; },
+      // one message from the stream (a topic of streamTopics): handled like a poll's, the poll cursor moves on to it
+      take(m) {
+        takes++;
+        return serial(async () => {
+          try {
+            if (!st || !st.on || leaving || !m || typeof m.id !== "string" || m.event !== "message") return 0;
+            const me = await identity(false);
+            if (!me || (m.topic !== st.pi && m.topic !== me.inbox)) return 0;
+            const viaPi = m.topic === st.pi;
+            if (!viaPi) pubAt = now();
+            st.since[m.topic] = m.id; takeDirty = true;
+            try { await handle(m, viaPi); } catch (e) { log("handle: " + e.message); }
+            return 1;
+          } finally { if (--takes === 0 && takeDirty && st) { takeDirty = false; await save(); } } // (saved once after a burst, like a poll's round)
+        });
       },
       // on launch: tell each friend which profile version we have, so missing profiles/pictures are resent
       async sync(force) {
@@ -1189,6 +1491,7 @@ const GhostNetCore = (() => {
         leaving = true;
         try {
           if (busy) await busy.catch(() => {});
+          await lock; // (a message from the stream still being handled)
           const keyText = await Promise.resolve(deps.keysGet()).catch(() => null);
           let parked = false; // the old keys stay only in the Keychain's "farewell" slot, only while byes are owed
           const unsent = [];
@@ -1216,6 +1519,6 @@ const GhostNetCore = (() => {
     return api;
   }
 
-  return { create, parseInvite, inviteText, _test: { seal, unseal, seal2, unseal2, loadIdentity, newKeyFile, makeCard, readCard, proof, newCode, rvTopic, b32, sealReport, rxValid } };
+  return { create, createStream, parseInvite, inviteText, _test: { seal, unseal, seal2, unseal2, loadIdentity, newKeyFile, makeCard, readCard, proof, newCode, rvTopic, b32, sealReport, rxValid } };
 })();
 if (typeof module !== "undefined" && module.exports) module.exports = GhostNetCore;

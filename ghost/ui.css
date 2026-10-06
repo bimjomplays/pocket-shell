@@ -1170,7 +1170,8 @@ input, textarea {
 .gh-photo-grip::before { content: ""; position: absolute; left: -40%; right: -40%; top: -18px; bottom: -18px; } /* the visible pill is 4px tall; this pads its drag target to a real tap/drag size */
 .gh-photo-header { display: flex; align-items: center; justify-content: space-between; padding: 2px 16px 8px; flex: none; }
 .gh-photo-title { font-size: 17px; font-weight: 700; }
-.gh-photo-browse { color: var(--gh-accent); font-size: 15px; font-weight: 500; padding: 6px 2px; }
+.gh-photo-actions { display: flex; gap: 14px; }
+.gh-photo-paste, .gh-photo-browse { color: var(--gh-accent); font-size: 15px; font-weight: 500; padding: 6px 2px; }
 .gh-photo-limited {
   flex: none; margin: 0 12px 8px; padding: 9px 12px; border-radius: 10px;
   background: rgba(62,136,247,0.14); color: var(--gh-accent); font-size: 13px; font-weight: 600; text-align: center;
@@ -3020,3 +3021,8 @@ mark.gh-hl { background: #ffd54a; color: #111; border-radius: 3px; padding: 0 1p
 .gh-fb-sent-row .gh-set-value { flex: none; font-size: 14px; }
 .gh-fb-sent-row[data-st="filed"] .gh-set-value, .gh-fb-sent-row[data-st="received"] .gh-set-value { color: #3ddc84; }
 .gh-fb-sent-row[data-st="limited"] .gh-set-value, .gh-fb-sent-row[data-st="rejected"] .gh-set-value { color: var(--gh-danger); }
+
+/* snap editor (#151): the caption keyboard shortens the web view; the photo, its info filters and placed items keep
+   the editor's full-screen height (--gh-ed-h, set by pinEditorSize in ui.js) so the keyboard only covers the bottom */
+.gh-cam-review-media, .gh-editor-items { bottom: auto; height: var(--gh-ed-h, 100%); }
+.gh-fx-info { height: var(--gh-ed-h, 100%); }

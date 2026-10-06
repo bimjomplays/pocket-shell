@@ -822,8 +822,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         case "tt": // the TikTok tab: hidden TikTok page, its feed and video bytes (TikTokFeed.swift)
             guard let tiktok else { return replyHandler(nil, "unavailable") }
             tiktok.handle(body, reply: replyHandler)
-        case "gnet", "gnKeys": // Ghost network: ntfy.sh inbox requests + this Ghost's keys (GhostNet.swift)
-            GhostNet.handle(op, body) { value, error in replyHandler(value, error) }
+        case "gnet", "gnKeys", "gnStream": // Ghost network: ntfy.sh requests, the long-lived stream, this Ghost's keys (GhostNet.swift)
+            GhostNet.handle(op, body, emit: { [weak self] js in self?.webView?.ghostEval(js) }) { value, error in replyHandler(value, error) }
         case "takeOpenURL": // Ghost: the dltnpghost:// link Ghost was opened with (once), for ui.js to act on
             let url = pendingOpenURL
             pendingOpenURL = nil

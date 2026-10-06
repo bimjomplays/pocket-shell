@@ -746,13 +746,13 @@
   // audio); otherwise the type is read off the resolved Blob's own MIME (device-verified: the resolver's dataUrl is
   // `URL.createObjectURL(new Blob([bytes], {type: <sniffed from magic bytes>}))`, so a real chat photo/video comes
   // back already correctly labelled "image/..." or "video/..." without us touching any enum).
-  async function resolveMediaInfos(mediaInfos, hintType, context) {
+  async function resolveMediaInfos(mediaInfos, hintType, context, errors) {
     const V = mediaResolver();
     if (!V || !mediaInfos || !mediaInfos.length) return [];
     const out = [];
     for (const mi of mediaInfos) {
       let layers;
-      try { layers = await V(mi, context || "ghost"); } catch (e) { trail("load-media", e, "error"); continue; }
+      try { layers = await V(mi, context || "ghost"); } catch (e) { trail("load-media", e, "error"); if (errors) errors.push(errText(e)); continue; }
       const list = layers || [];
       for (let li = 0; li < list.length; li++) {
         const layer = list[li];
@@ -774,6 +774,56 @@
       }
     }
     return out;
+  }
+
+  // One snap (a chat snap, or one item of a story) is a STACK of layers, not a row of things to show one after the
+  // other: Snapchat's player resolves every layer of the item, flattens them (Promise.all(...).flat()) and draws them
+  // on top of each other, the first being the base (main.js, search "isBaseMedia"). A friend's story snap with a
+  // caption is two layers, [media, overlay image] (main.js "overlayContentObject" -> {mediaMetadata: IMAGE}), and
+  // Ghost used to show those as two story snaps: the video without its caption, then a black one with only the
+  // caption (owner report 2026-10-05). Here: base = the first layer; every later picture (and every zipped overlay)
+  // is drawn above it in order (`overlays`, the first also as `overlay`); later videos ride along as `parts` (a
+  // music track, or the picture when the base is the music - ui.js snapPictureFor).
+  function stackLayers(list) {
+    if (!list || !list.length) return null;
+    const base = Object.assign({}, list[0]);
+    const overlays = base.overlay ? [base.overlay] : [];
+    const parts = [];
+    for (let i = 1; i < list.length; i++) {
+      const layer = list[i];
+      if (!layer || !layer.url) continue;
+      if (layer.type === "image") overlays.push(layer.url);
+      else parts.push(Object.assign({}, layer, { overlay: undefined }));
+      if (layer.overlay) overlays.push(layer.overlay);
+    }
+    if (overlays.length) base.overlay = overlays[0];
+    if (overlays.length > 1) base.overlays = overlays;
+    if (parts.length) base.parts = parts;
+    return base;
+  }
+  // Resolves one snap's layers and stacks them. null when the base layer (its photo/video) didn't resolve: the caption
+  // alone must never stand in for the snap - that's the black caption-only snap again.
+  async function resolveStack(mediaInfos, context, errors) {
+    if (!mediaInfos || !mediaInfos.length) return null;
+    const base = await resolveMediaInfos(mediaInfos.slice(0, 1), undefined, context, errors);
+    if (!base.length) return null;
+    // a caption/drawing layer whose download fails is tried once more: without it the snap shows with its caption
+    // missing, and an opened snap can't be opened again
+    const rest = [];
+    for (const mi of mediaInfos.slice(1)) {
+      const failed = [];
+      let got = await resolveMediaInfos([mi], undefined, context, failed);
+      if (!got.length && failed.length) got = await resolveMediaInfos([mi], undefined, context, errors);
+      rest.push(...got);
+    }
+    return stackLayers(base.concat(rest));
+  }
+  // every blob: URL one MediaRef holds (its own, its overlays, its parts') - for releaseMedia and retention cleanup
+  function refUrls(ref) {
+    if (!ref) return [];
+    const out = [ref.url, ref.overlay].concat(ref.overlays || []);
+    for (const part of ref.parts || []) out.push(part && part.url, part && part.overlay);
+    return out.filter((u, i) => typeof u === "string" && out.indexOf(u) === i);
   }
 
   const CASE_KIND = { text: "text", snapReply: "text", storyReply: "text", botResponse: "text", chatMedia: "chat-media", externalMedia: "chat-media",
@@ -1497,7 +1547,9 @@
           const direct = job.raw.direct || [];
           resolved = direct.some((m) => m.url) ? direct : (await resolveChatMedia(job.raw)).media || [];
           const items = []; let total = 0;
-          for (const ref of resolved) {
+          // a stacked snap (stackLayers) is kept as its base + each part, the shape loadMedia hands back from the archive
+          const flat = []; for (const ref of resolved) { flat.push(ref); for (const part of ref.parts || []) flat.push(part); }
+          for (const ref of flat) {
             if (job.gen !== archive.generation || !archive.enabled) break;
             const blob = ref.blob || await retainedBlob(ref.url);
             const overlayBlob = ref.overlay ? await retainedBlob(ref.overlay) : undefined;
@@ -1510,7 +1562,7 @@
             if (openConversations.has(job.cid)) { lastMsgRef.delete(job.cid); emitMessagesFor(job.cid); }
           } else retentionError();
         } catch (_) { retentionError(); }
-        finally { for (const ref of resolved) for (const url of [ref.url, ref.overlay]) if (url && url.startsWith("blob:")) URL.revokeObjectURL(url); }
+        finally { for (const ref of resolved) for (const url of refUrls(ref)) if (url.startsWith("blob:")) URL.revokeObjectURL(url); }
       }
     } finally { archiveMediaBusy = false; }
   }
@@ -1739,6 +1791,28 @@
   function conversationEntry(conversationId) {
     return (messaging().conversations || {})[conversationId];
   }
+  // A snap Ghost still lists can be gone from Snapchat's store (its message map is replaced with the newest page
+  // whenever a chat is entered again, and a busy group pushes a snap out of that page fast). Snapchat's own snap
+  // player fetches the ones it doesn't hold and merges them back in (main.js, search
+  // "hydrateConversationWithMessages:"). Same here: the quiet fetch (fetchConversationWithMessages only - nothing
+  // is marked read), then hydrate so startedViewingSnap/finishedViewingSnap find the message. -> {key, raw} | null
+  async function refetchSnap(conversationId, messageId) {
+    let list = null;
+    try { list = await quietFetchMessages(conversationId); } catch (e) { trail("snap-refetch", e, "error"); return null; }
+    const hit = rawEntries(list).find(([id, raw]) => String(id != null ? id : raw && raw.descriptor && raw.descriptor.messageId) === String(messageId));
+    if (!hit) { trail("snap-refetch", "not in the newest page either", "error"); return null; }
+    const m = messaging();
+    if (typeof m.hydrateConversationWithMessages === "function") {
+      try { await m.hydrateConversationWithMessages(convIdObj(conversationId), [hit[1]]); } catch (e) { trail("snap-hydrate", e, "error"); }
+    }
+    const entry = conversationEntry(conversationId);
+    const stored = entry && entry.messages && findRaw(entry.messages, messageId);
+    trail("snap-refetch", stored ? "back in the store" : "using the fetched copy");
+    return { key: stored ? realKey(entry.messages, messageId) : (hit[0] != null ? hit[0] : hit[1].descriptor.messageId), raw: stored || hit[1] };
+  }
+  // conversationId|messageId -> {key, raw} openSnap told Snapchat it started viewing, so closeSnap finishes the same
+  // snap even when it isn't in the store (a refetched snap whose hydrate didn't take)
+  const openedSnaps = new Map();
 
 
   // Friend tools. Snapchat Web's own Add Friends page keeps its gRPC client (FriendAction service) and its search
@@ -1834,7 +1908,7 @@
     if (!conversationId || !Array.isArray(list)) return;
     let set = mediaUrlsByConv.get(conversationId);
     if (!set) mediaUrlsByConv.set(conversationId, (set = new Set()));
-    for (const m of list) for (const u of [m && m.url, m && m.overlay]) if (typeof u === "string" && u.startsWith("blob:")) set.add(u);
+    for (const m of list) for (const u of refUrls(m)) if (u.startsWith("blob:")) set.add(u);
   }
   async function resolveChatMedia(raw) {
       const mc = raw.messageContent || {};
@@ -1845,7 +1919,8 @@
       // receipts, unlike openSnap
       const snapdoc = kase === "snapdoc" ? c.snapdoc : (c && c[kase] && c[kase].snapdoc && !Array.isArray(c[kase].snapdoc) ? c[kase].snapdoc : null);
       if (snapdoc && mc.remoteMediaReferences && mc.remoteMediaReferences[0]) {
-        return { media: await resolveMediaInfos(mediaInfosFromSnapdoc(snapdoc, mc.remoteMediaReferences[0]), undefined, "snap") };
+        const snap = await resolveStack(mediaInfosFromSnapdoc(snapdoc, mc.remoteMediaReferences[0]), "snap");
+        return { media: snap ? [snap] : [] };
       }
       if (kase === "externalMedia" || kase === "chatMedia" || kase === "externalMediaMessageContent") {
         const snapdocs = (c.externalMedia && c.externalMedia.snapdoc) || [];
@@ -2128,35 +2203,67 @@
     // was fetched, so the snap got marked opened and then couldn't be loaded.
     async openSnap(conversationId, messageId) {
       requireStore();
+      const t0 = Date.now(); // ui.js gives openSnap/replaySnap 45 s, then says it failed
       const m = messaging();
       const entry = conversationEntry(conversationId);
-      const key = realKey(entry && entry.messages, messageId);
-      const raw = entry && entry.messages && findRaw(entry.messages, messageId);
+      let key = realKey(entry && entry.messages, messageId);
+      let raw = entry && entry.messages && findRaw(entry.messages, messageId);
+      if (!raw) { const hit = await refetchSnap(conversationId, messageId); if (hit) ({ key, raw } = hit); }
       if (!raw) throw new Error("snap not loaded");
       const cid = convIdObj(conversationId);
       const status = (s) => safe("snap-status", () => typeof m.snapDownloadStatusChanged === "function" && Promise.resolve(m.snapDownloadStatusChanged(s, cid, key)).catch(() => {}), null);
       status(0); // INITIATED
-      let media = [];
+      let snap = null, why = "";
       try {
         const decoded = decodeContent(raw.messageContent);
         const c = decoded && decoded.content;
         const kase = c && c.$case;
         const snapdoc = kase === "snapdoc" ? c.snapdoc : c && c[kase] && c[kase].snapdoc;
         const rmr = raw.messageContent && raw.messageContent.remoteMediaReferences && raw.messageContent.remoteMediaReferences[0];
-        if (snapdoc && rmr) media = await resolveMediaInfos(mediaInfosFromSnapdoc(snapdoc, rmr), undefined, "snap");
-      } catch (e) { trail("open-snap", e, "error"); }
-      if (!media.length) { status(2); throw new Error("couldn't load this snap"); } // FAILED
+        // no snapdoc or no media reference = Snapchat Web can't show it either ("ViewableOnMobile", main.js search
+        // "snapsViewableOnMobile"; an expired snap loses its media references)
+        if (!snapdoc) why = "unavailable: no snapdoc (" + (kase || "no content") + ")";
+        else if (!rmr) why = "unavailable: no media reference";
+        else {
+          // one retry: a video snap is one big download (Snapchat's own fetch gives up after 60 s), and a single
+          // failed fetch used to leave only "Couldn't load that Snap" (owner report 2026-10-05, group video snap)
+          const infos = mediaInfosFromSnapdoc(snapdoc, rmr);
+          for (let attempt = 0; attempt < 2 && !snap; attempt++) {
+            // no second try once the first took long (a 60 s timeout): it couldn't finish before Ghost stops waiting
+            if (attempt && Date.now() - t0 > 20000) { trail("open-snap", "no retry: first try took " + Math.round((Date.now() - t0) / 1000) + " s", "error"); break; }
+            if (attempt) await new Promise((r) => setTimeout(r, 1500));
+            const errors = [];
+            snap = await resolveStack(infos, "snap", errors);
+            if (!snap) { why = "download failed: " + (errors[0] || "nothing resolved") + " (" + infos.length + " layers)"; trail("open-snap", "try " + (attempt + 1) + " " + why, "error"); }
+          }
+        }
+      } catch (e) { why = errText(e); trail("open-snap", e, "error"); }
+      // loaded only after ui.js stopped waiting: nobody sees it, so it isn't marked viewed (it stays New, a tap retries)
+      if (snap && Date.now() - t0 > 43000) {
+        why = "download failed: took " + Math.round((Date.now() - t0) / 1000) + " s, longer than Ghost waits";
+        trail("open-snap", why, "error");
+        for (const u of refUrls(snap)) if (u.startsWith("blob:")) safe("revoke", () => URL.revokeObjectURL(u));
+        snap = null;
+      }
+      if (!snap) { status(2); throw new Error("couldn't load this snap - " + (why || "no media")); } // FAILED
       status(1); // SUCCEEDED
-      if (typeof m.startedViewingSnap === "function") Promise.resolve(m.startedViewingSnap(cid, key)).catch((e) => trail("snap-started", e, "error"));
-      return { media };
+      const opened = conversationId + "|" + messageId;
+      openedSnaps.delete(opened); openedSnaps.set(opened, { key, raw });
+      if (openedSnaps.size > 30) openedSnaps.delete(openedSnaps.keys().next().value);
+      if (typeof m.startedViewingSnap === "function") safe("snap-started", () => Promise.resolve(m.startedViewingSnap(cid, key)).catch((e) => trail("snap-started", e, "error")), null);
+      return { media: [snap] };
     },
 
     async closeSnap(conversationId, messageId) {
       requireStore();
       const m = messaging();
       const entry = conversationEntry(conversationId);
-      const raw = entry && entry.messages && findRaw(entry.messages, messageId);
-      if (typeof m.finishedViewingSnap === "function") await m.finishedViewingSnap(convIdObj(conversationId), realKey(entry && entry.messages, messageId), raw);
+      const opened = openedSnaps.get(conversationId + "|" + messageId);
+      openedSnaps.delete(conversationId + "|" + messageId);
+      let raw = entry && entry.messages && findRaw(entry.messages, messageId);
+      let key = realKey(entry && entry.messages, messageId);
+      if (!raw && opened) ({ key, raw } = opened); // opened from a refetched copy the store didn't keep
+      if (typeof m.finishedViewingSnap === "function") await m.finishedViewingSnap(convIdObj(conversationId), key, raw);
       return true;
     },
 
@@ -2219,9 +2326,11 @@
       }
       const items = (bundle && bundle.bundle && bundle.bundle.items) || [];
       // all snaps at once (was one after another - slow to open), each tagged with its snap index for replies
-      const perItem = await Promise.all(items.map((item) => resolveMediaInfos((item && item.mediaLayers) || [], undefined, "ghost_story").catch(() => [])));
+      // one story snap = one item, its layers stacked (a captioned video is [video, caption] - see stackLayers); an
+      // item whose photo/video didn't load is left out rather than shown as its caption on black
+      const perItem = await Promise.all(items.map((item) => resolveStack((item && item.mediaLayers) || [], "ghost_story").catch(() => null)));
       const media = [];
-      perItem.forEach((list, i) => { for (const m of list) { m.item = i; media.push(m); } });
+      perItem.forEach((m, i) => { if (m) { m.item = i; media.push(m); } else trail("story-item", "snap " + i + " didn't load", "error"); });
       lastStory = { userId, key, items, conversationId: (bundle && (bundle.conversationId || (bundle.bundle && bundle.bundle.bundleMetadata && bundle.bundle.bundleMetadata.conversationId))) };
       // Opening only fetches the media (Snapchat preloads it for thumbnails too); a snap counts as watched when the
       // viewer actually shows it - see markStoryViewed.

@@ -1546,6 +1546,13 @@
     conv.textarea.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && pref("sendOnReturn") && !e.isComposing) { e.preventDefault(); sendCurrentText(ctx); }
     });
+    // paste a picture into the field = send it like a Gallery pick (text pastes as before)
+    conv.textarea.addEventListener("paste", (e) => {
+      const files = pastedImages(e.clipboardData);
+      if (!files.length) return;
+      e.preventDefault();
+      sendPastedImages(ctx, files);
+    });
     initVoiceRecorder(ctx, screen, conv); // (ctx.conv isn't set yet while the screen is being built)
     screen.querySelector('[data-act="composer-camera"]').addEventListener("click", () => openCamera(ctx, { to: ctx.state.currentConvId }));
     screen.querySelector('[data-act="composer-gallery"]').addEventListener("click", () => openPhotoSheet(ctx));
@@ -3187,6 +3194,50 @@
     try { await api.sendText(convId, text, replyToMessageId ? { replyToMessageId } : {}); }
     catch (e) { ctx.showToast("Couldn't send that message"); }
   }
+  // Pictures on the clipboard (a copy from Photos, Safari, Files...). Text wins when the clipboard also holds real
+  // text (copying from a page puts both there); a lone link next to a picture is how Safari copies an image, so the
+  // picture still wins then. iOS lists the same picture under both files and items: kept once.
+  function pastedImages(cd) {
+    if (!cd) return [];
+    const out = [];
+    const add = (f) => { if (f && /^image\//.test(f.type) && !out.some((o) => o === f || (o.size === f.size && o.type === f.type && o.name === f.name))) out.push(f); };
+    for (const f of Array.from(cd.files || [])) add(f);
+    for (const it of Array.from(cd.items || [])) if (it.kind === "file") add(it.getAsFile && it.getAsFile());
+    if (!out.length) return [];
+    let text = "";
+    try { text = (cd.getData("text/plain") || "").trim(); } catch (e) {}
+    if (text && !/^https?:\/\/\S+$/i.test(text)) return [];
+    return out.slice(0, 10);
+  }
+  async function sendPastedImages(ctx, files) {
+    const conv = ctx.conv;
+    if (!ctx.state.currentConvId) return;
+    haptic("light");
+    conv.atBottom = true; scrollConvToBottom(ctx, false);
+    for (const f of files) {
+      const kind = f.type === "image/gif" ? "gif" : "image";
+      try { await api.sendMedia(ctx.state.currentConvId, f, { kind }); }
+      catch (e) { gtrail("paste send failed " + ((e && e.message) || e)); ctx.showToast("Couldn't send that picture"); }
+    }
+  }
+  // "Paste" in the photo sheet: reads the clipboard itself (a tap = the user gesture iOS wants; iOS shows its own
+  // "Paste" confirmation). The keyboard's Paste menu isn't offered for a lone picture in a plain text field, so a
+  // screenshot from iOS "Copy and Delete" can't be pasted into the chat box; this is the way for that.
+  async function pasteClipboardPicture(ctx) {
+    haptic("light");
+    const files = [];
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        const type = item.types.find((t) => /^image\//.test(t));
+        if (!type) continue;
+        const blob = await item.getType(type);
+        files.push(new File([blob], "image." + (type.split("/")[1] || "png").replace("jpeg", "jpg"), { type }));
+      }
+    } catch (e) { gtrail("clipboard read failed " + ((e && e.message) || e)); }
+    if (!files.length) { ctx.showToast("No picture on the clipboard"); return; }
+    closePhotoSheet(ctx);
+    sendPastedImages(ctx, files.slice(0, 10));
+  }
   async function sendMediaFile(ctx, file) {
     const convId = ctx.state.currentConvId;
     if (!convId) return;
@@ -3513,6 +3564,7 @@
   // the wait is over (30 s, doubling to 10 min while 429s last; any answer resets it), since asking again keeps it full.
   // code = ntfy's own reason for the last 429 (42901 too many requests, 42908 the IP's daily message quota is used up)
   const ntfyGate = { until: 0, wait: 0, code: 0 };
+  const gsx = { core: null, piCovered: false }; // the Ghost Network stream (1.19.0, section "Ghost network": gsStart)
   // One trail line per request that actually went out ("GHOST ntfy GET pi 200"; class pi = private inbox, pub = public
   // inbox, rv = rendezvous card, file = picture/report file, ctl = relay control topic, ack = a report's answer topic)
   // and one count per minute ("GHOST ntfy/min 7 pi=5 pub=1 ctl=1", written with the first request of the next minute),
@@ -3535,16 +3587,21 @@
     ntfyTrailLine(" " + String(args.method || "GET").toUpperCase() + " " + cls + " " + status);
     ntfyStat.n++; ntfyStat.by[cls] = (ntfyStat.by[cls] || 0) + 1;
   }
+  function ntfyLimited(code) {
+    ntfyGate.code = code || 0;
+    ntfyGate.wait = Math.min(Math.max(ntfyGate.wait * 2, 30e3), 600e3);
+    ntfyGate.until = Date.now() + ntfyGate.wait;
+    uiTrailN("ntfy 429: nothing sent for " + Math.round(ntfyGate.wait / 1000) + " s");
+  }
   async function ntfyNet(args) {
     if (Date.now() < ntfyGate.until) throw new Error("ntfy busy");
     let r;
     try { r = await dgPost("gnet", args); } catch (e) { ntfyCount(args, "err"); throw e; }
     ntfyCount(args, r && r.status ? r.status : "err");
+    if (r && r.date && gsx.core) gsx.core.clock(r.date); // (ntfy.sh's clock, for the stream's cursors)
     if (r && r.status === 429) {
-      try { ntfyGate.code = Number(JSON.parse(atob(r.body || "")).code) || 0; } catch (e) { ntfyGate.code = 0; }
-      ntfyGate.wait = Math.min(Math.max(ntfyGate.wait * 2, 30e3), 600e3);
-      ntfyGate.until = Date.now() + ntfyGate.wait;
-      uiTrailN("ntfy 429: nothing sent for " + Math.round(ntfyGate.wait / 1000) + " s");
+      let code = 0; try { code = Number(JSON.parse(atob(r.body || "")).code) || 0; } catch (e) {}
+      ntfyLimited(code);
     } else if (r && r.status) ntfyGate.wait = 0;
     return r;
   }
@@ -3621,7 +3678,10 @@
       <div class="gh-sheet-grip gh-photo-grip"></div>
       <div class="gh-photo-header">
         <div class="gh-photo-title">All Photos</div>
-        <button class="gh-photo-browse gh-press gh-hit">Browse…</button>
+        <span class="gh-photo-actions">
+          <button class="gh-photo-paste gh-press gh-hit">Paste</button>
+          <button class="gh-photo-browse gh-press gh-hit">Browse…</button>
+        </span>
       </div>
       <button class="gh-photo-limited gh-press" style="display:none;">Limited access — Manage</button>
       <div class="gh-photo-scroll gh-scroll">
@@ -3642,6 +3702,7 @@
       backdrop, sheet,
       grip: sheet.querySelector(".gh-photo-grip"),
       browseBtn: sheet.querySelector(".gh-photo-browse"),
+      pasteBtn: sheet.querySelector(".gh-photo-paste"),
       limitedRow: sheet.querySelector(".gh-photo-limited"),
       scroll: sheet.querySelector(".gh-photo-scroll"),
       grid: sheet.querySelector(".gh-photo-grid"),
@@ -3673,6 +3734,7 @@
 
     backdrop.addEventListener("click", () => { if (!p.sending) closePhotoSheet(ctx); }); // mid-send: reopening would start a second run
     p.browseBtn.addEventListener("click", () => { closePhotoSheet(ctx); ctx.conv.fileInput.click(); });
+    p.pasteBtn.addEventListener("click", () => pasteClipboardPicture(ctx));
     p.limitedRow.addEventListener("click", () => { haptic("light"); dgPost("photoManage").catch(() => {}); });
     p.settingsBtn.addEventListener("click", () => { haptic("light"); dgPost("photoOpenSettings").catch(() => {}); });
     p.sendBtn.addEventListener("click", () => sendPickerSelection(ctx));
@@ -5403,7 +5465,7 @@
   const NOTIFY_CTL_AAD = "ghost-notify-ctl-v1";
   let notifyCfg; // undefined = not loaded yet, null = not paired
   async function notifyLoad() { if (notifyCfg === undefined) { const v = await storage.get(NOTIFY_KEY, null); notifyCfg = v && v.v === 1 && v.sub ? v : null; } return notifyCfg; }
-  async function notifySave() { await storage.set(NOTIFY_KEY, notifyCfg || null); }
+  async function notifySave() { await storage.set(NOTIFY_KEY, notifyCfg || null); gsRefresh(); } // (paired or not: the stream's topics)
   function notifyValueLabel() { const c = notifyCfg; return !c ? "Not set up" : !c.on ? "Off" : c.status === "repair" ? "Re-pair needed" : "On"; }
   function b64uBytes(t) {
     t = String(t || "").replace(/-/g, "+").replace(/_/g, "/"); while (t.length % 4) t += "=";
@@ -5494,32 +5556,52 @@
   async function notifyPollControlNow() {
     const c = notifyCfg;
     if (!c || !c.ctl) return false;
+    // (1.19.0) while the Ghost Network stream reads the control topic there's nothing to ask: only wait until what it
+    // brought first is applied (it applies the rest as it comes, notifyCtlTake)
+    if (gsCovers(c.ctl.topic) && await gsSettled() && gsCovers(c.ctl.topic)) return false;
     const url = "https://ntfy.sh/" + c.ctl.topic + "/json?poll=1&since=" + encodeURIComponent(c.since || "all");
     let r = null; try { r = await ntfyNet({ url, method: "GET", cls: "ctl" }); } catch (e) { return false; }
     if (!r || r.status !== 200 || typeof r.body !== "string") return false;
     const text = new TextDecoder().decode(b64uBytes(r.body.replace(/\+/g, "-").replace(/\//g, "_")));
-    const key = await crypto.subtle.importKey("raw", b64uBytes(c.ctl.key), "AES-GCM", false, ["decrypt"]);
-    let changed = false, dirty = false, rxNew = false, lastId = c.since;
+    const key = await notifyCtlKey(c);
+    const acc = { changed: false, dirty: false, rxNew: false, lastId: c.since };
     for (const line of text.split("\n")) {
       let m = null; try { m = JSON.parse(line); } catch (e) { continue; }
-      if (!m || m.event !== "message" || typeof m.message !== "string") continue;
-      if (typeof m.id === "string" && /^[A-Za-z0-9]{6,40}$/.test(m.id)) lastId = m.id;
-      try {
-        const raw = b64uBytes(m.message);
-        if (raw.length < 29 || raw.length > 8192) continue;
-        const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: new TextEncoder().encode(NOTIFY_CTL_AAD) }, key, raw.slice(12));
-        const j = JSON.parse(new TextDecoder().decode(plain));
-        if (j && j.type === "subscription" && Number(j.ts) > (c.subTs || 0)) { c.sub = notifyCheckSub(j.sub); c.subTs = Number(j.ts); changed = true; }
-        if (j && j.type === "settings-ack" && j.v === 1 && Number.isInteger(j.rev) && NOTIFY_DELIVERY.some(([k]) => k === j.delivery) && (j.ping === undefined || notifyPingOk(j.ping))) dirty = notifyDeliveryAck(c, j) || dirty;
-        if (j && j.type === "apns-ack" && j.v === 1 && Number.isSafeInteger(j.rev) && NOTIFY_APNS_STATES.includes(j.state)) dirty = notifyApnsAck(c, j) || dirty;
-        // relay 1.5.0+: its report inbox (section "Feedback"), and its answer to the list of who may send reports
-        if (j && j.type === "reports") { const rx = fbValidRx(j); if (rx && rx.rev > ((c.rx && c.rx.rev) || 0)) { c.rx = rx; c.rpPending = true; c.rxFresh = true; rxNew = true; dirty = true; } }
-        if (j && j.type === "reporters-ack" && j.v === 1 && Number.isSafeInteger(j.rev) && c.rpPending && c.rpRev && j.rev >= c.rpRev) { c.rpPending = false; dirty = true; }
-      } catch (e) { /* not ours / tampered: ignored */ }
+      await notifyCtlApply(c, key, m, acc);
     }
-    if (lastId !== c.since || changed || dirty) { c.since = lastId; await notifySave(); }
-    if (rxNew) setTimeout(() => fbOwnerSync(fbCtx), 0);
-    return changed;
+    if (acc.lastId !== c.since || acc.changed || acc.dirty) { c.since = acc.lastId; await notifySave(); }
+    if (acc.rxNew) setTimeout(() => fbOwnerSync(fbCtx), 0);
+    gsReadAt(c.ctl.topic, r.date); // (read completely: the stream can take it over)
+    return acc.changed;
+  }
+  const notifyCtlKey = (c) => crypto.subtle.importKey("raw", b64uBytes(c.ctl.key), "AES-GCM", false, ["decrypt"]);
+  // one message of the control topic, from a poll or the stream; acc collects what changed
+  async function notifyCtlApply(c, key, m, acc) {
+    if (!m || m.event !== "message" || typeof m.message !== "string") return;
+    if (typeof m.id === "string" && /^[A-Za-z0-9]{6,40}$/.test(m.id)) acc.lastId = m.id;
+    try {
+      const raw = b64uBytes(m.message);
+      if (raw.length < 29 || raw.length > 8192) return;
+      const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: new TextEncoder().encode(NOTIFY_CTL_AAD) }, key, raw.slice(12));
+      const j = JSON.parse(new TextDecoder().decode(plain));
+      if (j && j.type === "subscription" && Number(j.ts) > (c.subTs || 0)) { c.sub = notifyCheckSub(j.sub); c.subTs = Number(j.ts); acc.changed = true; }
+      if (j && j.type === "settings-ack" && j.v === 1 && Number.isInteger(j.rev) && NOTIFY_DELIVERY.some(([k]) => k === j.delivery) && (j.ping === undefined || notifyPingOk(j.ping))) acc.dirty = notifyDeliveryAck(c, j) || acc.dirty;
+      if (j && j.type === "apns-ack" && j.v === 1 && Number.isSafeInteger(j.rev) && NOTIFY_APNS_STATES.includes(j.state)) acc.dirty = notifyApnsAck(c, j) || acc.dirty;
+      // relay 1.5.0+: its report inbox (section "Feedback"), and its answer to the list of who may send reports
+      if (j && j.type === "reports") { const rx = fbValidRx(j); if (rx && rx.rev > ((c.rx && c.rx.rev) || 0)) { c.rx = rx; c.rpPending = true; c.rxFresh = true; acc.rxNew = true; acc.dirty = true; } }
+      if (j && j.type === "reporters-ack" && j.v === 1 && Number.isSafeInteger(j.rev) && c.rpPending && c.rpRev && j.rev >= c.rpRev) { c.rpPending = false; acc.dirty = true; }
+    } catch (e) { /* not ours / tampered: ignored */ }
+  }
+  // the stream brought one (1.19.0): applied at once, and the pages that show it follow without waiting for a look
+  async function notifyCtlTake(ctx, m) {
+    const c = notifyCfg;
+    if (!c || !c.ctl || m.topic !== c.ctl.topic) return;
+    const acc = { changed: false, dirty: false, rxNew: false, lastId: c.since };
+    await notifyCtlApply(c, await notifyCtlKey(c), m, acc);
+    if (notifyCfg !== c) return;
+    if (acc.lastId !== c.since || acc.changed || acc.dirty) { c.since = acc.lastId; await notifySave(); }
+    if (acc.changed || acc.dirty) notifyRefreshPage(ctx);
+    if (acc.rxNew) { setTimeout(() => fbOwnerSync(fbCtx || ctx), 0); if (c.rxFresh) { c.rxFresh = false; fbRefresh(ctx); } }
   }
   // Notification Delivery: "grouped" (the relay's default: one banner per chat and type a minute, a newer one replaces
   // a waiting one) or "every" (a banner per message), plus "ping", the seconds between a ringing call's banners (3-15)
@@ -5698,7 +5780,7 @@
   async function notifyStart(ctx) {
     window.__ghostOpenURL = (u) => { dgPost("takeOpenURL", {}).catch(() => {}); handleGhostURL(ctx, u).catch((e) => uiTrailN("url " + (e && e.message))); };
     ctx.notifyTest = { poll: () => notifyPollControl(), cfg: () => notifyCfg, start: () => notifyStart(ctx), setDelivery: (m) => notifySetDelivery(ctx, typeof m === "string" ? { delivery: m } : m), apns: () => notifyApnsSync(ctx), setApns: (on) => notifySetApns(ctx, on) }; // rig only
-    ctx.fbTest = { state: () => fbState, acks: () => fbPollAcks(ctx), owner: () => fbOwnerSync(ctx), dests: () => fbDestinations(ctx), app: () => fbAppInfo(), outbox: () => fbOutboxRun(ctx), gate: () => Object.assign({}, ntfyGate), kick: (why) => fbOutboxKick(ctx, why) }; // rig only
+    ctx.fbTest = { state: () => fbState, acks: () => fbPollAcks(ctx), owner: () => fbOwnerSync(ctx), dests: () => fbDestinations(ctx), app: () => fbAppInfo(), outbox: () => fbOutboxRun(ctx), gate: () => Object.assign({}, ntfyGate), ungate: () => { ntfyGate.until = 0; ntfyGate.wait = 0; }, kick: (why) => fbOutboxKick(ctx, why) }; // rig only
     let pending = null; try { pending = await dgPost("takeOpenURL", {}); } catch (e) {}
     await notifyLoad();
     if (typeof pending === "string" && pending) setTimeout(() => handleGhostURL(ctx, pending).catch(() => {}), 1200);
@@ -5840,7 +5922,7 @@
     if (!fbState) { const v = await storage.get(FB_KEY, null); fbState = v && v.v === 1 && Array.isArray(v.sent) ? v : { v: 1, sent: [] }; }
     return fbState;
   }
-  async function fbSave() { if (fbState) { fbState.sent = fbState.sent.slice(-30); await storage.set(FB_KEY, fbState); } }
+  async function fbSave() { if (fbState) { fbState.sent = fbState.sent.slice(-30); await storage.set(FB_KEY, fbState); gsRefresh(); } } // (a report's answer topic joins the stream)
   // cut by characters, not UTF-16 units: half an emoji would reach the relay as an unreadable lone surrogate
   function fbCut(v, n) { const a = Array.from(String(v == null ? "" : v)); return a.length > n ? a.slice(0, n).join("") : a.join(""); }
   function fbRand32(n) { const r = crypto.getRandomValues(new Uint8Array(n)); let s = ""; for (const x of r) s += FB_B32[x & 31]; return s; }
@@ -6125,9 +6207,15 @@
     if (!fbAckBusy) fbAckBusy = fbPollAcksNow(ctx).catch((e) => uiTrailN("feedback answers " + (e && e.message))).finally(() => { fbAckBusy = null; });
     return fbAckBusy;
   }
+  // reports whose answer can still come (their answer topics are read; the stream reads them too, 1.19.0)
+  function fbAckOpen() {
+    return fbState ? fbState.sent.filter((s) => s.ack && Date.now() - (s.sentAt || s.ts) < FB_ACK_FOR && !["filed", "limited", "rejected", "queued", "failed"].includes(s.st)) : [];
+  }
   async function fbPollAcksNow(ctx) {
     await fbLoad();
-    const open = fbState.sent.filter((s) => s.ack && Date.now() - (s.sentAt || s.ts) < FB_ACK_FOR && !["filed", "limited", "rejected", "queued", "failed"].includes(s.st));
+    let open = fbAckOpen();
+    // the ones the Ghost Network stream reads right now aren't asked for: only wait until what it brought first is in
+    if (open.some((s) => gsCovers(s.ack.t)) && await gsSettled()) open = open.filter((s) => !gsCovers(s.ack.t));
     let changed = false;
     for (const s of open) {
       let r = null;
@@ -6137,22 +6225,32 @@
       const key = await crypto.subtle.importKey("raw", b64uBytes(s.ack.k), "AES-GCM", false, ["decrypt"]);
       for (const line of text.split("\n")) {
         let m = null; try { m = JSON.parse(line); } catch (e) { continue; }
-        if (!m || m.event !== "message" || typeof m.message !== "string") continue;
-        if (typeof m.id === "string" && /^[A-Za-z0-9]{6,40}$/.test(m.id) && m.id !== s.since) { s.since = m.id; changed = true; }
-        try {
-          const raw = b64uBytes(m.message);
-          if (raw.length < 29 || raw.length > 4096) continue;
-          const j = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: new TextEncoder().encode(FB_ACK_AAD) }, key, raw.slice(12))));
-          if (!j || j.rid !== s.rid || !FB_STATUSES.includes(j.st)) continue;
-          s.st = j.st;
-          if (Number.isSafeInteger(j.n) && j.n > 0) s.n = j.n;
-          if (typeof j.why === "string") s.why = j.why.slice(0, 30);
-          changed = true;
-        } catch (e) { /* not the relay's (wrong key) */ }
+        if (await fbAckApply(s, key, m)) changed = true;
       }
+      gsReadAt(s.ack.t, r.date);
     }
     if (changed) { await fbSave(); fbRefresh(ctx); }
     return changed;
+  }
+  // one message on a report's answer topic (from a poll or the stream): true when the report changed
+  async function fbAckApply(s, key, m) {
+    if (!m || m.event !== "message" || typeof m.message !== "string") return false;
+    let changed = false;
+    if (typeof m.id === "string" && /^[A-Za-z0-9]{6,40}$/.test(m.id) && m.id !== s.since) { s.since = m.id; changed = true; }
+    try {
+      const raw = b64uBytes(m.message);
+      if (raw.length < 29 || raw.length > 4096) return changed;
+      const j = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: new TextEncoder().encode(FB_ACK_AAD) }, key, raw.slice(12))));
+      if (!j || j.rid !== s.rid || !FB_STATUSES.includes(j.st)) return changed;
+      s.st = j.st;
+      if (Number.isSafeInteger(j.n) && j.n > 0) s.n = j.n;
+      if (typeof j.why === "string") s.why = j.why.slice(0, 30);
+      return true;
+    } catch (e) { return changed; /* not the relay's (wrong key) */ }
+  }
+  async function fbAckTake(ctx, s, m) {
+    const key = await crypto.subtle.importKey("raw", b64uBytes(s.ack.k), "AES-GCM", false, ["decrypt"]);
+    if (await fbAckApply(s, key, m)) { await fbSave(); fbRefresh(ctx); }
   }
   function fbAckSoon(ctx) {
     clearTimeout(fbAckTimer);
@@ -7689,6 +7787,25 @@
     wrap.addEventListener("touchcancel", end, { passive: true });
     return v;
   }
+  // A snap's caption/drawing layers (bridge.js stackLayers: `overlays` in order, or the one `overlay`), drawn over
+  // its photo/video exactly where they belong - same size box, object-fit contain.
+  function addSnapOverlays(parent, ref, opts) {
+    const list = (ref && (ref.overlays || (ref.overlay ? [ref.overlay] : []))) || [];
+    for (const url of list) {
+      if (opts && opts.skip === url) continue;
+      const ov = el("img", "gh-viewer-overlay"); ov.src = url; ov.alt = ""; parent.appendChild(ov);
+    }
+    return list.length;
+  }
+  // a photo snap/story with music: its sound is a picture-less video part - play it hidden behind the photo
+  function playSnapTune(parent, ref, before, loop) {
+    const tune = (ref.parts || []).find((x) => x.type === "video" && x.url);
+    if (!tune) return null;
+    const a = el("video", "gh-viewer-still"); a.playsInline = true; a.src = tune.url; a.style.opacity = "0"; a.loop = !!loop;
+    parent.insertBefore(a, before);
+    a.addEventListener("loadedmetadata", () => { if (a.isConnected && a.videoWidth === 0) { a.play().catch(() => {}); gtrail("snap: photo with a music part"); } }, { once: true });
+    return a;
+  }
   function openViewerSingle(ctx, mediaRef) {
     const v = ctx.viewer;
     v.story = null; v.snapQ = null; v.el.dataset.unsave = "0";
@@ -7747,6 +7864,7 @@
       video.muted = false; video.playsInline = true; video.autoplay = true;
       video.addEventListener("ended", () => viewerStep(ctx, 1));
       v.media.appendChild(video);
+      if (ref.parts) snapPictureFor(ctx, ref, video); // a story snap whose base layer is its music
       startViewerTimer(ctx, (ref.durationSec || 6) * 1000);
       // the bridge doesn't know a story video's length; once the file does, time the progress bar to it
       if (!ref.durationSec) video.addEventListener("loadedmetadata", () => {
@@ -7756,6 +7874,7 @@
       const img = el("img");
       img.src = ref.url || (ref.blob && URL.createObjectURL(ref.blob)) || "";
       v.media.appendChild(img);
+      if (ref.parts) playSnapTune(v.media, ref, img, false);
       startViewerTimer(ctx, 5000);
     }
     // a story snap counts as watched once it's on screen (receipt to the friend + grey ring here), like Snapchat
@@ -7763,7 +7882,7 @@
       v.marked = v.marked || new Set();
       if (!v.marked.has(ref.item)) { v.marked.add(ref.item); api.markStoryViewed(v.story.user.id, ref.item).then((r) => { if (r && r.ok === false) gtrail("story view " + r.reason); }).catch(() => {}); }
     }
-    if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); } // snap caption/drawing
+    addSnapOverlays(v.media, ref); // story caption/drawing, on the same snap (not a snap of its own)
     if (!v.single) {
       const fills = v.bars.querySelectorAll(".gh-viewer-bar-fill");
       fills.forEach((f, i) => { f.classList.remove("gh-anim"); f.style.width = i < v.idx ? "100%" : "0%"; });
@@ -7917,7 +8036,9 @@
       // is the music (an audio-only mp4, which sniffs as "video") the snap played black with just the sound and the
       // caption (device 2026-09-28). The rest ride along as `parts`; showSnapVideo finds the picture among them.
       const ref = media && media[0] ? Object.assign({}, media[0], media.length > 1 ? { parts: media.slice(1) } : {}) : null;
-      if (media && media.length) gtrail("snap media " + media.map((x) => x.type + (x.width ? " " + x.width + "x" + x.height : "") + (x.overlay ? " +overlay" : "")).join(", "));
+      const desc = (x) => x.type + (x.width ? " " + x.width + "x" + x.height : "") + (x.overlays ? " +" + x.overlays.length + " overlays" : x.overlay ? " +overlay" : "")
+        + (x.parts ? " +parts[" + x.parts.map(desc).join(", ") + "]" : "");
+      if (media && media.length) gtrail("snap media " + media.map(desc).join(", "));
       if (ref) {
         m.opened = true;
         if (q.mode === "unopened" || q.mode === "replay") {
@@ -7926,7 +8047,7 @@
         }
       }
       return ref;
-    }).catch((e) => { gtrail("snap-queue part failed " + (e && e.message || e)); return null; });
+    }).catch((e) => { const why = String(e && e.message || e); gtrail("snap-queue part failed " + why); (q.errors || (q.errors = new Map())).set(idx, why); return null; });
     q.cache.set(idx, p);
     return p;
   }
@@ -7978,15 +8099,10 @@
     const img = el("img");
     img.src = ref.url || (ref.blob && URL.createObjectURL(ref.blob)) || "";
     v.media.appendChild(img);
-    if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); }
+    addSnapOverlays(v.media, ref);
     v.currentRef = ref;
     // photo first, music second: play the part with no picture for its sound (a part WITH a picture is left alone)
-    const tune = (ref.parts || []).find((x) => x.type === "video" && x.url);
-    if (tune) {
-      const a = el("video", "gh-viewer-still"); a.playsInline = true; a.src = tune.url; a.style.opacity = "0"; a.loop = q.mode === "saved";
-      v.media.insertBefore(a, img);
-      a.addEventListener("loadedmetadata", () => { if (a.isConnected && a.videoWidth === 0) { a.play().catch(() => {}); gtrail("snap: photo with a music part"); } }, { once: true });
-    }
+    playSnapTune(v.media, ref, img, q.mode === "saved");
     // a saved snap stays up until you tap or close it, like Snapchat (it used to close itself after 5 s -
     // device 2026-09-28); new/replayed snaps still move on by themselves
     if (q.mode === "saved") { startSnapSegmentTimer(ctx, idx, 0, null); clearTimeout(v.timer); return; }
@@ -8000,7 +8116,7 @@
     const pic = parts.find((x) => x.type === "image" && x.url) || parts.find((x) => x.type === "video" && x.url);
     const apply = () => {
       if (!video.isConnected || video.videoWidth > 0 || video._ghostPic) return;
-      if (!pic) { gtrail("snap video has no picture and no other part (" + parts.length + " parts)"); return; }
+      if (!pic) { gtrail("snap video has no picture" + (ref.overlay ? "; its picture layers are drawn over it" : " and no other part (" + parts.length + " parts)")); return; }
       video._ghostPic = true;
       let back;
       if (pic.type === "image") { back = el("img", "gh-viewer-still"); back.src = pic.url; back.alt = ""; }
@@ -8021,7 +8137,7 @@
     const v = ctx.viewer;
     v.media.innerHTML = "";
     v.media.appendChild(video);
-    if (ref.overlay) { const ov = el("img", "gh-viewer-overlay"); ov.src = ref.overlay; ov.alt = ""; v.media.appendChild(ov); }
+    addSnapOverlays(v.media, ref);
     video.style.opacity = ""; video._ghostPic = false;
     if (ref.parts) snapPictureFor(ctx, ref, video);
     v.currentRef = ref;
@@ -8078,7 +8194,10 @@
     const ref = await getSnapRef(ctx, q, idx);
     if (v.snapQ !== q || v.snapLoadToken !== token) return; // closed, or advanced again while this was loading
     if (!ref) {
-      if (idx === 0) ctx.showToast("Couldn't load that Snap");
+      // the snap stays unopened, so a tap tries again; one Snapchat Web can't show at all (expired, or a kind only
+      // the phone app plays) says so instead
+      const why = (q.errors && q.errors.get(idx)) || "";
+      if (idx === 0) ctx.showToast(/ - unavailable:/.test(why) ? "That Snap can only be opened in the Snapchat app" : "Couldn't load that Snap. Tap it to try again.");
       paintSnapQueueItem(ctx, idx + 1);
       return;
     }
@@ -8229,8 +8348,11 @@
       zoom: 1, zoomMin: 1, zoomMax: 1, zoomHardware: false, usingUltra: false, pinch: null,
       lockedRecording: false, startingRecording: false, recordCancelled: false, recTickTimer: null,
       _zoomTimer: null, _zoomPillTimer: null,
+      frameOk: false, watchdog: null, muteTimer: null, healReset: null, // black-preview repair (#151): first frame seen, timers
+      heals: 0, noFrameHealed: false,                    // stream restarts this open (max 3), the no-frame one used
     };
     q('[data-act="close"]').addEventListener("click", () => { haptic("light"); closeCamera(ctx); });
+    document.addEventListener("visibilitychange", () => cameraOnVisible(ctx));
     q('[data-act="flip"]').addEventListener("click", () => flipCamera(ctx));
     c.flashBtn.addEventListener("click", () => toggleFlash(ctx));
     c.timerBtn.addEventListener("click", () => cycleTimer(ctx));
@@ -8355,6 +8477,11 @@
     c.zoom = 1; c.zoomShown = 1; c.usingUltra = false;
     c.timerMode = 0; c.timerBtn.dataset.mode = "0"; c.timerLabel.textContent = "";
     c.flash = "off"; c.torchOn = false;
+    c.heals = 0; c.noFrameHealed = false;
+    // a chat's message box may still have the keyboard up: close it, or the camera (and the snap editor's full-screen
+    // size, measured when the photo opens) start out keyboard-short
+    const focused = ctx.shadow && ctx.shadow.activeElement;
+    if (focused && focused.blur && (focused.tagName === "TEXTAREA" || focused.tagName === "INPUT" || focused.isContentEditable)) focused.blur();
     c.el.dataset.open = "1";
     requestAnimationFrame(() => { c.el.dataset.shown = "1"; });
     startCameraStream(ctx);
@@ -8383,37 +8510,145 @@
       ? { deviceId: { exact: wantDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
       : { facingMode: c.facing, width: { ideal: 1920 }, height: { ideal: 1080 } };
     const fallback = wantDeviceId ? { deviceId: { exact: wantDeviceId } } : { facingMode: c.facing };
+    const label = (opts && opts.label) || "open";
     const t0 = perfNow();
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: primary, audio: false })
-        .catch(() => navigator.mediaDevices.getUserMedia({ video: fallback, audio: false }));
-      if (myGen !== c.gen || c.el.dataset.open !== "1") { stream.getTracks().forEach((t) => t.stop()); return; }
-      c.stream = stream;
-      c.live.innerHTML = "";
-      const video = el("video");
-      video.autoplay = true; video.playsInline = true; video.muted = true;
-      video.srcObject = stream;
-      video.dataset.mirror = c.facing === "user" ? "1" : "0";
-      c.live.appendChild(video);
-      c.video = video;
-      trackFirstFrame(video, t0, (opts && opts.label) || "open");
-      setupZoomCapability(ctx);
-      if (!c.devicesReady) refreshDeviceMap(ctx);
-    } catch (e) {
-      gtrail("camera failed " + (e && (e.name || e.message)));
-      c.live.innerHTML = '<div class="gh-camera-note">Camera unavailable. Allow camera access for Ghost in Settings.</div>';
+    let stream = null, err = null;
+    // A camera that's busy for a moment (NotReadableError/AbortError: a call or another app still letting go of it,
+    // or the previous stream's stop not finished yet) gets two more tries before Ghost gives up; a stale cached
+    // deviceId falls back to facingMode.
+    for (let attempt = 0; attempt < 3 && !stream; attempt++) {
+      if (attempt) { await new Promise((r) => setTimeout(r, 500 * attempt)); if (myGen !== c.gen || c.el.dataset.open !== "1") return; }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: primary, audio: false })
+          .catch(() => navigator.mediaDevices.getUserMedia({ video: fallback, audio: false }))
+          .catch((e) => { if (!wantDeviceId) throw e; return navigator.mediaDevices.getUserMedia({ video: { facingMode: c.facing }, audio: false }); });
+      } catch (e) {
+        err = e;
+        gtrail("camera " + label + " try " + (attempt + 1) + " failed " + (e && (e.name || e.message)));
+        if (e && (e.name === "NotAllowedError" || e.name === "SecurityError")) break; // no access: retrying won't help
+      }
     }
+    if (myGen !== c.gen || c.el.dataset.open !== "1") { if (stream) stream.getTracks().forEach((t) => t.stop()); return; }
+    if (!stream) {
+      const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
+      cameraNote(ctx, denied ? "Camera unavailable. Allow camera access for Ghost in Settings, then tap to try again." : "The camera didn't start. Tap to try again.");
+      return;
+    }
+    c.stream = stream;
+    c.live.innerHTML = "";
+    const video = el("video"); // a new element for every stream (iOS can leave a reused one black)
+    video.autoplay = true; video.playsInline = true; video.muted = true;
+    video.srcObject = stream;
+    video.dataset.mirror = c.facing === "user" ? "1" : "0";
+    c.live.appendChild(video);
+    c.video = video;
+    c.frameOk = false;
+    trackFirstFrame(video, t0, label, (how) => {
+      if (c.video !== video || (how === "loadeddata" && video.paused)) return; // a paused video isn't a live preview
+      c.frameOk = true;
+      // healthy for 10 s: the restart budget is full again (several trips to the background in one open)
+      clearTimeout(c.healReset); c.healReset = setTimeout(() => { if (c.video === video) { c.heals = 0; c.noFrameHealed = false; } }, 10000);
+    });
+    playCameraVideo(video, label);
+    watchCameraTrack(ctx, stream, myGen);
+    armCameraWatchdog(ctx, myGen);
+    setupZoomCapability(ctx);
+    if (!c.devicesReady) refreshDeviceMap(ctx);
   }
-  function trackFirstFrame(video, t0, label) {
+  // Black preview (owner's report #151, 1.17.0, iOS 26.6.1: "camera has been showing black when I try to send a
+  // snap"). Ghost relied on autoplay and never looked again: a preview whose first frame never came, a track iOS
+  // ended (another app or a call took the camera) or muted for good (an interruption that didn't resume) stayed black
+  // until the camera was closed and opened again. Now: play() is called explicitly, a missing first frame gets
+  // play() once more and then one fresh stream, an ended / long-muted track is replaced, coming back to the app
+  // checks the track, and when nothing works the preview says so and a tap tries again (never a silent black screen).
+  function playCameraVideo(video, label) {
+    try { const p = video.play(); if (p && p.catch) p.catch((e) => gtrail("camera " + label + " play failed " + (e && (e.name || e.message)))); } catch (e) {}
+  }
+  function cameraOpenFor(ctx, gen) {
+    const c = ctx.camera;
+    return gen === c.gen && c.el.dataset.open === "1" && c.review.dataset.open !== "1";
+  }
+  // recording, a self-timer or a pinch in progress: no restart under the finger, the check comes back a second later
+  function cameraBusy(c) { return !!(c.recording || c.startingRecording || c.selfTimerRunning || c.pinch); }
+  function cameraLiveNow(ctx, gen) { return cameraOpenFor(ctx, gen) && !cameraBusy(ctx.camera); }
+  function cameraNote(ctx, text) {
+    const c = ctx.camera;
+    stopCameraStream(ctx);
+    c.live.innerHTML = "";
+    const note = el("div", "gh-camera-note");
+    note.textContent = text;
+    note.dataset.retry = "1";
+    note.addEventListener("click", (e) => { e.stopPropagation(); haptic("light"); c.heals = 0; c.live.innerHTML = '<div class="gh-camera-note">Starting camera…</div>'; startCameraStream(ctx, { label: "retry" }); });
+    c.live.appendChild(note);
+  }
+  // restart the stream (same camera), at most 3 times per open so a camera that keeps failing ends at the note
+  function healCamera(ctx, gen, why) {
+    const c = ctx.camera;
+    if (!cameraOpenFor(ctx, gen)) return;
+    if (cameraBusy(c)) { if (!c.recording) setTimeout(() => healCamera(ctx, gen, why), 1000); return; }
+    if (document.hidden) return; // capture is refused in the background: cameraOnVisible repairs it on return
+    c.heals = (c.heals || 0) + 1;
+    gtrail("camera heal " + c.heals + " (" + why + ")");
+    if (c.heals > 3) { cameraNote(ctx, "The camera didn't start. Tap to try again."); return; }
+    const id = c.facing === "environment" && c.usingUltra ? null : c.devices[c.facing];
+    c.zoom = 1; c.zoomShown = 1; c.usingUltra = false;
+    startCameraStream(ctx, id ? { deviceId: id, label: "heal" } : { label: "heal" });
+  }
+  function watchCameraTrack(ctx, stream, gen) {
+    const c = ctx.camera;
+    const track = stream.getVideoTracks()[0];
+    if (!track || !track.addEventListener) return;
+    const mine = () => c.stream === stream && cameraOpenFor(ctx, gen);
+    track.addEventListener("ended", () => { if (mine()) healCamera(ctx, gen, "track ended"); });
+    // iOS mutes the track for a moment on interruptions and unmutes it itself; only a mute that lasts is repaired
+    // (in the background it waits for the app to come back, see the visibilitychange check)
+    track.addEventListener("mute", () => {
+      clearTimeout(c.muteTimer);
+      c.muteTimer = setTimeout(() => { if (mine() && track.muted && !document.hidden) healCamera(ctx, gen, "track muted"); }, 1500);
+    });
+    track.addEventListener("unmute", () => clearTimeout(c.muteTimer));
+  }
+  // no first frame: play() again after 2 s, a fresh stream after 3.5 s (once per open), then the note
+  function armCameraWatchdog(ctx, gen) {
+    const c = ctx.camera;
+    clearTimeout(c.watchdog);
+    const shown = () => c.frameOk || (c.video && !c.video.paused && c.video.readyState >= 2 && c.video.videoWidth > 0);
+    // in the background it stops (cameraOnVisible starts it again); while busy it starts over a little later
+    const wait = () => { if (!cameraOpenFor(ctx, gen) || !c.video || shown() || document.hidden) return true; if (cameraBusy(c)) { armCameraWatchdog(ctx, gen); return true; } return false; };
+    c.watchdog = setTimeout(() => {
+      if (wait()) return;
+      gtrail("camera no frame after 2s, play again");
+      playCameraVideo(c.video, "watchdog");
+      c.watchdog = setTimeout(() => {
+        if (wait()) return;
+        if (c.noFrameHealed) { gtrail("camera still no frame"); cameraNote(ctx, "The camera didn't start. Tap to try again."); return; }
+        c.noFrameHealed = true;
+        healCamera(ctx, gen, "no frame");
+      }, 1500);
+    }, 2000);
+  }
+  // back in the app with the camera open: a dead track is replaced now, a muted one if it stays muted
+  function cameraOnVisible(ctx) {
+    const c = ctx.camera;
+    if (!c || document.hidden || !cameraLiveNow(ctx, c.gen) || !c.stream) return;
+    const track = c.stream.getVideoTracks()[0], gen = c.gen;
+    if (!track || track.readyState === "ended") { healCamera(ctx, gen, "dead after background"); return; }
+    if (track.muted) { clearTimeout(c.muteTimer); c.muteTimer = setTimeout(() => { if (c.stream && c.stream.getVideoTracks()[0] === track && track.muted) healCamera(ctx, gen, "muted after background"); }, 1500); return; }
+    if (c.video && c.video.paused) playCameraVideo(c.video, "front");
+    if (!c.frameOk) armCameraWatchdog(ctx, gen);
+  }
+  function trackFirstFrame(video, t0, label, onFrame) {
     // Prefer requestVideoFrameCallback (WebKit has shipped it since Safari 15.4) for a true first-decoded-
     // frame timestamp; fall back to loadeddata on anything older. Logged through gtrail so device logs carry
     // real open/flip timings instead of guesses.
-    const done = (how) => { gtrail("camera " + label + " ttff " + Math.round(perfNow() - t0) + "ms (" + how + ")"); };
+    let seen = false;
+    const done = (how) => { if (seen) return; seen = true; if (onFrame) onFrame(how); gtrail("camera " + label + " ttff " + Math.round(perfNow() - t0) + "ms (" + how + ")"); };
     if (typeof video.requestVideoFrameCallback === "function") video.requestVideoFrameCallback(() => done("rVFC"));
-    else video.addEventListener("loadeddata", () => done("loadeddata"), { once: true });
+    video.addEventListener("loadeddata", () => done("loadeddata"), { once: true });
   }
   function stopCameraStream(ctx) {
     const c = ctx.camera;
+    clearTimeout(c.watchdog); clearTimeout(c.muteTimer); clearTimeout(c.healReset);
     if (c.stream) { c.stream.getTracks().forEach((t) => t.stop()); c.stream = null; }
     if (c.video) { c.video.srcObject = null; c.video.remove(); }
     c.video = null;
@@ -8795,6 +9030,7 @@
   function openReview(ctx, blob, kind, fromCamera, dims, extra) {
     const c = ctx.camera;
     c.captured = { blob, kind, width: dims && dims.width, height: dims && dims.height, hasAudio: dims ? dims.hasAudio !== false : true, at: Date.now() };
+    c.gen++; // a flip/restart still waiting for its camera mustn't attach a stream under the review
     stopCameraStream(ctx);
     c.reviewMedia.innerHTML = "";
     const url = extra && extra.url ? extra.url : URL.createObjectURL(blob);
@@ -9100,6 +9336,35 @@
     initSizePicker(ctx, c);
     initTextInput(ctx, c);
     buildTextStyleRow(ctx, c);
+    window.addEventListener("resize", () => editorResized(ctx, c));
+  }
+  // The caption keyboard shortens the whole web view (App.swift keyboardChanged), and the review used to shrink with
+  // it: the photo was cropped again into the top half, the caption sat on its bottom edge and the strip down to the
+  // keyboard was black (owner's report #151, 1.17.0). The photo and everything placed on it now keep the editor's
+  // full-screen size (--gh-ed-h, ed.viewport); only the controls follow the keyboard, and the caption being typed is
+  // lifted above it - like Snapchat. The full size only ever grows here (the review opened while a keyboard was
+  // still going down), never shrinks.
+  function editorResized(ctx, c) {
+    const ed = c.editor;
+    if (!ed || c.review.dataset.open !== "1") return;
+    const h = c.review.offsetHeight;
+    if (!ed.editingText && h > ed.viewport.h + 1) { ed.viewport = { w: c.review.offsetWidth || ed.viewport.w, h }; pinEditorSize(c); sizeDrawCanvas(ed, ed.viewport.w, ed.viewport.h); }
+    placeTextWrap(c);
+  }
+  function pinEditorSize(c) { c.review.style.setProperty("--gh-ed-h", c.editor.viewport.h + "px"); }
+  // the photo's box in host px (the full-screen size, not the keyboard-shortened web view)
+  function reviewBox(c) {
+    const ed = c.editor;
+    return { w: c.review.offsetWidth || ed.viewport.w, h: Math.max(c.review.offsetHeight, ed.viewport.h) || ed.viewport.h };
+  }
+  // the caption being typed: where it will be placed, but never under the keyboard (above the style row)
+  function placeTextWrap(c) {
+    const ed = c.editor, item = ed && ed.editingText;
+    if (!item) return;
+    const want = clamp(item.y - 40, 60, Math.max(60, ed.viewport.h - 160));
+    const rowH = ed.styleRow && ed.styleRow.offsetHeight ? ed.styleRow.offsetHeight + 16 : 60;
+    const room = c.review.offsetHeight - rowH - (ed.textWrap.offsetHeight || 34) - 8;
+    ed.textWrap.style.top = Math.max(60, Math.min(want, room)) + "px";
   }
 
   function resetEditor(ctx, c) {
@@ -9123,6 +9388,7 @@
     hideTrash(ctx, c);
     requestAnimationFrame(() => {
       ed.viewport = { w: c.review.offsetWidth || 393, h: c.review.offsetHeight || 852 }; // host CSS px, not zoomed page px
+      pinEditorSize(c);
       sizeDrawCanvas(ed, ed.viewport.w, ed.viewport.h);
     });
   }
@@ -9184,7 +9450,7 @@
     ed.colorFrac = item.colorFrac != null ? item.colorFrac : 0.5;
     setColorThumb(ed, item.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac), ed.colorFrac);
     ed.colorbar.dataset.show = "1";
-    ed.textWrap.style.top = clamp((item.style === 0 ? item.y : item.y) - 40, 60, Math.max(60, ed.viewport.h - 160)) + "px";
+    placeTextWrap(c);
     if (item.el) item.el.style.visibility = "hidden";
     requestAnimationFrame(() => { try { ed.textInput.focus(); } catch (e) {} });
   }
@@ -9446,6 +9712,7 @@
   function initTextInput(ctx, c) {
     const ed = c.editor;
     ed.textInput.addEventListener("blur", () => commitTextEditing(ctx, c));
+    ed.textInput.addEventListener("input", () => placeTextWrap(c)); // a second line mustn't grow under the keyboard
   }
 
   // ---- stickers (emoji grid + the app's own Bitmoji catalog/render host, reused read-only) --------------
@@ -10203,7 +10470,7 @@
   }
   // a finger x in the review box -> x fraction of the canvas (which is shown object-fit cover/contain)
   function fxSplitToCanvas(ed, c, x, cw, ch) {
-    const vw = c.review.offsetWidth || ed.viewport.w, vh = c.review.offsetHeight || ed.viewport.h;
+    const { w: vw, h: vh } = reviewBox(c);
     const t = (ed.fit === "contain" ? containTransform : coverTransform)(vw, vh, cw, ch);
     return clamp((x - t.ox) / (cw * t.scale), -0.01, 1.01);
   }
@@ -10266,7 +10533,7 @@
   function fxPaintInfoLayer(c, slot, kind, offsetX) {
     const ed = c.editor, layer = ed.fxInfoLayers[slot];
     if (!kind || !fxInfoReady(kind)) { layer.style.display = "none"; layer._key = ""; return; }
-    const vw = c.review.offsetWidth || ed.viewport.w, vh = c.review.offsetHeight || ed.viewport.h;
+    const { w: vw, h: vh } = reviewBox(c);
     const key = kind + ":" + vw + "x" + vh + ":" + (kind === "time" ? Math.floor((c.captured && c.captured.at || 0) / 60000) : "") + ":" + (fxContext ? fxContext.at : 0);
     if (layer._key !== key) {
       const dpr = Math.min(3, window.devicePixelRatio || 1);
@@ -14775,6 +15042,7 @@
       if (top && top.refresh && /^(gn|friend$|privacy$|main$|feedback$)/.test(top.name)) top.refresh();
       if (notifyCfg && notifyCfg.rx) fbOwnerSync(ctx); // my relay takes reports: friends and names may have changed
     }, 60);
+    gsRefresh(); // (a first invite or friend: my inboxes join the stream)
   }
   const [GN_BEAT_FAST, GN_BEAT_SLOW, GN_FAST_FOR] = window.__ghostBeats || [20e3, 60e3, 120e3]; // (the test rig sets window.__ghostBeats)
   let gnSchedule = () => {};
@@ -14784,6 +15052,7 @@
     gn.ctx = ctx; ctx.gn = gn;
     gn.net = GhostNetCore.create({
       gnet: (a) => ntfyNet(a).catch((e) => { gnTrail("gnet " + (e && e.message || e)); return null; }),
+      streamCovers: gsCovers, readAt: gsReadAt, streamSeen: gsSeen, // (1.19.0: inboxes the stream reads aren't polled)
       // keys live in the Keychain ({keys}); a Keychain error rejects (network.js then refuses to make new keys). Ghost
       // storage is only used where there is no native side at all (a plain browser / old rig: no {keys} reply).
       keysGet: async () => {
@@ -14820,6 +15089,7 @@
       },
     });
     try { await gn.net.init(); } catch (e) { gnTrail("init " + (e && e.message)); }
+    gsStart(ctx);
     // always, not only with friends: this also loads YOUR saved Ghost picture/banner (with no connected friends yet,
     // they stayed blank after every launch until the next edit - phone 2026-09-29)
     gnChanged(ctx);
@@ -14871,6 +15141,65 @@
     };
     for (const ev of ["pointerdown", "keydown"]) document.addEventListener(ev, touched, { capture: true, passive: true });
     document.addEventListener("visibilitychange", () => { if (!document.hidden) { gn.activeAt = Date.now(); setTimeout(() => round("force"), 1000); if (gg.view) ggWatch(ctx); } });
+  }
+
+  // ---- the Ghost Network stream (1.19.0) ----
+  // While Ghost is in front, ONE long-lived ntfy.sh subscription carries everything Ghost reads there: my private and
+  // public Ghost inbox (network.js streamTopics), the relay's control topic and the answer topics of open bug reports.
+  // The controller is network.js createStream (cursors, dedupe, reconnect with backoff behind the shared 429 wait);
+  // native GhostNet.swift "gnStream" carries the lines. Topics it covers aren't polled: rounds read nothing (they still
+  // sync), the open game needs no watch (a move shows up as it's sent), the control/answer looks only wait for it. A
+  // build without the native op answers "unknown op" and everything polls like 1.18.
+  function gsCovers(topic) { return !!(gsx.core && topic && gsx.core.covers(topic)); }
+  function gsSettled() { return gsx.core ? gsx.core.settled() : Promise.resolve(false); }
+  function gsRefresh() { if (gsx.core) gsx.core.refresh(); }
+  function gsReadAt(topic, date) { if (gsx.core && topic && date) gsx.core.readAt(topic, date); }
+  function gsSeen(id) { if (gsx.core) gsx.core.seen(id); }
+  function gnStreamed() { const t = gn.net && gn.net.streamTopics(); return !!(gsx.core && t && t.length && gsx.core.live(t[0])); } // my private inbox is on an open stream
+  async function gsWant() {
+    const out = [];
+    if (gnOn()) for (const t of gn.net.streamTopics()) out.push({ topic: t });
+    await notifyLoad().catch(() => {});
+    if (notifyCfg && notifyCfg.ctl && notifyCfg.ctl.topic) out.push({ topic: notifyCfg.ctl.topic });
+    await fbLoad().catch(() => {});
+    for (const s of fbAckOpen()) out.push({ topic: s.ack.t, at: s.sentAt || s.ts }); // (a report just sent: read from then on)
+    return out;
+  }
+  // false: nobody wants this topic now (the stream leaves the message unread, so it can come again)
+  async function gsTake(ctx, m) {
+    if (gn.net && gn.net.streamTopics().includes(m.topic)) { if (!(await gn.net.take(m))) return false; gn.activeAt = Date.now(); return true; }
+    if (notifyCfg && notifyCfg.ctl && m.topic === notifyCfg.ctl.topic) { await notifyCtlTake(ctx, m); return true; }
+    const s = fbAckOpen().find((x) => x.ack.t === m.topic);
+    if (s) { await fbAckTake(ctx, s, m); return true; }
+    return false;
+  }
+  function gsStart(ctx) {
+    if (gsx.core || typeof GhostNetCore === "undefined" || !GhostNetCore.createStream) return;
+    gsx.core = GhostNetCore.createStream({
+      open: async (url, sid) => {
+        let r;
+        try { r = await dgPost("gnStream", { open: url, sid }); }
+        catch (e) { return /unknown op/.test(String(e && e.message || e)) ? "unsupported" : "error"; }
+        return r && r.v >= 1 ? "ok" : "unsupported"; // (no answer at all: no native side, e.g. an old rig)
+      },
+      close: () => { dgPost("gnStream", { close: true }).catch(() => {}); },
+      want: gsWant,
+      take: (m) => gsTake(ctx, m),
+      gate: () => Math.max(0, ntfyGate.until - Date.now(), gn.net && gn.net.busyFor ? gn.net.busyFor() : 0),
+      limited: (code) => ntfyLimited(code),
+      counted: (status) => { ntfyCount({ method: "GET", cls: "stream" }, status); if (typeof status === "number" && status !== 429) ntfyGate.wait = 0; },
+      hidden: () => document.hidden,
+      // the stream stopped (or started) carrying my private inbox: the open game looks for moves itself again (or stops)
+      onState: () => { const c = gnStreamed(); if (c !== gsx.piCovered) { gsx.piCovered = c; if (gg.view) ggWatch(ctx); } },
+      load: () => storage.get("ghostNetStream", null), save: (v) => storage.set("ghostNetStream", v),
+      log: (t) => gnTrail("stream " + t),
+      tune: window.__ghostStreamTune, // (rigs only: shorter waits)
+    });
+    gn.gs = gsx.core; // (rigs)
+    window.__ghostNetStream = (ev) => { if (gsx.core) gsx.core.feed(ev); };
+    dgPost("gnStream", { close: true }).catch(() => {}); // (one a reloaded page left open)
+    document.addEventListener("visibilitychange", () => { if (document.hidden) gsx.core.stop(); else gsx.core.start(); });
+    if (!document.hidden) gsx.core.start();
   }
 
   // ---- the Connect card (a "ghost:connect" message in a 1:1 chat) ----
@@ -15156,7 +15485,7 @@
   function ggWatch(ctx) {
     clearTimeout(gg.watch); gg.watch = 0;
     const v = gg.view, it = v && gn.net && gn.net.item(v.key);
-    if (!it || document.hidden) return;
+    if (!it || document.hidden || gnStreamed()) return; // (1.19.0: the stream brings the friend's move as it's sent)
     const st = ggStatusText(ctx, it);
     if (st.mine || st.over) return;
     gg.watch = setTimeout(async () => {
