@@ -430,6 +430,32 @@
         else { const d = anim.done; anim.done = () => { d && d(); api.update(next); }; }
       },
       destroy() { dead = true; cancelAnimationFrame(raf); if (ro) ro.disconnect(); rootEl.remove(); },
+      // Ghost desktop's keyboard (ui.js "Desktop screens 2"; the phone never calls these): turn the aim, pull the cue
+      // back while a key is held, let go to shoot - the same steps as dragging on the table and pulling the power bar
+      keys: {
+        aim(rad) {
+          if (dead || !myTurn() || anim || !(rad === rad)) return false;
+          const a = Math.atan2(aim.y, aim.x) + rad;
+          aim.x = Math.cos(a); aim.y = Math.sin(a); msg = null;
+          draw();
+          return true;
+        },
+        power(p) {
+          if (dead || !myTurn() || anim) return false;
+          pullNow = Math.min(1, Math.max(0, Number(p) || 0)); powerNow = pullNow * pullNow;
+          powerFill.style.height = pullNow * 100 + "%";
+          powerCue.style.transform = `translateY(${pullNow * (power.clientHeight * 0.6)}px)`;
+          draw();
+          return true;
+        },
+        shoot() {
+          const p = powerNow;
+          powerNow = 0; pullNow = 0; powerFill.style.height = "0"; powerCue.style.transform = "";
+          if (dead || !myTurn() || anim) { if (!dead) draw(); return false; }
+          if (p >= 0.01) shoot(p); else draw();
+          return true;
+        },
+      },
       // tests
       _debug: { get state() { return state; }, aim, setSpin: (s) => { spin = s; }, shoot, get animating() { return !!anim; }, get replays() { return replays; }, get msg() { return msg; }, get power() { return powerNow; }, setCall: (i) => { call = i; }, setCuePlace: (p) => { cuePlace = p; } },
     };

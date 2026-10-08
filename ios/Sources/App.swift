@@ -832,9 +832,6 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             guard let str = body["url"] as? String, let url = URL(string: str), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return replyHandler(nil, "bad url") }
             UIApplication.shared.open(url)
             replyHandler(true, nil)
-        case "openApp": // Ghost: "Open in Snapchat" on a snap Snapchat Web can't play (#207); only the snapchat:// scheme
-            guard let str = body["url"] as? String, let url = URL(string: str), url.scheme?.lowercased() == "snapchat" else { return replyHandler(nil, "bad url") }
-            UIApplication.shared.open(url, options: [:]) { ok in replyHandler(ok, nil) }
         case "appIcon": // Ghost's Settings > Appearance > App Icon: nil name = the default icon
             let name = body["name"] as? String
             let alt = (name == nil || name == "default") ? nil : name

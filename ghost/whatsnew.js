@@ -9,6 +9,13 @@
 //   - If a build ships several versions at once (e.g. 1.15.0 inside 1.16.0), put the bullets of all of them
 //     in the newest entry.
 window.GHOST_WHATS_NEW = {
+  "1.19.4": {
+    items: [
+      { t: "Holding a message to react no longer pops up the magnifying glass over the reaction bar." },
+      { t: "The \"using Snapchat for Web\" line in a chat shows up again." },
+      { t: "Snaps that only open in the Snapchat app now show a plain \"Phone only\" tile. The \"Open in Snapchat\" button is gone." },
+    ],
+  },
   "1.19.3": {
     items: [
       { t: "Use Ghost on your PC too: Ghost desktop becomes this same Ghost, with your Ghost friends and chats.", how: "Settings > Privacy > Link Ghost Desktop" },

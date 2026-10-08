@@ -14,7 +14,7 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: Ghost
-        CFBundleShortVersionString: "1.19.3"
+        CFBundleShortVersionString: "1.19.4"
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         UILaunchScreen:
@@ -30,7 +30,6 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: com.dltnp.ghost
             CFBundleURLSchemes: [dltnpghost]
-        LSApplicationQueriesSchemes: [snapchat]
         CADisableMinimumFrameDurationOnPhone: true
         UIStatusBarStyle: UIStatusBarStyleLightContent
         UIViewControllerBasedStatusBarAppearance: true

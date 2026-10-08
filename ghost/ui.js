@@ -2715,7 +2715,7 @@
       b.dataset.opened = m.opened || marked ? "1" : "0";
       b.dataset.saved = m.saved ? "1" : "0";
       label.textContent = m.saved && (isMe || m.opened) ? "Saved in Chat"
-        : isMe ? (m.opened ? "Opened" : "Delivered") : marked ? "Marked opened" : m.onlyInApp ? "Open in Snapchat" : (m.opened ? (m.replayable ? "Opened · Tap to replay" : "Opened") : "New Snap");
+        : isMe ? (m.opened ? "Opened" : "Delivered") : marked ? "Marked opened" : m.onlyInApp ? "Phone only" : (m.opened ? (m.replayable ? "Opened · Tap to replay" : "Opened") : "New Snap");
       if (saveBtn) { saveBtn.dataset.on = m.saved ? "1" : "0"; saveBtn.setAttribute("aria-label", m.saved ? "Unsave in Chat" : "Save in Chat"); }
     };
     // Save in Chat, like Snapchat Web's own button: your own snaps any time, received ones once opened. Saving
@@ -2771,16 +2771,15 @@
       });
     }
     if (!isMe && !m.opened && m.onlyInApp) {
-      // Snapchat sent web clients no content for this snap (#207): say so up front, tap opens the Snapchat app
+      // Snapchat sent web clients no content for this snap (#207): say so up front; a tap only explains (no
+      // openSnap, no "Loading…", no call out to the Snapchat app)
       b.classList.add("gh-press");
       b.dataset.onlyInApp = marked ? "marked" : "1";
       b.setAttribute("role", "button");
-      b.setAttribute("aria-label", marked ? "Marked opened. Open in Snapchat" : "Open in Snapchat");
-      b.addEventListener("click", async () => {
+      b.setAttribute("aria-label", marked ? "Marked opened. Phone only" : "Phone only");
+      b.addEventListener("click", () => {
         haptic();
-        let ok = false;
-        try { ok = !!(await window.webkit.messageHandlers.dg.postMessage({ op: "openApp", url: "snapchat://" })); } catch (e) {}
-        if (!ok) ctx.showToast("That Snap can only be opened in the Snapchat app");
+        ctx.showToast("That Snap can only be opened in the Snapchat app");
       });
     } else if (!isMe && !m.opened) {
       b.classList.add("gh-press");
@@ -3400,6 +3399,8 @@
       g.timer = setTimeout(() => {
         g.longFired = true;
         ctx.state.longPressAt = nowMs(); // the tap that ends this hold doesn't also open the photo/video
+        // a hold that outlasts the sheet must not turn into iOS's text-selection loupe (#321)
+        try { const sel = ctx.shadow.getSelection ? ctx.shadow.getSelection() : window.getSelection(); if (sel) sel.removeAllRanges(); } catch (x) {}
         haptic("medium");
         const m = messageFor(wrap);
         if (m) openActionSheet(ctx, m, wrap);
@@ -3451,6 +3452,9 @@
     }
     conv.messages.addEventListener("touchend", finish, { passive: true });
     conv.messages.addEventListener("touchcancel", finish, { passive: true });
+    // no selection starts while a finger is held on a message (the loupe), but desktop's mouse selection is untouched
+    conv.messages.addEventListener("selectstart", (e) => { if (g && !(ctx.gd && gdOn())) e.preventDefault(); });
+    conv.messages.addEventListener("contextmenu", (e) => { if (g && !(ctx.gd && gdOn())) e.preventDefault(); });
   }
 
   // =====================================================================================================
@@ -7176,7 +7180,7 @@
     mic.addEventListener("touchend", () => finish(false));
     mic.addEventListener("touchcancel", () => finish(true));
     mic.addEventListener("click", (e) => { if (!("ontouchstart" in window)) { if (r.cur) finish(false); else start(e.clientX); } });
-    conv.voice = { recording: () => !!r.cur, cancel: () => finish(true) }; // (Ghost desktop: Esc cancels, there's no finger to slide)
+    conv.voice = { recording: () => !!r.cur, cancel: () => finish(true), start: (x) => start(x), send: () => finish(false) }; // (Ghost desktop: hold the mic or Alt+V, Esc cancels)
   }
 
   // ---- Save to Photos (the app writes to the camera roll; nothing is sent to Snapchat) ------------------
@@ -13426,14 +13430,16 @@
     const g = ctx.gallery;
     const w = g.grid.clientWidth || g.scroll.clientWidth;
     if (!w) return;
-    const size = Math.floor((w - GAL_GAP * (GAL_COLS - 1)) / GAL_COLS);
+    if (ctx.gd) gdGalCols(ctx, w); // Ghost desktop: as many columns as fit (section "Desktop screens 2")
+    const cols = g.cols || GAL_COLS;
+    const size = Math.floor((w - GAL_GAP * (cols - 1)) / cols);
     if (force || size !== g.tileSize || w !== g.width) {
       if (!force) releaseAllGalTiles(ctx);
       g.tileSize = size; g.width = w;
       const rowH = size + GAL_GAP;
       let top = 0, start = 0;
       g.sections = g.months.map((m) => {
-        const rows = Math.ceil(m.count / GAL_COLS);
+        const rows = Math.ceil(m.count / cols);
         const sec = { y: m.y, m: m.m, count: m.count, start, top, rows, height: GAL_HEAD_H + rows * rowH };
         top += sec.height; start += m.count;
         return sec;
@@ -13456,7 +13462,7 @@
   function updateGalVisible(ctx) {
     const g = ctx.gallery;
     if (!g.tileSize || !g.sections.length) return;
-    const rowH = g.tileSize + GAL_GAP;
+    const rowH = g.tileSize + GAL_GAP, cols = g.cols || GAL_COLS;
     const gridTop = g.grid.offsetTop;
     const viewTop = g.scroll.scrollTop - gridTop, viewH = g.scroll.clientHeight;
     const lo = viewTop - GAL_BUFFER_PX, hi = viewTop + viewH + GAL_BUFFER_PX;
@@ -13470,8 +13476,8 @@
       const r0 = Math.max(0, Math.floor((lo - sec.top - GAL_HEAD_H) / rowH));
       const r1 = Math.min(sec.rows - 1, Math.floor((hi - sec.top - GAL_HEAD_H) / rowH));
       for (let r = r0; r <= r1; r++) {
-        for (let c = 0; c < GAL_COLS; c++) {
-          const local = r * GAL_COLS + c;
+        for (let c = 0; c < cols; c++) {
+          const local = r * cols + c;
           if (local >= sec.count) break;
           const index = sec.start + local;
           want.add(index);
@@ -13504,9 +13510,9 @@
     // sections are few (one per month): a linear walk from a binary search is plenty fast
     let lo = 0, hi = g.sections.length - 1, si = 0;
     while (lo <= hi) { const mid = (lo + hi) >> 1; if (g.sections[mid].start <= index) { si = mid; lo = mid + 1; } else hi = mid - 1; }
-    const sec = g.sections[si], local = index - sec.start;
+    const sec = g.sections[si], local = index - sec.start, cols = g.cols || GAL_COLS;
     const rowH = g.tileSize + GAL_GAP;
-    return { x: (local % GAL_COLS) * (g.tileSize + GAL_GAP), y: sec.top + GAL_HEAD_H + Math.floor(local / GAL_COLS) * rowH };
+    return { x: (local % cols) * (g.tileSize + GAL_GAP), y: sec.top + GAL_HEAD_H + Math.floor(local / cols) * rowH };
   }
   function buildGalTile(ctx, index) {
     const g = ctx.gallery;
@@ -16630,6 +16636,11 @@
     ["Right-click", "The menu a long press opens on the phone"],
     ["Ctrl+click / Shift+click", "Select messages (Esc clears, Ctrl+C copies)"],
     ["Ctrl+Enter", "Start the chat in New Chat"],
+    ["Alt+V (hold)", "Record a voice message (let go sends, Esc cancels)"],
+    ["Ctrl+A / Delete", "Gallery: select all / delete the selected"],
+    ["↑ ↓ / Space", "TikTok: next or previous video / pause"],
+    ["Space (hold)", "Camera: photo (hold for a video)"],
+    ["← → / Space (hold)", "8 Ball: aim / power, let go to shoot"],
     ["?", "This list"],
   ];
 
@@ -16646,6 +16657,7 @@
     gdComposer(ctx);
     gdKeys(ctx);
     gdScreensInit(ctx); // (section "Desktop screens", S3)
+    gdScreens2Init(ctx); // (section "Desktop screens 2", S7)
     storage.get("ghostDesktopSideW", GD_SIDE_DEF).then((w) => { gd.sideW = Number(w) || GD_SIDE_DEF; gdLayout(ctx); }).catch(() => {});
     if (typeof ResizeObserver === "function") new ResizeObserver(() => gdLayout(ctx)).observe(ctx.root);
     window.addEventListener("resize", () => gdLayout(ctx));
@@ -17144,9 +17156,9 @@
       sendCurrentText(ctx);
     });
     ta.addEventListener("input", () => { ta.style.height = "auto"; ta.style.height = Math.min(220, ta.scrollHeight) + "px"; });
-    // voice messages with a mouse: click the mic to record, click again to send, Esc to cancel (gdEscape)
+    // voice messages with a mouse: hold the mic (or Alt+V) and let go to send, Esc to cancel (gdEscape, gdVoiceInit)
     const hint = conv.screen.querySelector(".gh-rec-hint");
-    if (hint) hint.textContent = "Esc to cancel \u00b7 click the mic to send";
+    if (hint) hint.textContent = "Release to send \u00b7 Esc cancels";
   }
 
   // ---- keyboard ---------------------------------------------------------------------------------------------------
@@ -17178,6 +17190,7 @@
     const v = ctx.viewer;
     if (v.el.dataset.open === "1") return { name: "viewer", safe: true, close: () => (v.replyOpen ? closeStoryReply(ctx) : closeViewer(ctx)), closeAll: () => closeViewer(ctx) };
     if (ctx.settings.el.dataset.open === "1") return { name: "settings", safe: true, close: () => popSettingsPage(ctx), closeAll: () => closeSettings(ctx) };
+    if (ctx.gd && ctx.gd.st && ctx.gd.st.el.dataset.open === "1") return { name: "stories", safe: true, close: () => gdStoriesClose(ctx) }; // (S7)
     if ((x = q(":scope > .gh-send-page[data-open='1']"))) return { name: "sendpage", safe: true, close: click(q("[data-gact=back]", x)) };
     const c = ctx.camera;
     if (c && c.el.dataset.open === "1") return { name: "camera", close: () => gdCameraBack(ctx) };
@@ -17190,8 +17203,11 @@
     }
     const ol = q(":scope > .gh-overlay-layer");
     if ((x = q(".gh-photo-preview[data-open='1']", ol))) return { name: "preview", safe: true, close: click(q(".gh-photo-preview-close", x)) };
-    const bds = ol.querySelectorAll(".gh-backdrop[data-open='1']");
+    // (S7: TikTok's comments docked beside the video aren't a sheet over it: the video keeps the keys)
+    const C = ctx.tiktok && ctx.tiktok.comments, docked = C && C.sheet.dataset.gdDock === "1" && C.backdrop.dataset.open === "1" ? C.backdrop : null;
+    const bds = Array.from(ol.querySelectorAll(".gh-backdrop[data-open='1']")).filter((b) => b !== docked);
     if (bds.length) return { name: "sheet", safe: true, close: click(bds[bds.length - 1]) };
+    if (docked) return { name: "ttcomments", safe: true, close: () => C.close(), closeAll: () => { C.close(); gdTab(ctx, "chats"); } };
     const T = ctx.tiktok;
     if (T && T.el.dataset.open === "1") {
       if (T.search && T.search.stack.length && !(T.search.stack.length === 1 && T.search.stack[0].root)) return { name: "ttpage", safe: true, close: () => popTTPage(ctx), closeAll: () => gdTab(ctx, "chats") };
@@ -17308,6 +17324,7 @@
     // keys (not "anything in the home screen": the Gallery and TikTok panels live in there, with fields of their own)
     if (top && typing && (typing === ctx.home.input || ctx.conv.screen.contains(typing))) { typing.blur(); typing = null; }
     if (k === "Escape") return gdEscape(ctx, typing, top);
+    if (gdKeyDown2(ctx, e, top, typing)) return true; // (section "Desktop screens 2", S7)
     const lower = k.length === 1 ? k.toLowerCase() : k;
     if (ctrl && !alt && !shift && lower === "k") { gdFocusSearch(ctx); return true; }
     if (ctrl && !alt && shift && lower === "f") { if (ctx.state.currentConvId && gdCloseSafe(ctx)) openChatSearch(ctx); return true; }
@@ -18021,6 +18038,964 @@
       });
       dr.foot.appendChild(more);
     }
+  }
+
+  // =====================================================================================================
+  // Desktop screens 2 (Ghost desktop for Linux; #198 stage S7, ticket #247)
+  // =====================================================================================================
+  // The rest of the phone's screens made desktop-native, gated like the two sections above: nothing here runs without
+  // window.__ghostDesktop (gdScreens2Init is called from gdInit), and the phone code only calls in through `if (ctx.gd)`
+  // hooks (layoutGallery's column count) or reads what this section sets (gallery.cols, conv.voice). CSS: "Desktop
+  // screens 2" at the end of ui.css, under .gd-desktop (two-pane parts under .gd-wide). In the two-pane layout:
+  //  - Stories: the sidebar's story rail shows a bigger preview card on hover and starts with "All", which opens a panel
+  //    with every story as a card in a wide grid (arrow keys move, Enter or a click opens the S2 viewer, Esc closes).
+  //    Discover / Spotlight: Ghost has no such screen (shared Spotlight/Story cards in chats open in the viewer).
+  //  - Gallery and My Eyes Only: as many columns as fit (~170 px tiles), Ctrl+click / Shift+click / Ctrl+A select, Delete
+  //    = the phone's delete (the Gallery's goes through the desktop's own "Move to the Trash?", My Eyes Only's through
+  //    Ghost's confirm), pictures/videos dropped on the Gallery are saved to Pictures (saveToPhotos), a tile dragged out
+  //    carries its file once the shell's items have a file:// `uri` (not yet: see the S7 note on #247).
+  //  - TikTok: the video in a 9:16 column with its details (author, caption, sound, like/comments/save/share) beside it
+  //    and the comments docked in that column; the wheel or Up/Down = next/previous, Space pauses, a double-click likes;
+  //    search and messages in two columns (the search or inbox on the left, what you picked on the right), a video
+  //    opened from them is the same video + details view.
+  //  - Games: the panel sized for the board; chess = arrow keys + Enter/Space over the squares (the board's own click),
+  //    8 Ball = Left/Right (or the wheel) aim, hold Space for power, let go to shoot.
+  //  - Snap camera, editor and review: a wide panel, the picture centered in its own shape (the webcam's, then the
+  //    photo's) and every control in a side bar; Open a File (or a file dropped on the camera) goes to the editor;
+  //    Space = photo (hold = video), Ctrl+wheel zooms the camera; stickers/text follow the mouse even off the item,
+  //    Ctrl+wheel / Shift+wheel (or their corner handle) scale / turn them; Left/Right = the filters the phone swipes
+  //    through (L keeps one, like a second finger), Ctrl+wheel on a drawing = the brush size the phone pinches.
+  //  - Voice messages: hold the mic (or Alt+V) to record, let go to send, Esc cancels (a quick click records until the
+  //    next click, as in S2).
+  //  - The last bottom sheets: the game picker and 8 Ball's spin as centered dialogs, the editor's sticker sheet as a
+  //    popover beside the side bar, the My Eyes Only PIN pad from the keyboard (digits, Backspace).
+  // Narrower windows keep the phone's screens (with the mouse/keyboard parts that make sense there).
+  function gdScreens2Init(ctx) {
+    gdStoriesInit(ctx);
+    gdGalleryInit(ctx);
+    gdTikTokInit(ctx);
+    gdGamesInit(ctx);
+    gdCameraInit(ctx);
+    gdVoiceInit(ctx);
+    window.addEventListener("keyup", (e) => { if (gdKeyUp2(ctx, e)) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+    // (whether the focus was last moved with Tab or by the mouse: gdKeyDown2's Space/Enter on a focused button)
+    window.addEventListener("keydown", (e) => { if (e.key === "Tab") ctx.gd.tabbed = true; }, true);
+    ctx.root.addEventListener("mousedown", () => { ctx.gd.tabbed = false; }, true);
+    window.addEventListener("blur", () => gdHoldsEnd(ctx));
+  }
+  // a position in the app's own px (the host may be zoomed)
+  function gdLocal(ctx, x, y) {
+    const r = ctx.root.getBoundingClientRect(), k = pagePxToLocal();
+    return { x: (x - r.left) * k, y: (y - r.top) * k };
+  }
+  function gdAgo(ts) {
+    const d = Date.now() - Number(ts || 0);
+    if (!ts || !(d >= 0)) return "";
+    if (d < 60e3) return "just now";
+    if (d < 3600e3) return Math.floor(d / 60e3) + "m ago";
+    if (d < 86400e3) return Math.floor(d / 3600e3) + "h ago";
+    return Math.floor(d / 86400e3) + "d ago";
+  }
+  // how many cards sit in a grid's first row
+  function gdGridCols(cards) {
+    if (!cards.length) return 1;
+    const y0 = cards[0].offsetTop;
+    let n = 0;
+    for (const c of cards) { if (c.offsetTop !== y0) break; n++; }
+    return Math.max(1, n);
+  }
+  async function gdB64(blob) {
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+  const gdHasFiles = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files"));
+  // a drop target over an element: `ok()` says whether it takes files right now
+  function gdDropZone(box, text, ok, onFiles) {
+    const drop = el("div", "gd-filedrop");
+    drop.appendChild(icon("download", 40));
+    drop.appendChild(Object.assign(el("div", "gd-drop-text"), { textContent: text }));
+    box.appendChild(drop);
+    let depth = 0;
+    box.addEventListener("dragenter", (e) => { if (!gdHasFiles(e) || !ok()) return; e.preventDefault(); depth++; drop.dataset.show = "1"; });
+    box.addEventListener("dragover", (e) => { if (!gdHasFiles(e) || !ok()) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; });
+    box.addEventListener("dragleave", () => { depth = Math.max(0, depth - 1); if (!depth) drop.dataset.show = "0"; });
+    box.addEventListener("drop", (e) => {
+      depth = 0; drop.dataset.show = "0";
+      if (!gdHasFiles(e) || !ok()) return;
+      e.preventDefault(); e.stopPropagation();
+      onFiles(Array.from(e.dataTransfer.files || []));
+    });
+    return drop;
+  }
+
+  // ---- keys: what this section adds to gdKeyDown / gdLayerKey ------------------------------------------------------
+  function gdKeyDown2(ctx, e, top, typing) {
+    const k = e.key, lower = k.length === 1 ? k.toLowerCase() : k, ctrl = e.ctrlKey || e.metaKey, plain = !ctrl && !e.altKey;
+    // Alt+V held = the mic held (in the open chat, also while typing in its composer)
+    if (e.altKey && !ctrl && !e.shiftKey && (lower === "v" || e.code === "KeyV")) {
+      if (top || !ctx.state.currentConvId || (typing && typing !== ctx.conv.textarea)) return false;
+      if (!e.repeat) gdVoiceKey(ctx, true);
+      return true;
+    }
+    if (!top) return false;
+    const n = top.name;
+    // a button of this screen reached with Tab answers Space/Enter itself (not one a mouse click left focused: WebKit's
+    // :focus-visible turns on for those too as soon as a key is pressed)
+    const fb = ctx.shadow.activeElement, gd = ctx.gd;
+    const own = n === "stories" ? gd.st.el : n === "camera" ? ctx.camera.el : n === "game" ? ctx.root.querySelector(":scope > .gh-gg-view") : null;
+    if ((k === " " || k === "Enter") && gd.tabbed && fb && fb.tagName === "BUTTON" && own && own.contains(fb)) return false;
+    if (n === "stories") return !typing && plain && gdStoriesKey(ctx, k);
+    if (n === "gallery" || n === "galselect" || n === "galviewer" || n === "vault" || n === "pin") return gdGalleryKey(ctx, e, n, typing);
+    if (n === "ttpage" || n === "ttcomments") {
+      if (typing || !plain) return false;
+      const P = gdTTPlayer(ctx);
+      if (!P || !P.items || !P.items.length) return false;
+      if (k === "ArrowDown" || k === "ArrowUp") { if (!P.anim) goTikTok(ctx, clamp(P.index + (k === "ArrowDown" ? 1 : -1), 0, P.items.length - 1), 0, P); return true; }
+      if (k === " ") { toggleTikTokPause(ctx, P); return true; }
+      return false;
+    }
+    if (n === "game") return !typing && gdGameKey(ctx, e);
+    if (n === "camera") return gdCameraKey(ctx, e, typing);
+    return false;
+  }
+  function gdKeyUp2(ctx, e) {
+    const gd = ctx.gd;
+    if (!gd) return false;
+    if ((e.key === "v" || e.key === "V" || e.code === "KeyV" || e.key === "Alt") && gd.voice && gd.voice.by === "key") { gdVoiceKey(ctx, false); return true; }
+    if (e.key === " " && gd.pool) { gdPoolRelease(ctx); return true; }
+    if ((e.key === " " || e.key === "Enter") && gd.camKey) { gdCameraKeyUp(ctx); return true; }
+    return false;
+  }
+  // the window lost the keyboard while a key was held: nothing keeps going (a voice message is dropped)
+  function gdHoldsEnd(ctx) {
+    const gd = ctx.gd;
+    if (gd.voice && gd.voice.by && ctx.conv.voice.recording()) { gd.voice.by = null; ctx.conv.voice.cancel(); }
+    if (gd.pool) { cancelAnimationFrame(gd.pool.raf); const api = gd.pool.api; gd.pool = null; if (api) api.power(0); }
+    if (gd.camKey) gdCameraKeyUp(ctx);
+  }
+
+  // ---- Stories: a wide grid in a panel, previews on hover, the S2 viewer, arrow keys ---------------------------------
+  function gdStoriesInit(ctx) {
+    const gd = ctx.gd, rail = ctx.home.storiesEl;
+    const p = el("div", "gd-stories");
+    p.setAttribute("role", "dialog");
+    p.setAttribute("aria-label", "Stories");
+    p.innerHTML = '<div class="gd-st-head"><div class="gd-st-title">Stories</div><div class="gd-st-count"></div><button class="gd-st-x gh-hit" aria-label="Close (Esc)" title="Close (Esc)"></button></div>'
+      + '<div class="gd-st-grid gh-scroll" role="listbox"></div><div class="gd-st-none">No stories right now</div><div class="gd-st-hint"></div>';
+    const hint = p.querySelector(".gd-st-hint");
+    p.querySelector(".gd-st-x").appendChild(icon("close", 20));
+    p.querySelector(".gd-st-x").addEventListener("click", () => gdStoriesClose(ctx));
+    for (const [k, what] of [["← → ↑ ↓", "move"], ["Enter", "watch"], ["Esc", "close"]]) {
+      const kb = el("kbd"); kb.textContent = k;
+      hint.append(kb, Object.assign(el("span"), { textContent: what }));
+    }
+    ctx.root.appendChild(p);
+    const st = gd.st = { el: p, grid: p.querySelector(".gd-st-grid"), count: p.querySelector(".gd-st-count"), cur: -1, sig: "", pop: el("div", "gd-st-pop"), popT: 0 };
+    ctx.root.appendChild(st.pop);
+    st.grid.addEventListener("click", (e) => { const c = e.target.closest && e.target.closest(".gd-st-card"); if (c) gdStoryOpen(ctx, Number(c.dataset.i)); });
+    // the rail: "All" at its start (renderStories repaints the rail: it goes back each time) and a preview on hover
+    const all = el("button", "gd-st-all gh-press");
+    const ring = el("div", "gd-st-all-ring"); ring.appendChild(icon("storiesTab", 24));
+    all.append(ring, Object.assign(el("span", "gh-story-name"), { textContent: "All" }));
+    all.setAttribute("aria-label", "All stories");
+    all.title = "All stories";
+    all.addEventListener("click", () => gdStoriesOpen(ctx));
+    st.all = all;
+    const keep = () => {
+      const has = !!rail.querySelector(":scope > .gh-story");
+      if (has && rail.firstElementChild !== all) rail.insertBefore(all, rail.firstChild);
+      if (!has && all.parentElement) all.remove();
+      if (p.dataset.open === "1") gdStoriesPaint(ctx);
+    };
+    if (typeof MutationObserver === "function") new MutationObserver(keep).observe(rail, { childList: true });
+    keep();
+    rail.addEventListener("mouseover", (e) => {
+      const item = e.target.closest && e.target.closest(".gh-story");
+      if (!item || !rail.contains(item)) { if (e.target.closest && e.target.closest(".gd-st-all")) gdStoryPopHide(ctx); return; }
+      clearTimeout(st.popT);
+      st.popT = setTimeout(() => gdStoryPop(ctx, item), st.pop.dataset.show === "1" ? 0 : 280);
+    });
+    rail.addEventListener("mouseleave", () => gdStoryPopHide(ctx));
+    rail.addEventListener("mousedown", () => gdStoryPopHide(ctx));
+    rail.addEventListener("scroll", () => gdStoryPopHide(ctx), { passive: true });
+    // the viewer closed: the cards show what was watched
+    if (typeof MutationObserver === "function") new MutationObserver(() => {
+      if (ctx.viewer.el.dataset.open !== "1" && p.dataset.open === "1") { st.sig = ""; gdStoriesPaint(ctx); }
+    }).observe(ctx.viewer.el, { attributes: true, attributeFilter: ["data-open"] });
+  }
+  function gdStoryMeta(s) {
+    const n = Number(s.count) || 1, ago = gdAgo(s.latestTs);
+    return (n === 1 ? "1 snap" : n + " snaps") + (ago ? " · " + ago : "");
+  }
+  function gdStoryCard(ctx, s, i, preview) {
+    const c = el(preview ? "div" : "button", "gd-st-card");
+    c.dataset.i = String(i);
+    c.dataset.unviewed = s.viewed ? "0" : "1";
+    const th = el("div", "gd-st-thumb"), pic = el("div", "gd-st-pic");
+    pic.appendChild(makeAvatar(s.user, 72));
+    storyThumbFor(s).then((url) => {
+      if (!url) return;
+      const img = el("img"); img.alt = "";
+      img.onload = () => { pic.replaceChildren(img); c.dataset.preview = "1"; };
+      img.src = url;
+    });
+    const play = el("div", "gd-st-play"); play.appendChild(icon("play", 20));
+    const badge = el("div", "gd-st-badge"); badge.appendChild(makeAvatar(s.user, 30));
+    th.append(pic, play, badge);
+    const name = el("div", "gd-st-name"); name.textContent = (s.user && s.user.name) || "";
+    const meta = el("div", "gd-st-meta"); meta.textContent = gdStoryMeta(s);
+    c.append(th, name, meta);
+    if (!preview) { c.setAttribute("role", "option"); c.setAttribute("aria-label", ((s.user && s.user.name) || "") + "'s story, " + meta.textContent); }
+    return c;
+  }
+  function gdStoriesPaint(ctx) {
+    const st = ctx.gd.st, list = ctx.state.stories || [];
+    const sig = list.map((s) => s.user.id + ":" + s.count + ":" + (s.viewed ? 1 : 0)).join("|");
+    if (sig !== st.sig) {
+      st.sig = sig;
+      st.grid.replaceChildren(...list.map((s, i) => gdStoryCard(ctx, s, i)));
+    }
+    const fresh = list.filter((s) => !s.viewed).length;
+    st.count.textContent = list.length ? list.length + (list.length === 1 ? " story" : " stories") + (fresh ? " · " + fresh + " new" : "") : "";
+    st.el.dataset.empty = list.length ? "0" : "1";
+    gdStoryCursor(ctx, Math.min(st.cur, list.length - 1));
+  }
+  function gdStoriesOpen(ctx) {
+    const st = ctx.gd.st;
+    gdStoryPopHide(ctx);
+    if (!gdCloseSafe(ctx)) return;
+    st.sig = ""; st.cur = -1;
+    st.el.dataset.open = "1";
+    gdStoriesPaint(ctx);
+    refreshStories(ctx);
+  }
+  function gdStoriesClose(ctx) { ctx.gd.st.el.dataset.open = "0"; }
+  function gdStoryOpen(ctx, i) {
+    const s = (ctx.state.stories || [])[i];
+    if (!s) return;
+    gdStoryCursor(ctx, i);
+    openStoryViewer(ctx, s);
+  }
+  function gdStoryCursor(ctx, i) {
+    const st = ctx.gd.st;
+    st.cur = i;
+    for (const c of st.grid.children) {
+      const on = Number(c.dataset.i) === i ? "1" : "0";
+      if (c.dataset.cur !== on) c.dataset.cur = on;
+      if (on === "1") c.scrollIntoView({ block: "nearest" });
+    }
+  }
+  function gdStoriesKey(ctx, k) {
+    const st = ctx.gd.st, cards = Array.from(st.grid.children);
+    if (!cards.length) return false;
+    if (k === "Enter" || k === " ") { if (st.cur >= 0) gdStoryOpen(ctx, st.cur); else gdStoryCursor(ctx, 0); return true; }
+    const cols = gdGridCols(cards), i = st.cur;
+    let to;
+    if (k === "ArrowRight") to = i < 0 ? 0 : i + 1;
+    else if (k === "ArrowLeft") to = i < 0 ? 0 : i - 1;
+    else if (k === "ArrowDown") to = i < 0 ? 0 : i + cols < cards.length ? i + cols : i;
+    else if (k === "ArrowUp") to = i < 0 ? 0 : i - cols >= 0 ? i - cols : i;
+    else if (k === "Home") to = 0;
+    else if (k === "End") to = cards.length - 1;
+    else return false;
+    gdStoryCursor(ctx, clamp(to, 0, cards.length - 1));
+    return true;
+  }
+  // the rail's hover preview: the story's own picture, bigger, with who and when
+  function gdStoryPop(ctx, item) {
+    const st = ctx.gd.st, rail = ctx.home.storiesEl;
+    const i = Array.from(rail.querySelectorAll(":scope > .gh-story")).indexOf(item), s = (ctx.state.stories || [])[i];
+    if (!s || !ctx.gd.wide || gdTopLayer(ctx)) return;
+    st.pop.replaceChildren(gdStoryCard(ctx, s, i, true));
+    const r = item.getBoundingClientRect(), p = gdLocal(ctx, r.left + r.width / 2, r.bottom), W = ctx.root.clientWidth;
+    st.pop.style.left = Math.round(clamp(p.x - 90, 8, W - 188)) + "px";
+    st.pop.style.top = Math.round(p.y + 6) + "px";
+    st.pop.dataset.show = "1";
+  }
+  function gdStoryPopHide(ctx) { const st = ctx.gd.st; clearTimeout(st.popT); st.pop.dataset.show = "0"; }
+
+  // ---- Gallery + My Eyes Only: columns, Ctrl/Shift+click, Ctrl+A, Delete, files in and out --------------------------
+  const GD_GAL_TILE = 170;
+  // layoutGallery's hook: as many columns as fit the panel (the phone's 4 under 680 px)
+  function gdGalCols(ctx, w) {
+    const g = ctx.gallery, cols = clamp(Math.round(w / GD_GAL_TILE), GAL_COLS, 12);
+    if (cols === (g.cols || GAL_COLS)) return;
+    g.cols = cols;
+    if (g.mounted && g.mounted.size) releaseAllGalTiles(ctx);
+    g.tileSize = 0; // (every tile is laid out again)
+  }
+  const gdFileUri = (it) => (it && typeof it.uri === "string" && /^file:\/\//.test(it.uri) ? it.uri : null);
+  function gdGalleryInit(ctx) {
+    const gd = ctx.gd, g = ctx.gallery, V = ctx.vault;
+    if (!g) return;
+    gd.gal = { anchor: null, vAnchor: null };
+    // Ctrl+click adds/removes one, Shift+click a range from the last one clicked (the plain click is the phone's)
+    g.grid.addEventListener("click", (e) => {
+      const tile = e.target.closest && e.target.closest(".gh-gal-tile");
+      if (!tile || !tile._item) return;
+      const index = Number(tile.dataset.index), ctrl = e.ctrlKey || e.metaKey;
+      if (!ctrl && !e.shiftKey) { gd.gal.anchor = index; return; }
+      e.stopPropagation(); e.preventDefault();
+      if (!g.selecting) setGalSelecting(ctx, true);
+      if (e.shiftKey && gd.gal.anchor != null) gdGalRange(ctx, gd.gal.anchor, index, ctrl);
+      else { toggleGalSelect(ctx, tile._item); gd.gal.anchor = index; }
+    }, true);
+    g.grid.addEventListener("mousedown", (e) => {
+      if (e.shiftKey && e.button === 0) e.preventDefault(); // (no text selection from a Shift+click)
+      const tile = e.target.closest && e.target.closest(".gh-gal-tile");
+      if (tile) tile.draggable = !!gdFileUri(tile._item);
+    }, true);
+    // a tile (or the picked ones) dragged out of the window: their files, when the shell gave their file:// address
+    g.grid.addEventListener("dragstart", (e) => {
+      const tile = e.target.closest && e.target.closest(".gh-gal-tile");
+      if (!tile || !tile._item) return;
+      const items = g.selecting && g.selected.includes(tile._item.id) ? g.selected.map((id) => g.byId.get(id)).filter(Boolean) : [tile._item];
+      const uris = items.map(gdFileUri).filter(Boolean);
+      if (!uris.length) { e.preventDefault(); return; }
+      e.dataTransfer.effectAllowed = "copy";
+      e.dataTransfer.setData("text/uri-list", uris.join("\r\n"));
+      e.dataTransfer.setData("text/plain", uris.join("\n"));
+    });
+    // pictures and videos dropped on the Gallery are saved to the photo library (Pictures/Ghost on the desktop)
+    gdDropZone(g.el, "Drop to save to Pictures", () => g.el.dataset.open === "1" && g.mode !== "tiktok" && !(V && V.el.dataset.open === "1"), (files) => gdGalSave(ctx, files));
+    if (!V) return;
+    V.grid.addEventListener("click", (e) => {
+      const tile = e.target.closest && e.target.closest(".gh-vault-tile");
+      if (!tile || !tile._item) return;
+      const index = V.items.indexOf(tile._item), ctrl = e.ctrlKey || e.metaKey;
+      if (!ctrl && !e.shiftKey) { gd.gal.vAnchor = index; return; }
+      e.stopPropagation(); e.preventDefault();
+      if (!V.selecting) setVaultSelecting(ctx, true);
+      if (e.shiftKey && gd.gal.vAnchor != null) gdVaultRange(ctx, gd.gal.vAnchor, index, ctrl);
+      else { toggleVaultSelect(ctx, tile._item); gd.gal.vAnchor = index; }
+    }, true);
+    // right-click = select it (the Gallery's tiles do the same; the phone has no hold on these)
+    gdContext(V.grid, (e) => {
+      const tile = e.target.closest && e.target.closest(".gh-vault-tile");
+      if (!tile || !tile._item) return;
+      if (!V.selecting) setVaultSelecting(ctx, true);
+      if (!V.selected.includes(tile._item.id)) toggleVaultSelect(ctx, tile._item);
+      gd.gal.vAnchor = V.items.indexOf(tile._item);
+    });
+    // the mouse and keys keep My Eyes Only open like touches do on the phone (it locks after 2 idle minutes)
+    const busy = () => { V.lastActivity = Date.now(); };
+    ctx.root.addEventListener("mousedown", busy, true);
+    ctx.root.addEventListener("wheel", busy, { capture: true, passive: true });
+    window.addEventListener("keydown", busy, true);
+  }
+  async function gdGalRange(ctx, from, to, add) {
+    const g = ctx.gallery, lo = Math.min(from, to), hi = Math.max(from, to);
+    // the grid loads 240 at a time as it scrolls: the pages in between that aren't here yet come first
+    const last = Math.min(hi, lo + GAL_SELECT_MAX * 2);
+    for (let p = Math.floor(lo / GAL_PAGE); p <= Math.floor(last / GAL_PAGE); p++) {
+      let missing = false;
+      for (let i = Math.max(lo, p * GAL_PAGE); i <= Math.min(last, (p + 1) * GAL_PAGE - 1); i++) if (!g.items[i]) { missing = true; break; }
+      if (missing) { try { await loadGalPage(ctx, p); } catch (e) {} }
+    }
+    if (!g.selecting) return; // (left select mode meanwhile)
+    if (!add) g.selected = [];
+    let full = false;
+    for (let i = lo; i <= hi; i++) {
+      const it = g.items[i];
+      if (!it || g.selected.includes(it.id)) continue;
+      if (g.selected.length >= GAL_SELECT_MAX) { full = true; break; }
+      g.selected.push(it.id);
+    }
+    if (full) ctx.showToast("Up to " + GAL_SELECT_MAX + " at a time");
+    repaintGalSelection(ctx);
+  }
+  function gdVaultRange(ctx, from, to, add) {
+    const V = ctx.vault;
+    if (!add) V.selected = [];
+    for (let i = Math.min(from, to); i <= Math.max(from, to); i++) { const it = V.items[i]; if (it && !V.selected.includes(it.id)) V.selected.push(it.id); }
+    paintVaultSelection(ctx);
+  }
+  const GD_SAVE_MAX = 300 * 1024 * 1024; // (a file goes to the shell as base64 in one message)
+  async function gdGalSave(ctx, files) {
+    const media = files.filter((f) => /^(image|video)\//.test(f.type));
+    const ok = media.slice(0, 20).filter((f) => f.size <= GD_SAVE_MAX);
+    if (!media.length) { ctx.showToast("Only pictures and videos can be saved"); return; }
+    if (!ok.length) { ctx.showToast("That file is too big to save"); return; }
+    let saved = 0, why = "";
+    for (const f of ok) {
+      try { await dgPost("saveToPhotos", { data: await gdB64(f), video: /^video\//.test(f.type) }); saved++; }
+      catch (e) { why = String((e && e.message) || e); gtrail("drop save failed " + why.slice(0, 120)); }
+    }
+    const skipped = media.length - saved;
+    if (!saved) ctx.showToast(/too big/.test(why) ? "That file is too big to save" : "Couldn't save that");
+    else ctx.showToast((saved === 1 ? "Saved to Pictures" : saved + " saved to Pictures") + (skipped ? " · " + skipped + " not saved" + (media.length > 20 ? " (20 at a time)" : "") : ""));
+  }
+  function gdGalleryKey(ctx, e, n, typing) {
+    const g = ctx.gallery, V = ctx.vault, k = e.key, ctrl = e.ctrlKey || e.metaKey;
+    if (typing) return false;
+    const del = (k === "Delete" || k === "Backspace") && !ctrl && !e.altKey;
+    if (del && e.repeat) return true; // (a held key must not ask again and again)
+    if (n === "pin") {
+      const pad = ctx.root.querySelector(".gh-pin[data-open='1']");
+      const key = /^[0-9]$/.test(k) ? k : k === "Backspace" ? "del" : null;
+      const b = pad && key && !ctrl && !e.altKey && pad.querySelector('.gh-pin-key[data-k="' + key + '"]');
+      if (!b) return false;
+      b.click();
+      return true;
+    }
+    if (n === "galviewer") {
+      if (!del) return false;
+      const b = ctx.root.querySelector(".gh-gv[data-open='1'] [data-gact='delete']");
+      if (b && b.offsetParent !== null) b.click();
+      return true;
+    }
+    if (n === "vault") {
+      if (!V) return false;
+      if (ctrl && !e.altKey && !e.shiftKey && k.toLowerCase() === "a" && V.items.length) {
+        if (!V.selecting) setVaultSelecting(ctx, true);
+        V.selected = V.items.map((it) => it.id); paintVaultSelection(ctx);
+        return true;
+      }
+      if (del && V.selecting && V.selected.length) { V.el.querySelector('[data-gact="vsel-delete"]').click(); return true; }
+      return false;
+    }
+    // the Gallery grid
+    if (g.mode === "tiktok") return false;
+    if (ctrl && !e.altKey && !e.shiftKey && k.toLowerCase() === "a") {
+      if (!g.selecting) setGalSelecting(ctx, true);
+      gdGalRange(ctx, 0, Math.max(0, (g.total || g.items.length) - 1), false);
+      return true;
+    }
+    if (del && g.selecting && !g.vaultPick && g.selected.length) { g.selbar.querySelector('[data-gact="delete"]').click(); return true; }
+    return false;
+  }
+
+  // ---- TikTok: video + details side by side, docked comments, two-column search/messages --------------------------
+  const GD_TT_SIDE = 380, GD_TT_NAV = 380;
+  function gdTikTokInit(ctx) {
+    const gd = ctx.gd, T = ctx.tiktok;
+    if (!T) return;
+    gd.tt = { x: 0, vw: 0, side: 0, nav: null };
+    if (typeof ResizeObserver === "function") new ResizeObserver(() => { gdTTLayout(ctx); gdTTDock(ctx); gdTTRelayout(ctx); }).observe(T.el);
+    window.addEventListener("resize", () => gdTTDock(ctx));
+    // search / messages pages: which column each one is in
+    const empty = el("div", "gd-tts-empty");
+    empty.append(Object.assign(el("div", "gd-empty-art"), {}), Object.assign(el("div", "gd-empty-title"), {}), Object.assign(el("div", "gd-tts-empty-sub"), {}));
+    T.search.el.appendChild(empty);
+    gd.tt.empty = empty;
+    // (pages added/removed; and data-in: popTTPage takes a page off the stack at once, its element only after it slid
+    // away. Two observers: a subtree childList would also fire for everything the pages load, and for the placeholder)
+    if (typeof MutationObserver === "function") {
+      new MutationObserver(() => gdTTPaged(ctx)).observe(T.search.el, { childList: true });
+      new MutationObserver(() => gdTTPaged(ctx)).observe(T.search.el, { subtree: true, attributes: true, attributeFilter: ["data-in"] });
+    }
+    // a click (or Enter in its search field) in the left column: what it opens replaces the right column
+    const navUse = (e) => {
+      const pg = e.target.closest && e.target.closest(".gh-tts-page");
+      if (!pg || pg.dataset.gdCol !== "nav" || !ctx.gd.wide) return;
+      // a chat picked in the inbox: the open chat closes before the new one opens (TikTok's page is told to leave the
+      // old chat first, not after it opened the new one)
+      if (e.type === "click" && e.target.closest(".gh-ttdm-row")) {
+        const st = T.search.stack, ni = st.findIndex((x) => x.el === pg);
+        while (ni >= 0 && st.length > ni + 1) popTTPageNow(ctx);
+        return;
+      }
+      gd.tt.nav = pg;
+      setTimeout(() => { if (gd.tt.nav === pg) gd.tt.nav = null; }, 0);
+    };
+    T.search.el.addEventListener("click", navUse, true);
+    T.search.el.addEventListener("keydown", (e) => { if (e.key === "Enter") navUse(e); }, true);
+    // a click beside the video (on its details) doesn't pause it; a double-click on the video likes it
+    const playerOf = (pager) => (pager === T.pager ? T : ((T.search.stack.find((pg) => pg.player && pg.player.pager === pager) || {}).player || null));
+    const inVideo = (e) => { const r = T.el.getBoundingClientRect(), x = (e.clientX - r.left) * pagePxToLocal(); return x >= gd.tt.x && x <= gd.tt.x + gd.tt.vw; };
+    T.el.addEventListener("click", (e) => {
+      if (!gd.wide || !gd.tt.side) return;
+      const pager = e.target.closest && e.target.closest(".gh-tt-pager");
+      if (!pager || e.target.closest("[data-ttlink], .gh-tt-link") || inVideo(e)) return;
+      e.stopPropagation();
+    }, true);
+    T.el.addEventListener("dblclick", (e) => {
+      const pager = e.target.closest && e.target.closest(".gh-tt-pager"), P = pager && playerOf(pager);
+      if (!P || e.target.closest("[data-ttlink], .gh-tt-link") || (gd.wide && gd.tt.side && !inVideo(e))) return;
+      const it = P.items && P.items[P.index];
+      if (!it) return;
+      ttHeartBurst(ctx, P, e.clientX, e.clientY);
+      if (!it.liked) ttToggle(ctx, it, "like", true);
+    });
+    // the comments: docked in the details column, following the video on screen
+    const ol = ctx.root.querySelector(":scope > .gh-overlay-layer");
+    const hook = () => {
+      const C = T.comments;
+      if (!C || C._gd) return;
+      C._gd = true;
+      new MutationObserver(() => gdTTDock(ctx)).observe(C.sheet, { attributes: true, attributeFilter: ["data-open"] });
+      gdTTDock(ctx);
+    };
+    if (ol && typeof MutationObserver === "function") new MutationObserver(hook).observe(ol, { childList: true });
+    if (typeof MutationObserver === "function") {
+      new MutationObserver(() => {
+        const C = T.comments;
+        if (T.el.dataset.open !== "1") { if (C && C.sheet.dataset.gdDock === "1" && C.it) C.close(); return; }
+        if (!C || !C.it || C.sheet.dataset.gdDock !== "1") return;
+        const P = gdTTPlayer(ctx), it = P && P.items && P.items[P.index];
+        if (it && it !== C.it) { if (it.commentsOff) C.close(); else openTTComments(ctx, it); }
+      }).observe(T.el, { attributes: true, subtree: true, attributeFilter: ["data-current", "data-open"] });
+    }
+  }
+  // the player on top: a video page from search/messages, else the For You feed
+  function gdTTPlayer(ctx) {
+    const T = ctx.tiktok, st = T.search.stack, top = st[st.length - 1];
+    if (top) return top.player || null; // (a search / messages page covers the feed)
+    return ttFeedOn() ? T : null;
+  }
+  // the window was resized: the players' slides move to the new height (the phone's screen never changes size, so its
+  // pager only lays out when it moves)
+  function gdTTRelayout(ctx) {
+    const T = ctx.tiktok;
+    if (T.el.dataset.open !== "1") return;
+    for (const P of [T].concat(T.search.stack.filter((pg) => pg.player).map((pg) => pg.player))) {
+      const h = P.pager && P.pager.clientHeight;
+      if (!h || h === P.gdH || !P.items || !P.items.length || P.drag || P.anim) continue;
+      P.gdH = h;
+      layoutTikTok(ctx, 0, true, P);
+    }
+  }
+  // the video column (9:16 at the panel's height) and the details column beside it, as px on the panel
+  function gdTTLayout(ctx) {
+    const T = ctx.tiktok, tt = ctx.gd.tt, W = T.el.clientWidth, H = T.el.clientHeight;
+    if (!W || !H) return;
+    const side = ctx.gd.wide ? Math.min(GD_TT_SIDE, Math.max(0, W - 320)) : 0;
+    let vw = Math.round(H * 9 / 16);
+    if (vw + side > W) vw = Math.max(200, W - side);
+    const x = Math.max(0, Math.round((W - vw - side) / 2));
+    tt.x = x; tt.vw = vw; tt.side = side;
+    const s = T.el.style;
+    s.setProperty("--gd-tt-x", x + "px");
+    s.setProperty("--gd-tt-vw", vw + "px");
+    s.setProperty("--gd-tt-dx", (x + vw) + "px");
+    s.setProperty("--gd-tt-dw", side + "px");
+    s.setProperty("--gd-tt-nav", Math.min(GD_TT_NAV, Math.round(W * 0.42)) + "px");
+  }
+  function gdTTDock(ctx) {
+    const T = ctx.tiktok, C = T && T.comments, tt = ctx.gd.tt;
+    if (!C) return;
+    const open = C.sheet.dataset.open === "1" || C.backdrop.dataset.open === "1";
+    if (!open) return; // (closed: it keeps its place until the next open, so its slide-out stays where it was)
+    const dock = ctx.gd.wide && T.el.dataset.open === "1" && tt.side > 0 && !!gdTTPlayer(ctx);
+    C.sheet.dataset.gdDock = dock ? "1" : "0";
+    if (!dock) return;
+    const r = T.el.getBoundingClientRect(), p = gdLocal(ctx, r.left, r.top), k = pagePxToLocal();
+    const s = C.sheet.style;
+    s.setProperty("--gd-dock-x", Math.round(p.x + tt.x + tt.vw) + "px");
+    s.setProperty("--gd-dock-y", Math.round(p.y) + "px");
+    s.setProperty("--gd-dock-w", Math.round(r.width * k - tt.x - tt.vw) + "px");
+    s.setProperty("--gd-dock-h", Math.round(r.height * k) + "px");
+  }
+  // search / messages pages in two columns: the search (or the inbox) on the left, what it opened on the right; a video
+  // opened from them takes the whole panel (the same video + details view as the feed)
+  const GD_TT_LIST = new Set(["search", "dmlist"]);
+  function gdTTPaged(ctx) {
+    const T = ctx.tiktok, gd = ctx.gd, st = T.search.stack, box = T.search.el;
+    // a page opened from the left column: the right column had only the page before it, which goes
+    if (gd.tt.nav && st.length >= 3) {
+      const ni = st.findIndex((pg) => pg.el === gd.tt.nav), top = st[st.length - 1];
+      if (ni >= 0 && ni < st.length - 2 && top.kind !== "player") {
+        const drop = st.splice(ni + 1, st.length - ni - 2);
+        for (const pg of drop) { if (pg.player) syncTikTokPlayer(pg.player, true); destroyTTPage(pg); }
+      }
+      gd.tt.nav = null;
+    }
+    const top = st.length - 1;
+    let nav = -1;
+    if (top >= 0 && GD_TT_LIST.has(st[top].kind)) nav = top;
+    else if (top >= 1 && st[top].kind !== "player") for (let i = top - 1; i >= 0; i--) if (GD_TT_LIST.has(st[i].kind)) { nav = i; break; }
+    box.dataset.gdNav = nav >= 0 ? "1" : "0";
+    st.forEach((pg, i) => {
+      const col = pg.kind === "player" ? "full" : i === nav ? "nav" : nav < 0 ? "solo" : i > nav ? "page" : "under";
+      if (pg.el.dataset.gdCol !== col) pg.el.dataset.gdCol = col;
+    });
+    // the comments docked beside a video don't stay over a page that isn't one (a profile, a tag, results)
+    const C = T.comments;
+    if (C && C.it && C.sheet.dataset.gdDock === "1" && top >= 0 && !st[top].player) C.close();
+    // a list on its own: the right column says what to do
+    const e = gd.tt.empty, lone = nav >= 0 && nav === top;
+    if (e.dataset.show !== (lone ? "1" : "0")) e.dataset.show = lone ? "1" : "0";
+    if (lone && e.dataset.kind !== st[top].kind) {
+      e.dataset.kind = st[top].kind;
+      const dm = st[top].kind === "dmlist";
+      e.children[0].replaceChildren(icon(dm ? "newMsg" : "search", 44));
+      e.children[1].textContent = dm ? "Pick a conversation" : "Search TikTok";
+      e.children[2].textContent = dm ? "Your TikTok messages open here." : "Videos, people, sounds and hashtags open here.";
+    }
+  }
+
+  // ---- Games: the panel sized for the board, keys where the phone takes taps/drags --------------------------------
+  function gdGamesInit(ctx) {
+    if (typeof MutationObserver !== "function") return;
+    new MutationObserver(() => {
+      const v = ctx.root.querySelector(":scope > .gh-gg-view");
+      if (v && gg.view && gg.view.wrap === v && !v.dataset.gdGame) v.dataset.gdGame = (gg.view.def && gg.view.def.id) || "";
+      if (!v && ctx.gd.pool) { cancelAnimationFrame(ctx.gd.pool.raf); ctx.gd.pool = null; }
+    }).observe(ctx.root, { childList: true });
+    // the mouse on the board: the keyboard's square goes away; the wheel over 8 Ball's table turns the aim
+    ctx.root.addEventListener("mousedown", (e) => {
+      if (e.target.closest && e.target.closest(".gh-gg-view")) for (const d of ctx.root.querySelectorAll(".ghg-sq.gd-ghg-cur")) d.classList.remove("gd-ghg-cur");
+    }, true);
+    ctx.root.addEventListener("wheel", (e) => {
+      const view = e.target.closest && e.target.closest(".gh-gg-view");
+      const api = view && gg.view && gg.view.game && gg.view.game.keys;
+      if (!api || !e.target.closest("canvas")) return;
+      e.preventDefault();
+      api.aim((e.deltaY || e.deltaX) * (e.shiftKey ? 0.0004 : 0.0015));
+    }, { passive: false });
+  }
+  function gdGameKey(ctx, e) {
+    const V = gg.view, k = e.key;
+    if (!V || !V.def || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (V.def.id === "chess") return gdChessKey(ctx, V, k);
+    const api = V.game && V.game.keys;
+    if (!api) return false;
+    // 8 Ball: Left/Right turn the aim (Shift = finer), Space held pulls the cue back, letting go shoots
+    if (k === "ArrowLeft" || k === "ArrowRight") { api.aim((k === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 0.25 : 1.5) * Math.PI / 180); return true; }
+    if (k === " ") {
+      const gd = ctx.gd;
+      if (e.repeat || gd.pool) return true;
+      if (!api.power(0)) return true; // (not your turn / a shot is playing)
+      const t0 = nowMs();
+      gd.pool = { api, raf: 0, p: 0 };
+      const tick = () => {
+        if (!gd.pool) return;
+        // a slow start for soft shots, full power after ~1.6 s
+        gd.pool.p = Math.min(1, (nowMs() - t0) / 1600);
+        api.power(gd.pool.p);
+        gd.pool.raf = requestAnimationFrame(tick);
+      };
+      tick();
+      return true;
+    }
+    return false;
+  }
+  function gdPoolRelease(ctx) {
+    const P = ctx.gd.pool;
+    ctx.gd.pool = null;
+    if (!P) return;
+    cancelAnimationFrame(P.raf);
+    P.api.shoot();
+  }
+  // chess: a square the arrows move over the board as you see it; Enter/Space = a click on it (select, then move)
+  function gdChessKey(ctx, V, k) {
+    const wrap = V.wrap, promo = wrap.querySelector(".ghg-promo");
+    if (promo) {
+      const bs = Array.from(promo.querySelectorAll("button"));
+      let i = bs.indexOf(ctx.shadow.activeElement);
+      if (k === "ArrowLeft" || k === "ArrowUp" || k === "ArrowRight" || k === "ArrowDown") {
+        const d = k === "ArrowLeft" || k === "ArrowUp" ? -1 : 1;
+        i = i < 0 ? 0 : (i + d + bs.length) % bs.length;
+        bs[i].focus();
+        return true;
+      }
+      if ((k === "Enter" || k === " ") && i < 0 && bs[0]) { bs[0].click(); return true; }
+      return false;
+    }
+    const sqs = Array.from(wrap.querySelectorAll(".ghg-sq[data-sq]"));
+    if (sqs.length !== 64) return false;
+    // rows top to bottom, squares left to right, as drawn (the board turns round for black)
+    const grid = sqs.map((d) => { const r = d.getBoundingClientRect(); return { d, x: r.left, y: r.top }; })
+      .sort((a, b) => (Math.abs(a.y - b.y) > 2 ? a.y - b.y : a.x - b.x)).map((o) => o.d);
+    let i = grid.findIndex((d) => d.classList.contains("gd-ghg-cur"));
+    const moveKey = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] }[k];
+    if (moveKey) {
+      if (i < 0) { const sel = grid.findIndex((d) => d.classList.contains("ghg-sel")); i = sel >= 0 ? sel : 52; } // (the selected piece, else the middle of your pawns)
+      else {
+        const r = clamp(Math.floor(i / 8) + moveKey[0], 0, 7), c = clamp((i % 8) + moveKey[1], 0, 7);
+        i = r * 8 + c;
+      }
+      for (const d of grid) d.classList.toggle("gd-ghg-cur", d === grid[i]);
+      return true;
+    }
+    if ((k === "Enter" || k === " ") && i >= 0) { grid[i].click(); return true; }
+    return false;
+  }
+
+  // ---- Snap camera, editor and review: the picture centered in its own shape, the controls in a side bar ----------
+  const GD_CAM_BAR = 232, GD_CAM_PAD = 22;
+  function gdCameraInit(ctx) {
+    const gd = ctx.gd, c = ctx.camera;
+    if (!c) return;
+    gd.cam = { ar: 0, revAr: 0, key: null, file: null };
+    const lay = () => gdCamLayout(ctx);
+    if (typeof ResizeObserver === "function") new ResizeObserver(lay).observe(c.el);
+    c.live.addEventListener("loadedmetadata", lay, true);
+    c.live.addEventListener("resize", lay, true);
+    if (typeof MutationObserver === "function") {
+      new MutationObserver(() => gdCamLayout(ctx, true)).observe(c.review, { attributes: true, attributeFilter: ["data-open"] });
+      new MutationObserver(lay).observe(c.el, { attributes: true, attributeFilter: ["data-open"] });
+    }
+    // a picked file whose size wasn't known yet: its stage takes its shape once it loads (before anything is placed)
+    const loaded = (e) => {
+      const m = e.target;
+      if (!m || !(m.tagName === "IMG" || m.tagName === "VIDEO") || c.review.dataset.open !== "1") return;
+      const w = m.naturalWidth || m.videoWidth, h = m.naturalHeight || m.videoHeight;
+      if (w && h) { gd.cam.revAr = w / h; gdCamLayout(ctx, false, true); }
+    };
+    c.reviewMedia.addEventListener("load", loaded, true);
+    c.reviewMedia.addEventListener("loadedmetadata", loaded, true);
+    // Open a File: the camera's library button and files dropped on the camera go to the editor in their own shape
+    const file = el("input");
+    file.type = "file"; file.accept = "image/*,video/*"; file.hidden = true;
+    c.el.appendChild(file);
+    file.addEventListener("change", () => { const f = file.files && file.files[0]; file.value = ""; if (f) gdCamOpenFile(ctx, f); });
+    gd.cam.file = file;
+    const lib = c.el.querySelector('[data-act="library"]');
+    if (lib) {
+      lib.setAttribute("aria-label", "Open a file");
+      lib.title = "Open a photo or video from a file";
+      lib.dataset.gdLabel = "Open a File…";
+      c.el.addEventListener("click", (e) => { if (e.target.closest && e.target.closest('[data-act="library"]') === lib) { e.stopPropagation(); e.preventDefault(); file.click(); } }, true);
+    }
+    for (const [sel, label] of [['[data-act="flip"]', "Flip"], ['[data-act="flash"]', "Flash"], ['[data-act="timer"]', "Timer"], ['[data-act="save"]', "Save"],
+      ['[data-tool="text"]', "Text"], ['[data-tool="sticker"]', "Stickers"], ['[data-tool="scissors"]', "Cutout"], ['[data-tool="bg"]', "Background"], ['[data-tool="loop"]', "Loop"], ['[data-tool="draw"]', "Draw"], ['[data-tool="undo"]', "Undo"]]) {
+      const b = c.el.querySelector(sel);
+      if (b) { b.dataset.gdLabel = label; if (!b.title) b.title = b.getAttribute("aria-label") || label; }
+    }
+    gdDropZone(c.el, "Drop to open in the editor", () => c.el.dataset.open === "1" && c.review.dataset.open !== "1" && !(c.picker && c.picker.dataset.open === "1"), (files) => {
+      const f = files.find((x) => /^(image|video)\//.test(x.type));
+      if (f) gdCamOpenFile(ctx, f); else ctx.showToast("Only pictures and videos can be opened");
+    });
+    // a press on the shutter that ends off it still ends it (the phone's finger can't leave the button)
+    let shutterDown = false;
+    c.shutter.addEventListener("mousedown", (e) => { if (e.button === 0) shutterDown = true; });
+    window.addEventListener("mouseup", (e) => {
+      if (!shutterDown) return;
+      shutterDown = false;
+      if (!c.shutter.contains(e.target)) c.shutter.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, clientX: e.clientX, clientY: e.clientY }));
+    }, true);
+    // Ctrl+wheel on the camera = the pinch zoom
+    c.live.addEventListener("wheel", (e) => {
+      if (!e.ctrlKey || c.review.dataset.open === "1") return;
+      e.preventDefault();
+      setZoom(ctx, clamp((c.zoom || 1) * Math.exp(-e.deltaY * 0.0025), c.zoomMin || 1, c.zoomMax || 5), { showPill: true });
+      scheduleZoomPillHide(ctx);
+    }, { passive: false });
+    // what the keys do, in the side bar
+    const keys = el("div", "gd-cam-keys");
+    const line = (cls, parts) => {
+      const d = el("div", cls);
+      for (const [k, what] of parts) { const kb = el("kbd"); kb.textContent = k; d.append(kb, Object.assign(el("span"), { textContent: what })); }
+      return d;
+    };
+    keys.append(line("gd-cam-keys-live", [["Space", "photo, hold for video"], ["Ctrl+wheel", "zoom"]]),
+      line("gd-cam-keys-edit", [["← →", "filters"], ["L", "keep filter"], ["Ctrl+wheel", "size"]]));
+    c.el.appendChild(keys);
+    if (c.editor) gdEditorInit(ctx, c);
+  }
+  // the stage: the live picture (or the photo being edited) as big as fits beside the side bar, in its own shape
+  function gdCamLayout(ctx, opened, loaded) {
+    const gd = ctx.gd, c = ctx.camera, cam = gd.cam, ed = c.editor;
+    if (c.el.dataset.open !== "1") return;
+    const W = c.el.clientWidth, H = c.el.clientHeight;
+    if (!W || !H) return;
+    const rev = c.review.dataset.open === "1";
+    if (opened && rev) cam.revAr = c.captured && c.captured.width && c.captured.height ? c.captured.width / c.captured.height : 0;
+    const v = c.live.querySelector("video");
+    if (v && v.videoWidth && v.videoHeight) cam.ar = v.videoWidth / v.videoHeight;
+    const ar = (rev ? cam.revAr || cam.ar : cam.ar) || 4 / 3;
+    // something is placed on the picture: its stage keeps its size (the editor's coordinates are in it), only its place
+    // and the side bar follow the panel
+    const edits = !!(rev && ed && (ed.items.length || ed.strokes.length || ed.editingText));
+    const bar = gd.wide ? GD_CAM_BAR : 0, pad = gd.wide ? GD_CAM_PAD : 0;
+    const aw = W - bar - pad * 2, ah = H - pad * 2;
+    const s = c.el.style, before = s.getPropertyValue("--gd-cw") + s.getPropertyValue("--gd-ch");
+    let w = Math.min(aw, ah * ar), h = w / ar;
+    if (edits && !opened && parseFloat(s.getPropertyValue("--gd-cw")) > 0) { w = parseFloat(s.getPropertyValue("--gd-cw")); h = parseFloat(s.getPropertyValue("--gd-ch")); }
+    w = Math.round(w); h = Math.round(h);
+    const x = Math.round(pad + Math.max(0, (aw - w) / 2)), y = Math.round(pad + Math.max(0, (ah - h) / 2));
+    s.setProperty("--gd-cx", x + "px"); s.setProperty("--gd-cy", y + "px");
+    s.setProperty("--gd-cw", w + "px"); s.setProperty("--gd-ch", h + "px");
+    s.setProperty("--gd-bx", (W - bar) + "px"); s.setProperty("--gd-rbx", (W - bar - x) + "px"); s.setProperty("--gd-rbb", (H - y - h) + "px");
+    // the review's stage changed after the editor measured it (a resize, or a file whose size came late)
+    if (rev && !opened && !edits && ed && ed.viewport && (loaded || before !== w + "px" + h + "px")) {
+      requestAnimationFrame(() => {
+        if (c.review.dataset.open !== "1" || ed.items.length || ed.strokes.length) return;
+        ed.viewport = { w: c.review.offsetWidth || ed.viewport.w, h: c.review.offsetHeight || ed.viewport.h };
+        pinEditorSize(c);
+        sizeDrawCanvas(ed, ed.viewport.w, ed.viewport.h);
+      });
+    }
+  }
+  // a photo or video from a file: its size first, so the editor opens in the picture's own shape
+  function gdCamOpenFile(ctx, f) {
+    const c = ctx.camera, video = /^video\//.test(f.type);
+    if (!/^(image|video)\//.test(f.type)) { ctx.showToast("Only pictures and videos can be opened"); return; }
+    const url = URL.createObjectURL(f);
+    const done = (w, h) => {
+      URL.revokeObjectURL(url);
+      if (c.el.dataset.open !== "1") return;
+      ctx.gd.cam.revAr = w && h ? w / h : 0;
+      openReview(ctx, f, video ? "video" : "image", false, w && h ? { width: w, height: h } : null, { fit: "contain" });
+    };
+    const m = el(video ? "video" : "img");
+    if (video) { m.preload = "metadata"; m.muted = true; m.onloadedmetadata = () => done(m.videoWidth, m.videoHeight); }
+    else m.onload = () => done(m.naturalWidth, m.naturalHeight);
+    m.onerror = () => { URL.revokeObjectURL(url); ctx.showToast("Couldn't open that file"); };
+    m.src = url;
+  }
+  // keys in the camera: Space/Enter = the shutter (Space held = a video), and in the editor Ctrl+Z / Ctrl+Enter
+  function gdCameraKey(ctx, e, typing) {
+    const c = ctx.camera, gd = ctx.gd, k = e.key, ctrl = e.ctrlKey || e.metaKey;
+    if (typing) return false;
+    if (c.picker && c.picker.dataset.open === "1") return false;
+    if (c.review.dataset.open === "1") {
+      const ed = c.editor;
+      if (ctrl && !e.shiftKey && !e.altKey && k.toLowerCase() === "z") { const u = c.review.querySelector('[data-tool="undo"]'); if (u && u.style.display !== "none") u.click(); return true; }
+      if (ctrl && k === "Enter") { c.review.querySelector('[data-act="sendto"]').click(); return true; }
+      // the phone's filter swipe: Left/Right = the previous/next filter, L = keep this one and add another (a second finger)
+      const free = ed && ed.car && c.captured && !ed.tool && !ed.editingText && !ctrl && !e.altKey;
+      if (free && (k === "ArrowLeft" || k === "ArrowRight")) { const dir = k === "ArrowRight" ? 1 : -1; fxGo(ctx, c, fxTargetIdx(ed.car, dir), dir); return true; }
+      if (free && !e.shiftKey && k.toLowerCase() === "l") { fxLock(ctx, c); return true; }
+      return false;
+    }
+    if ((k !== " " && k !== "Enter") || ctrl || e.altKey) return false;
+    if (e.repeat || gd.camKey) return true;
+    if (c.lockedRecording || c.recording) { stopRecording(ctx); return true; }
+    if (c.selfTimerRunning) return true;
+    // like the shutter: let go within 300 ms = a photo, keep holding (Space) = a video until it's let go
+    gd.camKey = { rec: false, t: k === " " ? setTimeout(() => { if (gd.camKey) { gd.camKey.rec = true; startRecording(ctx); } }, 300) : 0 };
+    if (k === "Enter") gdCameraKeyUp(ctx);
+    return true;
+  }
+  function gdCameraKeyUp(ctx) {
+    const c = ctx.camera, K = ctx.gd.camKey;
+    ctx.gd.camKey = null;
+    if (!K) return;
+    clearTimeout(K.t);
+    if (c.el.dataset.open !== "1") return;
+    if (K.rec) { if ((c.recording || c.startingRecording) && !c.lockedRecording) { stopRecording(ctx); scheduleZoomPillHide(ctx); } return; }
+    if (c.timerMode > 0) runSelfTimerThen(ctx, () => takePhoto(ctx));
+    else takePhoto(ctx);
+  }
+  // the editor with a mouse: a dragged sticker/text follows the pointer off itself too, Ctrl+wheel scales it,
+  // Shift+wheel (or Alt+wheel) turns it, and a handle on its corner does both
+  function gdEditorInit(ctx, c) {
+    const ed = c.editor, gd = ctx.gd, layer = ed.itemsLayer;
+    const itemOf = (t) => (t && t.closest ? ed.items.find((it) => it.el && it.el.contains(t)) : null) || null;
+    const isBar = (it) => it.type === "text" && it.style === 0;
+    let dragEl = null;
+    layer.addEventListener("mousedown", (e) => { if (e.button === 0 && !(e.target.closest && e.target.closest(".gd-ed-handle"))) { const it = itemOf(e.target); dragEl = it ? it.el : null; } }, true);
+    window.addEventListener("mousemove", (e) => {
+      if (!dragEl || !e.buttons) { dragEl = null; return; }
+      if (dragEl.contains(e.target)) return;
+      dragEl.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true, clientX: e.clientX, clientY: e.clientY, buttons: e.buttons }));
+    }, true);
+    window.addEventListener("mouseup", () => { dragEl = null; }, true);
+    layer.addEventListener("wheel", (e) => {
+      const it = itemOf(e.target);
+      if (!it || isBar(it) || !(e.ctrlKey || e.shiftKey || e.altKey)) return;
+      e.preventDefault();
+      if (e.ctrlKey) it.scale = clamp((it.scale || 1) * Math.exp(-e.deltaY * 0.0025), 0.3, 6);
+      else it.rotation = (it.rotation || 0) + (e.deltaY || e.deltaX) * 0.004;
+      positionItemEl(it);
+      gdEdHandleScale(handle, it);
+    }, { passive: false });
+    // the corner handle: drag it round the item's centre to turn, away from it to grow
+    const handle = el("div", "gd-ed-handle");
+    handle.setAttribute("aria-label", "Drag to resize and turn");
+    handle.title = "Drag to resize and turn (or Ctrl+wheel / Shift+wheel)";
+    let turn = null;
+    layer.addEventListener("mouseover", (e) => {
+      if (turn || dragEl) return;
+      const it = itemOf(e.target);
+      if (!it || isBar(it) || handle.parentElement === it.el) return;
+      it.el.appendChild(handle);
+      gdEdHandleScale(handle, it);
+    });
+    layer.addEventListener("mouseout", (e) => {
+      if (turn || !handle.parentElement) return;
+      if (!(e.relatedTarget && handle.parentElement.contains(e.relatedTarget))) handle.remove();
+    });
+    handle.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault(); e.stopPropagation();
+      const it = itemOf(handle.parentElement);
+      if (!it) return;
+      const r = it.el.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      turn = { it, cx, cy, a0: Math.atan2(e.clientY - cy, e.clientX - cx), d0: Math.max(8, Math.hypot(e.clientX - cx, e.clientY - cy)), s0: it.scale || 1, r0: it.rotation || 0 };
+      c.review.dataset.gdTurning = "1";
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!turn) return;
+      const { it, cx, cy } = turn;
+      it.scale = clamp(turn.s0 * Math.max(8, Math.hypot(e.clientX - cx, e.clientY - cy)) / turn.d0, 0.3, 6);
+      let rot = turn.r0 + Math.atan2(e.clientY - cy, e.clientX - cx) - turn.a0;
+      if (e.shiftKey) rot = Math.round(rot / (Math.PI / 12)) * (Math.PI / 12); // (Shift: steps of 15°)
+      it.rotation = rot;
+      positionItemEl(it);
+      gdEdHandleScale(handle, it);
+    });
+    window.addEventListener("mouseup", () => { if (turn) { turn = null; c.review.dataset.gdTurning = "0"; } });
+    // drawing: Ctrl+wheel = the brush size (the phone pinches two fingers on the picture)
+    ed.drawCanvas.addEventListener("wheel", (e) => {
+      if (ed.tool !== "draw" || !e.ctrlKey) return;
+      e.preventDefault();
+      ed.brushSize = clamp(ed.brushSize * Math.exp(-e.deltaY * 0.003), 3, 44);
+      const p = ed.brushPreview, sz = ed.brushEmoji ? ed.brushSize * 3 : ed.brushSize;
+      if (!p) return;
+      p.style.width = p.style.height = sz + "px";
+      p.textContent = ed.brushEmoji || ""; p.style.fontSize = ed.brushEmoji ? sz * 0.9 + "px" : "";
+      p.style.background = ed.brushEmoji ? "transparent" : (ed.color || colorAtFraction(EDITOR_COLOR_STOPS, ed.colorFrac));
+      p.dataset.show = "1"; clearTimeout(p._t); p._t = setTimeout(() => { p.dataset.show = "0"; }, 700);
+    }, { passive: false });
+    // the sticker sheet: a popover beside the side bar (ui.css), and a closed review takes the handle away
+    if (typeof MutationObserver === "function") new MutationObserver(() => { if (c.review.dataset.open !== "1") { handle.remove(); turn = null; } }).observe(c.review, { attributes: true, attributeFilter: ["data-open"] });
+  }
+  // the handle keeps its size whatever the item's scale
+  function gdEdHandleScale(h, it) { h.style.transform = "scale(" + (1 / (it.scale || 1)).toFixed(3) + ")"; }
+
+  // ---- voice messages: hold the mic (or Alt+V), let go to send, Esc cancels --------------------------------------
+  function gdVoiceInit(ctx) {
+    const gd = ctx.gd, conv = ctx.conv, mic = conv.micBtn, voice = conv.voice;
+    if (!mic || !voice || !voice.start) return;
+    const bar = conv.screen.querySelector(".gh-rec-bar"), hint = conv.screen.querySelector(".gh-rec-hint");
+    const vo = gd.voice = { by: null, t0: 0, x0: 0, say: (t) => { if (hint) hint.textContent = t; } };
+    mic.title = "Hold to record a voice message (or hold Alt+V)";
+    // the phone's click (record / send on a PC without touch) is replaced by press and hold
+    // (a click from the keyboard - Enter/Space on the focused mic, detail 0 - still toggles like S2)
+    conv.screen.addEventListener("click", (e) => { if (mic.contains(e.target) && e.detail > 0) { e.stopPropagation(); e.preventDefault(); } }, true);
+    mic.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      if (voice.recording()) { vo.by = null; voice.send(); return; } // (clicked again after a quick click: send)
+      if (!ctx.state.currentConvId) return;
+      vo.by = "mouse"; vo.t0 = nowMs(); vo.x0 = e.clientX;
+      vo.say("Release to send · slide left or Esc to cancel");
+      voice.start(e.clientX);
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (vo.by !== "mouse" || !voice.recording()) return;
+      // sliding off to the left cancels, like the phone's slide to cancel
+      const dx = Math.min(0, e.clientX - vo.x0) * pagePxToLocal();
+      if (bar) bar.style.setProperty("--rec-x", dx + "px");
+      if (dx < -110) { vo.by = null; voice.cancel(); }
+    });
+    window.addEventListener("mouseup", (e) => {
+      if (vo.by !== "mouse" || e.button !== 0) return;
+      vo.by = null;
+      if (bar) bar.style.setProperty("--rec-x", "0px");
+      if (!voice.recording()) return;
+      // a quick click records until the mic is clicked again (S2's way, for long messages)
+      if (nowMs() - vo.t0 < 350) { vo.say("Click the mic to send · Esc cancels"); return; }
+      voice.send();
+    });
+  }
+  function gdVoiceKey(ctx, down) {
+    const vo = ctx.gd.voice, voice = ctx.conv.voice;
+    if (!vo || !voice || !voice.start) return;
+    if (down) {
+      if (voice.recording()) return;
+      vo.by = "key"; vo.t0 = nowMs();
+      vo.say("Let go of Alt+V to send · Esc cancels");
+      voice.start(0);
+      return;
+    }
+    vo.by = null;
+    if (voice.recording()) voice.send();
   }
 
   // =====================================================================================================
