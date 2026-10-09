@@ -9,6 +9,11 @@
 //   - If a build ships several versions at once (e.g. 1.15.0 inside 1.16.0), put the bullets of all of them
 //     in the newest entry.
 window.GHOST_WHATS_NEW = {
+  "1.19.5": {
+    items: [
+      { t: "Pinned chats now show a new message in the chat list, instead of an old one that looked already opened." },
+    ],
+  },
   "1.19.4": {
     items: [
       { t: "Holding a message to react no longer pops up the magnifying glass over the reaction bar." },

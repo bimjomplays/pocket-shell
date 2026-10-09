@@ -1325,9 +1325,15 @@
     let text;
     let kind2 = kind;
     if ((kind === "text" || kind === "call" || kind === "none") && entry && entry.messages && typeof entry.messages.values === "function") {
-      let last = null; for (const m of entry.messages.values()) last = m;
+      // the NEWEST stored message (by orderKey, not Map insertion order: paging older messages in appends them after
+      // the newest), and, for an incoming one, only if it is as new as the feed item: a chat you opened earlier keeps its stored messages
+      // but they stop updating once you leave, so an older message would stand in as a stale row (#459: pinned chats,
+      // the ones opened most, looked opened with an old message while new ones had come in)
+      let last = null; for (const m of entry.messages.values()) if (m && (!last || toNum(m.orderKey) >= toNum(last.orderKey))) last = m;
       const norm = last && toMessage(key, undefined, last);
-      if (norm && norm.kind === "text") text = norm.text;
+      const shownTs = toNum(info.displayTimestamp);
+      if (norm && !fromMe && shownTs && norm.ts < shownTs - 3000) { /* stale: the feed's wording below */ }
+      else if (norm && norm.kind === "text") text = norm.text;
       else if (norm && (norm.kind === "call" || norm.kind === "system")) { kind2 = "call"; text = norm.text; } // e.g. "Missed video call"
     }
     if (kind === "call" && !text) text = "Call";
