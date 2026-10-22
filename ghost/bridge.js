@@ -1838,6 +1838,59 @@
   function conversationEntry(conversationId) {
     return (messaging().conversations || {})[conversationId];
   }
+  // #738: "No messages yet" must mean the chat IS empty, not "Snapchat's store has nothing yet". The store holds
+  // nothing (or only status lines such as "You pinned ...") while enterConversation's fetch is still landing, failed
+  // silently, or only a first page of statuses arrived. Such a read is "not loaded" (loaded:false) when the chat is
+  // known to have more: the feed row shows a newest item, hasMoreMessages is set, or the entry carries an error.
+  function storeMessages(conversationId, entry) {
+    const list = [];
+    if (entry && entry.messages && typeof entry.messages.entries === "function") {
+      for (const [id, msg] of entry.messages.entries()) { const n = toMessageSafe(conversationId, id, msg); if (n) list.push(n); }
+    }
+    list.sort((a, b) => a.ts - b.ts);
+    return list;
+  }
+  function feedShowsContent(conversationId) {
+    return safe("feed-content", () => {
+      const item = (((messaging().feed || {})[conversationId] || {}).displayInfo || {}).feedItem;
+      return !!(item && (item.$case || Object.keys(item).length));
+    }, false);
+  }
+  function looksUnloaded(conversationId, list, entry) {
+    if (list.some((m) => m.kind !== "system")) return false;
+    return !entry || !!entry.hasMoreMessages || !!entry.error || feedShowsContent(conversationId);
+  }
+  const reloading = new Map(); // cid -> promise of the reload in flight (one at a time per chat)
+  function reloadConversation(conversationId) {
+    if (!reloading.has(conversationId)) reloading.set(conversationId, reloadConversationNow(conversationId).finally(() => reloading.delete(conversationId)));
+    return reloading.get(conversationId);
+  }
+  async function reloadConversationNow(conversationId) {
+    // Quiet fetch (no enterConversation / displayedMessages: nothing is marked read twice), merge into Snapchat's
+    // store like its snap player does, then page older once or twice when the newest page was only status lines.
+    let fetched = null, fetchedOk = false;
+    try { fetched = await quietFetchMessages(conversationId); fetchedOk = true; } catch (e) { trail("open-empty", "reload fetch failed " + conversationId + ": " + (e && e.message || e), "error"); }
+    const m = messaging();
+    const raw = rawEntries(fetched).map((x) => x[1]).filter(Boolean);
+    if (raw.length && typeof m.hydrateConversationWithMessages === "function") {
+      try { await m.hydrateConversationWithMessages(convIdObj(conversationId), raw); } catch (e) { trail("open-empty", "hydrate failed: " + (e && e.message || e), "error"); }
+    }
+    let entry = conversationEntry(conversationId);
+    let list = storeMessages(conversationId, entry);
+    for (let i = 0; i < 2 && !list.some((x) => x.kind !== "system") && entry && entry.hasMoreMessages && typeof m.paginateMessages === "function"; i++) {
+      try { await m.paginateMessages(convIdObj(conversationId)); } catch (e) { trail("open-empty", "paginate failed: " + (e && e.message || e), "error"); break; }
+      entry = conversationEntry(conversationId); list = storeMessages(conversationId, entry);
+    }
+    if (!list.length && raw.length) { // the store still lacks them: show what the server answered
+      for (const [id, r] of rawEntries(fetched)) { const n = toMessageSafe(conversationId, id, r); if (n) list.push(n); }
+      list.sort((a, b) => a.ts - b.ts);
+    }
+    // an answer from the server is trusted even when empty; a failed or timed-out fetch is not
+    const loaded = list.some((x) => x.kind !== "system") || (fetchedOk && !(entry && entry.hasMoreMessages)) || (!fetchedOk && !looksUnloaded(conversationId, list, entry));
+    trail("open-empty", "reload " + conversationId + " -> " + list.length + " messages, loaded " + loaded);
+    if (loaded && openConversations.has(conversationId)) safe("displayed", () => markDisplayed(conversationId));
+    return { messages: await withRetention(conversationId, list), hasMore: !!(entry && entry.hasMoreMessages), loaded };
+  }
   // A snap Ghost still lists can be gone from Snapchat's store (its message map is replaced with the newest page
   // whenever a chat is entered again, and a busy group pushes a snap out of that page fast). Snapchat's own snap
   // player fetches the ones it doesn't hold and merges them back in (main.js, search
@@ -2074,18 +2127,25 @@
       const type = safe("conv-type", () => ((messaging().feed || {})[conversationId] || {}).conversationType, undefined);
       if (typeof m.enterConversation === "function") await m.enterConversation(convIdObj(conversationId), type);
       sampleFirstMessageOnce(conversationId);
-      const entry = conversationEntry(conversationId);
+      let entry = conversationEntry(conversationId);
       // ...and it reports the newest message as seen via displayedMessages(conversationId, messageId) = read receipt,
       // exactly once per open like the real chat screen (only for the chat you actually opened)
       lastDisplayed.delete(conversationId);
-      safe("displayed", () => markDisplayed(conversationId));
-      const list = [];
-      if (entry && entry.messages && typeof entry.messages.entries === "function") {
-        for (const [id, msg] of entry.messages.entries()) { const n = toMessageSafe(conversationId, id, msg); if (n) list.push(n); }
+      let list = storeMessages(conversationId, entry);
+      // #738: nothing (or only status lines) in the store for a chat that has more: the fetch may still be landing.
+      // Give it a moment and read again; if it is still not there the UI gets loaded:false and retries by itself.
+      if (looksUnloaded(conversationId, list, entry)) {
+        await new Promise((r) => setTimeout(r, 400));
+        entry = conversationEntry(conversationId); list = storeMessages(conversationId, entry);
       }
-      list.sort((a, b) => a.ts - b.ts);
-      return { messages: await withRetention(conversationId, list), hasMore: !!(entry && entry.hasMoreMessages) };
+      const loaded = !looksUnloaded(conversationId, list, entry);
+      if (!loaded) trail("open-empty", "not loaded " + conversationId + ": " + list.length + " status lines, hasMore " + !!(entry && entry.hasMoreMessages) + (entry && entry.error ? ", error " + (entry.error.message || entry.error) : ""), "error");
+      else safe("displayed", () => markDisplayed(conversationId));
+      return { messages: await withRetention(conversationId, list), hasMore: !!(entry && entry.hasMoreMessages), loaded };
     },
+
+    // #738: the retry for an open that came back loaded:false (see reloadConversation)
+    reloadConversation(conversationId) { requireStore(); return reloadConversation(conversationId); },
 
     async closeConversation(conversationId) {
       requireStore();

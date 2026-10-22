@@ -9,6 +9,11 @@
 //   - If a build ships several versions at once (e.g. 1.15.0 inside 1.16.0), put the bullets of all of them
 //     in the newest entry.
 window.GHOST_WHATS_NEW = {
+  "1.19.7": {
+    items: [
+      { t: "Chats that have messages no longer open on \"No messages yet\": Ghost retries by itself and offers a Retry button." },
+    ],
+  },
   "1.19.6": {
     items: [
       { t: "Ghost desktop: chats open again on PCs where a graphics driver update left the chat pane blank." },

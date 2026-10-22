@@ -647,6 +647,8 @@ input, textarea {
   padding: 40px;
 }
 .gh-chat-empty svg { opacity: 0.5; }
+.gh-chat-empty-sm { flex: none; padding: 16px; }
+.gh-chat-retry { border: 0; border-radius: 16px; padding: 8px 20px; background: var(--gh-accent); color: #fff; font: inherit; font-weight: 600; }
 .gh-load-older {
   align-self: center;
   color: var(--gh-text-tertiary);

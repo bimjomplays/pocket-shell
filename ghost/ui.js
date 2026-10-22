@@ -250,6 +250,7 @@
     status: () => bridge.call("status"),
     listConversations: () => bridge.call("listConversations"),
     openConversation: (id) => bridge.call("openConversation", [id]),
+    reloadConversation: (id) => bridge.call("reloadConversation", [id], 40000), // #738: retry of an open that came back loaded:false
     closeConversation: (id) => bridge.call("closeConversation", [id]),
     loadOlder: (id) => bridge.call("loadOlder", [id]),
     sendText: (id, text, opts) => bridge.call("sendText", [id, text, opts || {}]),
@@ -1715,6 +1716,61 @@
     conv.backBadge.textContent = otherUnread > 99 ? "99+" : String(otherUnread);
   }
 
+  // #738: Ghost used to treat "the store had nothing when I asked" as "the chat is empty" and cached it. A chat counts as
+  // loaded when it has a real (non-status) message, or Snapchat's list says it has no newest message at all.
+  function chatEntryLoaded(ctx, id, entry) {
+    if (!entry) return false;
+    if (entry.confirmed || entry.messages.some((m) => m.kind !== "system")) return true;
+    const cd = ctx.state.convById.get(id);
+    return !!cd && !!cd.preview && cd.preview.kind === "none" && !entry.hasMore;
+  }
+  const CHAT_RETRY_MS = [800, 2500, 6000];
+  // The chat on screen came back loaded:false: say "Loading" (not "No messages yet"), retry quietly a few times, then
+  // offer a Retry button. Stops by itself once messages arrive any other way (conv._loadState cleared by the repaint).
+  async function retryChatLoad(ctx, conv, id, attempt) {
+    const live = () => ctx.state.currentConvId === id && conv._loadId === id && conv._loadState === "loading";
+    if (!live()) return;
+    if (attempt === 0) paintLoadState(ctx, conv, id);
+    if (attempt >= CHAT_RETRY_MS.length) { conv._loadState = "failed"; gtrail("open-empty gave up " + id); paintLoadState(ctx, conv, id); return; }
+    await new Promise((r) => setTimeout(r, CHAT_RETRY_MS[attempt]));
+    if (!live()) return;
+    let res = null;
+    try { res = await (api.reloadConversation ? api.reloadConversation(id) : api.openConversation(id)); } catch (e) { gtrail("open-empty retry " + (attempt + 1) + " failed " + id + " " + (e && e.message || e)); }
+    if (!live()) return;
+    if (res && res.loaded !== false) {
+      const entry = { messages: res.messages || [], hasMore: !!res.hasMore, confirmed: true };
+      ctx.state.messagesByConv.set(id, entry);
+      conv._loadState = null;
+      gtrail("open-empty healed " + id + " after " + (attempt + 1) + " retries");
+      conv.messages.classList.add("gh-opening");
+      renderMessageList(ctx, conv, entry, { stick: true, initial: true });
+      settleOpen(ctx, conv, id);
+      return;
+    }
+    if (res && res.messages && res.messages.length) paintLoadState(ctx, conv, id, { messages: res.messages, hasMore: !!res.hasMore });
+    retryChatLoad(ctx, conv, id, attempt + 1);
+  }
+  function paintLoadState(ctx, conv, id, entry) {
+    if (entry) conv._loadEntry = entry; else entry = conv._loadEntry || ctx.state.messagesByConv.get(id) || { messages: [], hasMore: false };
+    if (ctx.state.currentConvId === id) renderMessageList(ctx, conv, entry, { stick: true, initial: true });
+  }
+  function chatLoadEl(ctx, conv, partial) {
+    const failed = conv._loadState === "failed";
+    const e = el("div", "gh-chat-empty" + (partial ? " gh-chat-empty-sm" : ""));
+    e.dataset.loadState = conv._loadState;
+    if (!failed) { e.appendChild(el("div", "gh-spinner")); const t = el("div"); t.textContent = "Loading messages..."; e.appendChild(t); return e; }
+    const t = el("div"); t.textContent = "Couldn't load messages"; e.appendChild(t);
+    const b = el("button", "gh-chat-retry gh-press"); b.type = "button"; b.textContent = "Retry";
+    b.addEventListener("click", () => {
+      haptic("light");
+      const id = ctx.state.currentConvId; if (!id) return;
+      conv._loadState = "loading"; conv._loadId = id;
+      retryChatLoad(ctx, conv, id, 0);
+    });
+    e.appendChild(b);
+    return e;
+  }
+
   // Tapping a chat row that has an unopened snap plays every unopened received snap in it (oldest first, any
   // sender in a group), full-screen, before the chat itself appears - landing in the chat once the last one ends
   // or the user swipes down to stop early (openSnapPlaythrough's teardown calls onDone either way). Only the row
@@ -1729,7 +1785,7 @@
       try {
         const res = await api.openConversation(convId);
         entry = { messages: res.messages || [], hasMore: !!res.hasMore };
-        ctx.state.messagesByConv.set(convId, entry);
+        if (res.loaded !== false) ctx.state.messagesByConv.set(convId, entry);
       } catch (e) { openConversationScreen(ctx, convId); return; }
       const unopened = entry.messages.filter((m) => m.kind === "snap" && !isFromMe(ctx, m) && !m.opened && !m.onlyInApp && !phoneSnapMarked(convId, m.id));
       if (!unopened.length) { openConversationScreen(ctx, convId); return; }
@@ -1780,16 +1836,20 @@
     conv.unreadBoundaryComputed = false;
     conv.pinUntil = nowMs() + 4000; conv.userTouched = false; conv.atBottom = true;
     conv._olderFails = 0; conv._lastLoadOlderAt = 0; conv._anchor = null; clearTimeout(conv._winCheck); // per-chat, not carried over
+    conv._loadState = null; conv._loadId = null; conv._loadEntry = null; // #738
     conv._paintedConv = null; // never reuse bubbles from an earlier visit: closing a chat released their media
     conv.pendingUnreadForDivider = (convData && convData.unreadCount) || 0;
+    // #738: a cached entry with nothing in it for a chat that has messages is not "loaded" (an earlier open raced the
+    // fetch): load it again instead of trusting it, and never cache a result the bridge says is not loaded
     let entry = ctx.state.messagesByConv.get(conversationId);
-    if (!entry) {
+    if (!chatEntryLoaded(ctx, conversationId, entry)) {
+      entry = null;
       conv.messages.classList.add("gh-loading-skel");
-      try {
-        const res = await api.openConversation(conversationId);
-        entry = { messages: res.messages || [], hasMore: !!res.hasMore };
-        ctx.state.messagesByConv.set(conversationId, entry);
-      } catch (e) { entry = { messages: [], hasMore: false }; }
+      let res = null;
+      try { res = await api.openConversation(conversationId); } catch (e) { gtrail("open failed " + conversationId + " " + (e && e.message || e)); }
+      entry = { messages: (res && res.messages) || [], hasMore: !!(res && res.hasMore) };
+      if (res && res.loaded !== false) { entry.confirmed = true; ctx.state.messagesByConv.set(conversationId, entry); }
+      else if (ctx.state.currentConvId === conversationId) { conv._loadState = "loading"; conv._loadId = conversationId; conv._loadEntry = entry; setTimeout(() => retryChatLoad(ctx, conv, conversationId, 0), 0); }
       conv.messages.classList.remove("gh-loading-skel");
     } else {
       api.openConversation(conversationId).catch(() => {});
@@ -2019,7 +2079,9 @@
     if (paintKey && conv._paintedConv === paintKey) for (const w of conv.messages.querySelectorAll(".gh-msg-wrap")) if (w._sig && w._sigConv === paintKey) oldWraps.set(w.dataset.messageId, w);
     if (!(paintKey && conv._paintedConv === paintKey)) forgetChatVideos(conv.messages); // another chat's bubbles: all going
     conv._paintedConv = paintKey;
-    if (!groups.length && total === 0) frag.appendChild(chatEmptyEl());
+    if (conv._loadState && all.some((m) => m.kind !== "system")) conv._loadState = null; // real messages arrived: loaded (#738)
+    const loadingHere = !!conv._loadState && !!gxConv && conv._loadId === gxConv;
+    if (!groups.length && total === 0) frag.appendChild(loadingHere ? chatLoadEl(ctx, conv, false) : chatEmptyEl());
     for (const g of groups) {
       if (g.unreadDivider) { frag.appendChild(unreadSepEl()); continue; }
       if (g.daySep) frag.appendChild(sepEl(g.daySep));
@@ -2045,6 +2107,7 @@
       frag.appendChild(groupEl);
     }
     if (end === total && total) { const seen = seenRowEl(ctx, all); if (seen) frag.appendChild(seen); }
+    if (loadingHere && total > 0) frag.appendChild(chatLoadEl(ctx, conv, true)); // only status lines so far
     // keep what's on screen where it is: swapping every bubble (a new message, a read receipt...) briefly changes
     // the list's height, and the view used to jump up (device 2026-09-27: "sending a message makes me jump up")
     conv.stickUntil = nowMs() + 150; // the scroll events our own repaint causes aren't the user scrolling up
